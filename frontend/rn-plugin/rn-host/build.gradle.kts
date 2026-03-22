@@ -55,13 +55,14 @@ android {
 }
 
 dependencies {
-    // React Native 核心依赖
-    implementation(libs.react.android)
-    implementation(libs.react.hermes.android)
+    // React Native 核心依赖 - 使用 compileOnly，不打包进 AAR
+    // 最终由 composeApp 打包这些依赖
+    compileOnly(libs.react.android)
+    compileOnly(libs.react.hermes.android)
     
     // AndroidX
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.appcompat)
-    implementation(libs.material)
-    implementation(libs.kotlinx.coroutines.android)
+    compileOnly(libs.androidx.core.ktx)
+    compileOnly(libs.androidx.appcompat)
+    compileOnly(libs.material)
+    compileOnly(libs.kotlinx.coroutines.android)
 }
