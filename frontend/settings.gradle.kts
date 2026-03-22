@@ -55,6 +55,7 @@ include(":feature-media")
 include(":ksp-processor")
 include(":feature-common")
 //include(":rn-plugin")
+include(":rn-plugin:rn-source")
 include(":rn-plugin:rn-host")
 include(":rn-plugin:rn-android")
 

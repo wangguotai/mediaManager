@@ -32,6 +32,9 @@ android {
         buildConfig = true
     }
     
+    // 配置 jniLibs 源目录，包含 SO 库
+    sourceSets["main"].jniLibs.srcDir("src/main/jniLibs")
+    
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
