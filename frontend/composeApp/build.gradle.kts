@@ -87,7 +87,8 @@ android {
     sourceSets["main"].jniLibs.srcDirs(
         rootProject.file("rn-plugin/rn-source/extracted/react-android-0.82.1/jni"),
         rootProject.file("rn-plugin/rn-source/extracted/hermes-android-0.82.1/jni"),
-        rootProject.file("rn-plugin/rn-source/extracted/featureflags-stub/jni")  // 占位 SO
+        rootProject.file("rn-plugin/rn-source/extracted/featureflags-stub/jni"),  // 占位 SO
+        rootProject.file("rn-plugin/rn-source/extracted/hermes-executor-stub/jni")  // Hermes executor 占位
     )
     
     packaging {
