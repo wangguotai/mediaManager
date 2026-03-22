@@ -2,7 +2,7 @@
  * React Native AAR 打包脚本
  * 
  * 这个脚本配置 rn-host 模块的 AAR 输出
- * 并自动处理 rn-android 模块对 AAR 的依赖
+ * 最终的应用模块（如 composeApp）可以通过此 AAR 引入完整的 RN 功能
  */
 
 import java.io.File
@@ -15,7 +15,10 @@ project(":rn-plugin:rn-host") {
             group = "publishing"
             description = "将生成的 AAR 复制到输出目录"
             
-            val aarFile = file("build/outputs/aar/rn-host-release.aar")
+            // 明确声明依赖：必须在 bundleReleaseAar 之后运行
+            dependsOn("bundleReleaseAar")
+            
+            val aarFile = layout.buildDirectory.file("outputs/aar/rn-host-release.aar").get().asFile
             val outputDir = rootProject.file("rn-plugin/output")
             
             from(aarFile)
@@ -25,17 +28,9 @@ project(":rn-plugin:rn-host") {
             
             doFirst {
                 outputDir.mkdirs()
-            }
-            
-            onlyIf {
-                aarFile.exists()
-            }
-        }
-        
-        // 在 bundleReleaseAar 任务后执行复制
-        tasks.findByName("bundleReleaseAar")?.let { bundleTask ->
-            tasks.named("copyAarToOutput") {
-                dependsOn(bundleTask)
+                if (!aarFile.exists()) {
+                    throw GradleException("AAR file not found: ${aarFile.absolutePath}. Please run :rn-plugin:rn-host:bundleReleaseAar first.")
+                }
             }
         }
         
@@ -43,27 +38,11 @@ project(":rn-plugin:rn-host") {
         tasks.register("publishAar") {
             group = "publishing"
             description = "构建并发布 rn-host AAR"
-            dependsOn("assembleRelease", "copyAarToOutput")
+            dependsOn("copyAarToOutput")
         }
     }
 }
 
-// 配置 rn-android 模块依赖本地 AAR
-project(":rn-plugin:rn-android") {
-    afterEvaluate {
-        // 定义 AAR 文件路径
-        val aarFile = rootProject.file("rn-plugin/output/rn-host.aar")
-        
-        if (aarFile.exists()) {
-            // 如果 AAR 存在，添加依赖
-            dependencies {
-                add("implementation", files(aarFile))
-            }
-            
-            logger.lifecycle("[RN-Plugin] 已添加本地 AAR 依赖: ${aarFile.absolutePath}")
-        } else {
-            logger.warn("[RN-Plugin] 警告: 未找到 AAR 文件，请先运行 :rn-plugin:rn-host:publishAar")
-            logger.warn("[RN-Plugin] AAR 路径: ${aarFile.absolutePath}")
-        }
-    }
-}
+// 注意：rn-android 是 Library 模块，不能依赖本地 AAR 文件
+// 它应该使用 compileOnly(project(":rn-plugin:rn-host")) 来编译
+// 最终的应用模块需要同时依赖 rn-android 和 rn-host AAR

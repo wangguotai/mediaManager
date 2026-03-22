@@ -3,7 +3,6 @@ package com.wgt.rn.host
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import com.facebook.react.PackageList
 import com.facebook.react.ReactInstanceManager
 import com.facebook.react.ReactNativeHost
 import com.facebook.react.ReactPackage
@@ -18,6 +17,9 @@ import com.facebook.soloader.SoLoader
  * React Native 宿主管理器
  * 
  * 负责初始化 React Native 环境，管理 ReactInstance 生命周期
+ * 
+ * 注意：这是一个库模块，不直接使用 PackageList（RN CLI 自动生成）
+ * 外部模块可以通过 addPackage() 方法添加自定义 ReactPackage
  */
 class ReactHostManager private constructor() {
 
@@ -33,17 +35,24 @@ class ReactHostManager private constructor() {
     }
 
     private var reactNativeHost: ReactNativeHost? = null
-    private var reactInstanceManager: ReactInstanceManager? = null
     private var application: Application? = null
     private var isInitialized = false
+    private val externalPackages = mutableListOf<ReactPackage>()
 
     /**
      * 初始化 React Native 环境
+     * @param application Application 实例
+     * @param packages 可选的初始 ReactPackage 列表
      */
-    fun initialize(application: Application) {
+    @JvmOverloads
+    fun initialize(
+        application: Application,
+        packages: List<ReactPackage> = emptyList()
+    ) {
         if (isInitialized) return
         
         this.application = application
+        externalPackages.addAll(packages)
         
         // 初始化 SoLoader
         SoLoader.init(application, OpenSourceMergedSoMapping)
@@ -76,7 +85,50 @@ class ReactHostManager private constructor() {
     }
 
     /**
+     * 添加 ReactPackage（用于 rn-android 模块注册自定义 Package）
+     * 
+     * 注意：必须在 initialize() 之前调用，或者在添加后重新创建 ReactInstanceManager
+     * 
+     * @param packageInstance ReactPackage 实例
+     */
+    fun addPackage(packageInstance: ReactPackage) {
+        externalPackages.add(packageInstance)
+        
+        // 如果已经初始化，需要重新创建 ReactInstanceManager
+        if (isInitialized) {
+            reactNativeHost?.reactInstanceManager?.destroy()
+            application?.let { app ->
+                reactNativeHost = createReactNativeHost(app)
+            }
+        }
+    }
+
+    /**
+     * 添加多个 ReactPackage
+     */
+    fun addPackages(packages: List<ReactPackage>) {
+        externalPackages.addAll(packages)
+        
+        // 如果已经初始化，需要重新创建 ReactInstanceManager
+        if (isInitialized) {
+            reactNativeHost?.reactInstanceManager?.destroy()
+            application?.let { app ->
+                reactNativeHost = createReactNativeHost(app)
+            }
+        }
+    }
+
+    /**
+     * 获取已注册的 Packages 列表（用于调试）
+     */
+    fun getRegisteredPackages(): List<ReactPackage> {
+        return externalPackages.toList()
+    }
+
+    /**
      * 创建 ReactNativeHost
+     * 
+     * 注意：不依赖 PackageList，而是使用外部传入的 packages
      */
     private fun createReactNativeHost(application: Application): ReactNativeHost {
         return object : ReactNativeHost(application) {
@@ -85,11 +137,9 @@ class ReactHostManager private constructor() {
             }
 
             override fun getPackages(): List<ReactPackage> {
-                return PackageList(this).packages.apply {
-                    // 在这里添加额外的 packages
-                    // 注意：rn-android 模块的 MediaManagerPackage 会在运行时通过反射添加
-                    // 或者可以在这里手动添加，如果需要硬编码依赖
-                }
+                // 返回外部注册的 packages
+                // rn-android 等模块应该通过 addPackage() 方法注册自己的 packages
+                return externalPackages.toList()
             }
 
             override fun getJSMainModuleName(): String {
@@ -101,23 +151,15 @@ class ReactHostManager private constructor() {
             }
         }
     }
-    
-    /**
-     * 添加额外的 ReactPackage（用于 rn-android 模块注册自定义 Package）
-     */
-    fun addPackage(packageInstance: ReactPackage) {
-        val host = reactNativeHost as? MutableReactNativeHost
-        host?.addPackage(packageInstance)
-    }
 
     /**
      * 销毁 React Native 环境
      */
     fun destroy() {
-        reactInstanceManager?.destroy()
-        reactInstanceManager = null
+        reactNativeHost?.reactInstanceManager?.destroy()
         reactNativeHost = null
         application = null
+        externalPackages.clear()
         isInitialized = false
         instance = null
     }

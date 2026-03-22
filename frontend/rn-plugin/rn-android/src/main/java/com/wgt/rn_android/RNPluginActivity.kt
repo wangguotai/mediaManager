@@ -50,17 +50,16 @@ abstract class RNPluginActivity : AppCompatActivity() {
         viewManager = null
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         // 将返回键事件传递给 React Native
-        val reactContext = ReactHostManager.getInstance().getCurrentReactContext()
-        if (reactContext != null) {
-            // 检查 React Native 是否处理了返回键
-            val handled = reactContext.onBackPressed()
-            if (!handled) {
-                super.onBackPressed()
-            }
-        } else {
-            super.onBackPressed()
+        val reactInstanceManager = ReactHostManager.getInstance().getReactInstanceManager()
+        if (reactInstanceManager != null) {
+            // React Native 会处理返回键事件
+            // 如果 JS 侧调用了 BackHandler，会阻止默认行为
+            reactInstanceManager.onBackPressed()
         }
+        // 注意：不要调用 super.onBackPressed()
+        // ReactInstanceManager 会处理 Activity 的结束
     }
 }

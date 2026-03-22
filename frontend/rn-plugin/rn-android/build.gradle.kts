@@ -43,16 +43,14 @@ dependencies {
     implementation(libs.material)
     implementation(libs.kotlinx.coroutines.android)
     
-    // rn-host AAR 依赖（由 publish-aar.gradle.kts 脚本动态添加）
-    // 如果 AAR 不存在，使用 project 依赖作为开发模式
-    val aarFile = rootProject.file("rn-plugin/output/rn-host.aar")
-    if (aarFile.exists()) {
-        implementation(files(aarFile))
-        println("[RN-Android] 使用本地 AAR: ${aarFile.absolutePath}")
-    } else {
-        // 开发模式：直接依赖 rn-host 项目
-        println("[RN-Android] AAR 不存在，使用 project 依赖 (开发模式)")
-    }
+    // React Native 依赖（rn-android 需要直接编写 RN 代码）
+    compileOnly(libs.react.android)
+    compileOnly(libs.react.hermes.android)
+    
+    // rn-host 依赖
+    // 注意：rn-android 是 Library 模块，不能直接依赖 AAR 文件
+    // 只能使用 project 依赖，rn-host 的代码会在编译时可用
+    compileOnly(project(":rn-plugin:rn-host"))
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
