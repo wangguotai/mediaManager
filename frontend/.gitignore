@@ -1,2 +1,56 @@
+# Gradle
 .gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Kotlin
 .kotlin
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
+local.properties
+
+# RN Plugin - 自动生成/下载的文件
+rn-plugin/rn-source/react-native/
+rn-plugin/rn-source/build/
+rn-plugin/rn-source/outputs/
+rn-plugin/rn-source/extracted/
+rn-plugin/rn-host/src/main/jniLibs/
+rn-plugin/output/
+
+# RN Test App - Node.js
+rn-plugin/rn-test-app/node_modules/
+rn-plugin/rn-test-app/android/app/build/
+rn-plugin/rn-test-app/android/build/
+rn-plugin/rn-test-app/android/.gradle/
+rn-plugin/rn-test-app/*.log
+rn-plugin/rn-test-app/npm-debug.log*
+rn-plugin/rn-test-app/yarn-debug.log*
+rn-plugin/rn-test-app/yarn-error.log*
+
+# KSP Generated (keep for build, but can be regenerated)
+# build/generated/ksp/
+
+# Test reports
+*/build/reports/
+*/build/test-results/
+
+# Captures
+/captures
+.externalNativeBuild
+.cxx
