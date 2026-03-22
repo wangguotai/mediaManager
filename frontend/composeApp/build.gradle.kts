@@ -29,10 +29,28 @@ kotlin {
 
     sourceSets {
         androidMain.dependencies {
+            // RN 集成模块
             implementation(project(":rn-plugin:rn-android"))
-            implementation(files("../rn-plugin/output/rn-host.aar"))
-            implementation(libs.react.android)
-            implementation(libs.react.hermes.android)
+            
+            // RN 依赖 - 从 rn-source 获取
+            // 这样所有 RN 代码都通过 rn-source -> rn-host -> rn-android 传递
+            // 注意：使用 rootProject.file 获取路径
+            
+            // React Native 主库
+            val reactClasses = file("../rn-plugin/rn-source/extracted/react-android-0.82.1/classes.jar")
+            if (reactClasses.exists()) {
+                implementation(files(reactClasses))
+            } else {
+                implementation(libs.react.android)
+            }
+            
+            // Hermes 引擎
+            val hermesClasses = file("../rn-plugin/rn-source/extracted/hermes-android-0.82.1/classes.jar")
+            if (hermesClasses.exists()) {
+                implementation(files(hermesClasses))
+            } else {
+                implementation(libs.react.hermes.android)
+            }
         }
         commonMain.dependencies {
             implementation(projects.shared)
@@ -40,9 +58,6 @@ kotlin {
             implementation(projects.featureCommon)
             // 对应的生成资源强要求，必须有该依赖
             implementation(libs.compose.components.resources)
-            // Coil 3 for KMP image loading
-//            implementation(libs.coil.compose)
-//            implementation(libs.coil.compose.core)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
@@ -83,6 +98,13 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    
+    // 配置 RN SO 库路径
+    sourceSets["main"].jniLibs.srcDirs(
+        project(":rn-plugin:rn-source").file("extracted/react-android-0.82.1/jni"),
+        project(":rn-plugin:rn-source").file("extracted/hermes-android-0.82.1/jni")
+    )
+    
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
