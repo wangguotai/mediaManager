@@ -84,6 +84,9 @@ dependencies {
     // Soloader
     api("com.facebook.soloader:soloader:0.12.1")
     
+    // Facebook Infer 注解 (RN 依赖)
+    api("com.facebook.infer.annotation:infer-annotation:0.18.0")
+    
     // AndroidX
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
