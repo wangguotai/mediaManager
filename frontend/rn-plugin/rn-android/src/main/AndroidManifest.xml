@@ -5,5 +5,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <application>
+        <activity
+                android:exported="true"
+                android:name="com.wgt.rn_android.RNPluginActivity">
+        </activity>
+    </application>
 
 </manifest>

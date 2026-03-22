@@ -30,6 +30,9 @@ kotlin {
     sourceSets {
         androidMain.dependencies {
             implementation(project(":rn-plugin:rn-android"))
+            implementation(files("../rn-plugin/output/rn-host.aar"))
+            implementation(libs.react.android)
+            implementation(libs.react.hermes.android)
         }
         commonMain.dependencies {
             implementation(projects.shared)

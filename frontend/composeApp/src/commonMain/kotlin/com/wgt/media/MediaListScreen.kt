@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wgt.common.util.formatBytesToMB
+import com.wgt.rn.RNTestButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.launch
@@ -103,6 +104,9 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                                 contentDescription = "刷新"
                             )
                         }
+                        
+                        // RN 测试按钮（仅 Android 显示）
+                        RNTestButton()
                     }
                 )
 

@@ -6,6 +6,7 @@ import android.os.Bundle
 import com.wgt.app.architecture.lifecycle.AndroidAppLifecycle
 import com.wgt.platform.AppContext
 import com.wgt.platform.setCurrentActivity
+import com.wgt.rn_android.RNPluginManager
 
 /**
  * 媒体管理器应用类
@@ -63,6 +64,8 @@ class MediaApplication : Application() {
         // 初始化应用生命周期（触发AppLaunched）
         AndroidAppLifecycle.initialize()
 
+        // 初始化 React Native
+        RNPluginManager.getInstance().initialize(this)
 
         // 可以在这里初始化其他全局组件
         // 例如：数据库、网络客户端、日志系统等
