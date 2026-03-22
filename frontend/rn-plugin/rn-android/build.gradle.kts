@@ -43,14 +43,10 @@ dependencies {
     implementation(libs.material)
     implementation(libs.kotlinx.coroutines.android)
     
-    // React Native 依赖（rn-android 需要直接编写 RN 代码）
-    compileOnly(libs.react.android)
-    compileOnly(libs.react.hermes.android)
+    // rn-host - 使用 implementation 确保传递
+    implementation(project(":rn-plugin:rn-host"))
     
-    // rn-host 依赖
-    // 注意：rn-android 是 Library 模块，不能直接依赖 AAR 文件
-    // 只能使用 project 依赖，rn-host 的代码会在编译时可用
-    compileOnly(project(":rn-plugin:rn-host"))
+    // RN 依赖已由 rn-host 传递，无需重复添加
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

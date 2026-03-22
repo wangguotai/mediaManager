@@ -2,8 +2,8 @@
  * React Native 宿主模块
  * 
  * 这个模块：
- * 1. 编译时依赖 RN 源码（解压后的 classes.jar）
- * 2. 运行时由最终应用提供 RN SO 库
+ * 1. 依赖 RN 源码（解压后的 classes.jar）
+ * 2. 提供 ReactHostManager 等核心类
  * 3. 其他模块只需要依赖 rn-host
  */
 
@@ -61,28 +61,28 @@ android {
 }
 
 // 从 rn-source 获取解压后的路径
-val rnSourceExtracted = project(":rn-plugin:rn-source").file("extracted")
-val reactExtracted = rnSourceExtracted.resolve("react-android-0.82.1")
-val hermesExtracted = rnSourceExtracted.resolve("hermes-android-0.82.1")
+val rnSourceExtracted = rootProject.file("rn-plugin/rn-source/extracted")
+val reactClasses = rnSourceExtracted.resolve("react-android-0.82.1/classes.jar")
+val hermesClasses = rnSourceExtracted.resolve("hermes-android-0.82.1/classes.jar")
 
 dependencies {
-    // 编译时依赖 RN classes.jar（不包含在最终 AAR 中）
-    if (reactExtracted.resolve("classes.jar").exists()) {
-        println("📦 使用 rn-source 解压的 React Native")
-        compileOnly(files(reactExtracted.resolve("classes.jar")))
+    // 依赖 RN classes.jar（使用 api 让依赖传递）
+    if (reactClasses.exists()) {
+        println("📦 rn-host: 使用 rn-source 的 React Native")
+        api(files(reactClasses))
     } else {
-        println("⚠️  rn-source 解压文件不存在，使用 Maven 依赖")
-        compileOnly(libs.react.android)
+        println("⚠️  rn-host: 使用 Maven RN")
+        api(libs.react.android)
     }
     
-    if (hermesExtracted.resolve("classes.jar").exists()) {
-        compileOnly(files(hermesExtracted.resolve("classes.jar")))
+    if (hermesClasses.exists()) {
+        api(files(hermesClasses))
     } else {
-        compileOnly(libs.react.hermes.android)
+        api(libs.react.hermes.android)
     }
     
     // Soloader
-    compileOnly("com.facebook.soloader:soloader:0.12.1")
+    api("com.facebook.soloader:soloader:0.12.1")
     
     // AndroidX
     implementation(libs.androidx.core.ktx)

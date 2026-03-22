@@ -30,27 +30,11 @@ kotlin {
     sourceSets {
         androidMain.dependencies {
             // RN 集成模块
+            // 依赖链: composeApp -> rn-android -> rn-host -> RN
             implementation(project(":rn-plugin:rn-android"))
             
-            // RN 依赖 - 从 rn-source 获取
-            // 这样所有 RN 代码都通过 rn-source -> rn-host -> rn-android 传递
-            // 注意：使用 rootProject.file 获取路径
-            
-            // React Native 主库
-            val reactClasses = file("../rn-plugin/rn-source/extracted/react-android-0.82.1/classes.jar")
-            if (reactClasses.exists()) {
-                implementation(files(reactClasses))
-            } else {
-                implementation(libs.react.android)
-            }
-            
-            // Hermes 引擎
-            val hermesClasses = file("../rn-plugin/rn-source/extracted/hermes-android-0.82.1/classes.jar")
-            if (hermesClasses.exists()) {
-                implementation(files(hermesClasses))
-            } else {
-                implementation(libs.react.hermes.android)
-            }
+            // RN SO 库配置 - 从 rn-source 解压的目录
+            // 注意：需要在 Android 闭包中配置 jniLibs.srcDirs
         }
         commonMain.dependencies {
             implementation(projects.shared)
@@ -99,10 +83,10 @@ android {
         versionName = "1.0"
     }
     
-    // 配置 RN SO 库路径
+    // 配置 RN SO 库路径 - 从 rn-source 解压的 jni 目录
     sourceSets["main"].jniLibs.srcDirs(
-        project(":rn-plugin:rn-source").file("extracted/react-android-0.82.1/jni"),
-        project(":rn-plugin:rn-source").file("extracted/hermes-android-0.82.1/jni")
+        rootProject.file("rn-plugin/rn-source/extracted/react-android-0.82.1/jni"),
+        rootProject.file("rn-plugin/rn-source/extracted/hermes-android-0.82.1/jni")
     )
     
     packaging {
