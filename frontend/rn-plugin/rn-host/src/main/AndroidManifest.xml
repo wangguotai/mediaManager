@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- React Native 需要的权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    
+    <!-- 开发调试权限 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:usesCleartextTraffic="true">
+        
+        <!-- React Native Dev Settings Activity -->
+        <activity
+            android:name="com.facebook.react.devsupport.DevSettingsActivity"
+            android:exported="false" />
+            
+    </application>
+
+</manifest>

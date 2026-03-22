@@ -76,3 +76,4 @@ if (isAndroidBuild) {
         true
     }
 }
+include(":rn-android")
