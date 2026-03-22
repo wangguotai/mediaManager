@@ -86,7 +86,8 @@ android {
     // 配置 RN SO 库路径 - 从 rn-source 解压的 jni 目录
     sourceSets["main"].jniLibs.srcDirs(
         rootProject.file("rn-plugin/rn-source/extracted/react-android-0.82.1/jni"),
-        rootProject.file("rn-plugin/rn-source/extracted/hermes-android-0.82.1/jni")
+        rootProject.file("rn-plugin/rn-source/extracted/hermes-android-0.82.1/jni"),
+        rootProject.file("rn-plugin/rn-source/extracted/featureflags-stub/jni")  // 占位 SO
     )
     
     packaging {
