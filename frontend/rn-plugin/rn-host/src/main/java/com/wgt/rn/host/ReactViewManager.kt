@@ -1,15 +1,20 @@
 package com.wgt.rn.host
 
 import android.content.Context
+import android.os.Bundle
 import android.view.ViewGroup
-import com.facebook.react.ReactActivity
 import com.facebook.react.ReactRootView
 import com.facebook.react.bridge.ReactContext
+import com.facebook.react.bridge.WritableMap
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 /**
  * React Native View 管理器
  * 
  * 用于在原生 Android 应用中嵌入 React Native 视图
+ * 
+ * 注意：RN 0.82+ 新架构推荐使用 ReactHost API，但为了兼容性，
+ * 这里使用传统的 ReactRootView + ReactNativeHost 方式
  */
 class ReactViewManager(private val context: Context) {
 
@@ -23,15 +28,31 @@ class ReactViewManager(private val context: Context) {
      */
     fun createReactRootView(
         moduleName: String,
-        initialProps: Map<String, Any>? = null
+        initialProps: Bundle? = null
     ): ReactRootView {
-        val reactHostManager = ReactHostManager.getInstance()
-        val reactInstanceManager = reactHostManager.getReactInstanceManager()
-            ?: throw IllegalStateException("ReactHostManager not initialized")
+        // 确保 ReactHostManager 已初始化
+        if (!ReactHostManager.getInstance().isInitialized()) {
+            throw IllegalStateException("ReactHostManager not initialized. Call initialize() first.")
+        }
+
+        val reactNativeHost = ReactHostManager.getInstance().getReactNativeHost()
+            ?: throw IllegalStateException("ReactNativeHost not available")
 
         reactRootView = ReactRootView(context).apply {
-            startReactApplication(reactInstanceManager, moduleName, initialProps?.toBundle())
+            // RN 0.82+：使用 ReactNativeHost 初始化
+            startReactApplication(reactNativeHost.reactInstanceManager, moduleName, initialProps)
         }
+
+        // 监听 ReactContext 初始化
+        reactNativeHost.reactInstanceManager.addReactInstanceEventListener(
+            object : com.facebook.react.ReactInstanceManager.ReactInstanceEventListener {
+                override fun onReactContextInitialized(reactContext: ReactContext) {
+                    this@ReactViewManager.reactContext = reactContext
+                    // 初始化完成后移除监听器
+                    reactNativeHost.reactInstanceManager.removeReactInstanceEventListener(this)
+                }
+            }
+        )
 
         return reactRootView!!
     }
@@ -45,7 +66,8 @@ class ReactViewManager(private val context: Context) {
             (it.parent as? ViewGroup)?.removeView(it)
         }
 
-        val view = createReactRootView(moduleName, initialProps)
+        val bundle = initialProps?.toBundle()
+        val view = createReactRootView(moduleName, bundle)
         container.addView(view, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
@@ -75,10 +97,9 @@ class ReactViewManager(private val context: Context) {
      */
     fun sendEvent(eventName: String, params: Map<String, Any>?) {
         val context = reactContext ?: ReactHostManager.getInstance().getCurrentReactContext() ?: return
-        val catalystInstance = context.catalystInstance
         
         // 使用 RCTDeviceEventEmitter 发送事件
-        context.getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             ?.emit(eventName, params?.toWritableMap())
     }
 
@@ -98,4 +119,48 @@ class ReactViewManager(private val context: Context) {
             }
         })
     }
+
+    /**
+     * 将 Map 转换为 WritableMap
+     */
+    private fun Map<String, Any>.toWritableMap(): WritableMap {
+        val map = com.facebook.react.bridge.Arguments.createMap()
+        forEach { (key, value) ->
+            when (value) {
+                is String -> map.putString(key, value)
+                is Int -> map.putInt(key, value)
+                is Double -> map.putDouble(key, value)
+                is Boolean -> map.putBoolean(key, value)
+                is Map<*, *> -> @Suppress("UNCHECKED_CAST")
+                    map.putMap(key, (value as Map<String, Any>).toWritableMap())
+                else -> map.putString(key, value.toString())
+            }
+        }
+        return map
+    }
+
+    /**
+     * 将 Map 转换为 Bundle
+     */
+    private fun Map<String, Any>.toBundle(): Bundle {
+        val bundle = Bundle()
+        forEach { (key, value) ->
+            when (value) {
+                is String -> bundle.putString(key, value)
+                is Int -> bundle.putInt(key, value)
+                is Long -> bundle.putLong(key, value)
+                is Double -> bundle.putDouble(key, value)
+                is Boolean -> bundle.putBoolean(key, value)
+                else -> bundle.putString(key, value.toString())
+            }
+        }
+        return bundle
+    }
+}
+
+/**
+ * 检查 ReactHostManager 是否已初始化
+ */
+fun ReactHostManager.isInitialized(): Boolean {
+    return this.getReactNativeHost() != null
 }

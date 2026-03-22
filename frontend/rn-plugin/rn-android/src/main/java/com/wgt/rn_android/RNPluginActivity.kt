@@ -28,6 +28,10 @@ abstract class RNPluginActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 通知 ReactHostManager Activity 已创建
+        // 这会触发 ReactInstanceManager.createReactContextInBackground()
+        ReactHostManager.getInstance().onActivityCreate(this)
+
         // 创建容器
         container = FrameLayout(this).apply {
             id = android.R.id.content

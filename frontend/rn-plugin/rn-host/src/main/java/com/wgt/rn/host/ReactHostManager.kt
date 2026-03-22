@@ -8,8 +8,6 @@ import com.facebook.react.ReactNativeHost
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.ReactContext
 import com.facebook.react.common.LifecycleState
-import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint
-import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 
@@ -60,7 +58,25 @@ class ReactHostManager private constructor() {
         // 创建 ReactNativeHost
         reactNativeHost = createReactNativeHost(application)
         
+        // 预创建 ReactInstanceManager（在后台线程）
+        // 注意：不在这里调用 createReactContextInBackground，而是在有 Activity 时调用
+        reactNativeHost?.reactInstanceManager
+        
         isInitialized = true
+    }
+
+    /**
+     * 在 Activity 创建时调用，启动 React 上下文
+     * 
+     * @param activity 当前 Activity
+     */
+    fun onActivityCreate(activity: Activity) {
+        val reactInstanceManager = reactNativeHost?.reactInstanceManager ?: return
+        
+        // 如果还没有创建 ReactContext，则在 Activity 中启动
+        if (!reactInstanceManager.hasStartedCreatingInitialContext()) {
+            reactInstanceManager.createReactContextInBackground()
+        }
     }
 
     /**
@@ -82,6 +98,13 @@ class ReactHostManager private constructor() {
      */
     fun getCurrentReactContext(): ReactContext? {
         return reactNativeHost?.reactInstanceManager?.currentReactContext
+    }
+    
+    /**
+     * 检查是否已初始化
+     */
+    fun isInitialized(): Boolean {
+        return isInitialized && reactNativeHost != null
     }
 
     /**
@@ -133,7 +156,8 @@ class ReactHostManager private constructor() {
     private fun createReactNativeHost(application: Application): ReactNativeHost {
         return object : ReactNativeHost(application) {
             override fun getUseDeveloperSupport(): Boolean {
-                return BuildConfig.DEBUG
+                // 使用自动生成的 BuildConfig
+                return com.wgt.rn.host.BuildConfig.DEBUG
             }
 
             override fun getPackages(): List<ReactPackage> {
