@@ -14,3 +14,6 @@ plugins {
     alias(libs.plugins.androidLint) apply false
 //    alias(libs.plugins.protobuf) apply false
 }
+
+// 应用 React Native AAR 发布脚本
+apply(from = "rn-plugin/scripts/publish-aar.gradle.kts")

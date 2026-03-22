@@ -55,6 +55,7 @@ include(":feature-media")
 include(":ksp-processor")
 include(":feature-common")
 //include(":rn-plugin")
+include(":rn-plugin:rn-host")
 include(":rn-plugin:rn-android")
 
 // 仅在 Android 编译时动态包含 aar-* 模块
