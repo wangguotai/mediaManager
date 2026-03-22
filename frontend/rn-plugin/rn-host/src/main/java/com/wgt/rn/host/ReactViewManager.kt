@@ -9,115 +9,78 @@ import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 
 /**
- * React Native View 管理器
+ * React Native View 管理器 (兼容模式)
  * 
- * 用于在原生 Android 应用中嵌入 React Native 视图
- * 
- * 注意：RN 0.82+ 新架构推荐使用 ReactHost API，但为了兼容性，
- * 这里使用传统的 ReactRootView + ReactNativeHost 方式
+ * 使用 ReactRootView 和 ReactNativeHost
  */
 class ReactViewManager(private val context: Context) {
 
     private var reactRootView: ReactRootView? = null
-    private var reactContext: ReactContext? = null
 
     /**
-     * 创建 ReactRootView
-     * @param moduleName React Native 模块名称（在 AppRegistry.registerComponent 中注册的名称）
+     * 创建并附加 ReactRootView
+     * @param container 容器 ViewGroup
+     * @param moduleName React Native 模块名称
      * @param initialProps 传递给 React Native 的初始属性
      */
-    fun createReactRootView(
+    fun attachToContainer(
+        container: ViewGroup,
         moduleName: String,
-        initialProps: Bundle? = null
-    ): ReactRootView {
+        initialProps: Map<String, Any>? = null
+    ) {
         // 确保 ReactHostManager 已初始化
-        if (!ReactHostManager.getInstance().isInitialized()) {
-            throw IllegalStateException("ReactHostManager not initialized. Call initialize() first.")
-        }
-
         val reactNativeHost = ReactHostManager.getInstance().getReactNativeHost()
-            ?: throw IllegalStateException("ReactNativeHost not available")
+            ?: throw IllegalStateException("ReactHostManager not initialized. Call initialize() first.")
 
+        // 移除之前的视图
+        reactRootView?.let { rootView ->
+            (rootView.parent as? ViewGroup)?.removeView(rootView)
+            rootView.unmountReactApplication()
+        }
+
+        // 创建 ReactRootView
         reactRootView = ReactRootView(context).apply {
-            // RN 0.82+：使用 ReactNativeHost 初始化
-            startReactApplication(reactNativeHost.reactInstanceManager, moduleName, initialProps)
+            // 注意：这里会触发 ReactInstanceManager 的创建
+            // 但由于 RN 0.82 新架构限制，可能只能在 Activity 上下文中工作
+            startReactApplication(
+                reactNativeHost.reactInstanceManager,
+                moduleName,
+                initialProps?.toBundle()
+            )
         }
 
-        // 监听 ReactContext 初始化
-        reactNativeHost.reactInstanceManager.addReactInstanceEventListener(
-            object : com.facebook.react.ReactInstanceManager.ReactInstanceEventListener {
-                override fun onReactContextInitialized(reactContext: ReactContext) {
-                    this@ReactViewManager.reactContext = reactContext
-                    // 初始化完成后移除监听器
-                    reactNativeHost.reactInstanceManager.removeReactInstanceEventListener(this)
-                }
-            }
-        )
-
-        return reactRootView!!
-    }
-
-    /**
-     * 将 ReactRootView 添加到容器
-     */
-    fun attachToContainer(container: ViewGroup, moduleName: String, initialProps: Map<String, Any>? = null) {
-        // 如果已经存在，先移除
-        reactRootView?.let {
-            (it.parent as? ViewGroup)?.removeView(it)
-        }
-
-        val bundle = initialProps?.toBundle()
-        val view = createReactRootView(moduleName, bundle)
-        container.addView(view, ViewGroup.LayoutParams(
+        // 添加到容器
+        container.addView(reactRootView, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
     }
 
     /**
-     * 从容器中移除 ReactRootView
+     * 从容器中移除
      */
     fun detachFromContainer(container: ViewGroup) {
-        reactRootView?.let {
-            container.removeView(it)
+        reactRootView?.let { rootView ->
+            container.removeView(rootView)
         }
     }
 
     /**
-     * 销毁 ReactRootView
+     * 销毁
      */
     fun destroy() {
         reactRootView?.unmountReactApplication()
         reactRootView = null
-        reactContext = null
     }
 
     /**
      * 发送事件到 React Native
      */
     fun sendEvent(eventName: String, params: Map<String, Any>?) {
-        val context = reactContext ?: ReactHostManager.getInstance().getCurrentReactContext() ?: return
+        val context = ReactHostManager.getInstance().getCurrentReactContext() ?: return
         
-        // 使用 RCTDeviceEventEmitter 发送事件
         context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             ?.emit(eventName, params?.toWritableMap())
-    }
-
-    /**
-     * 设置 ReactContext 回调
-     */
-    fun setReactContextListener(listener: (ReactContext) -> Unit) {
-        val reactHostManager = ReactHostManager.getInstance()
-        val reactInstanceManager = reactHostManager.getReactInstanceManager() ?: return
-        
-        reactInstanceManager.addReactInstanceEventListener(object : 
-            com.facebook.react.ReactInstanceManager.ReactInstanceEventListener {
-            override fun onReactContextInitialized(context: ReactContext) {
-                reactContext = context
-                listener(context)
-                reactInstanceManager.removeReactInstanceEventListener(this)
-            }
-        })
     }
 
     /**

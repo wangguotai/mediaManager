@@ -2,22 +2,15 @@ package com.wgt.rn.host
 
 import android.app.Activity
 import android.app.Application
-import android.content.Context
-import com.facebook.react.ReactInstanceManager
 import com.facebook.react.ReactNativeHost
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.ReactContext
-import com.facebook.react.common.LifecycleState
-import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 
 /**
- * React Native 宿主管理器
+ * React Native 宿主管理器 (兼容模式)
  * 
- * 负责初始化 React Native 环境，管理 ReactInstance 生命周期
- * 
- * 注意：这是一个库模块，不直接使用 PackageList（RN CLI 自动生成）
- * 外部模块可以通过 addPackage() 方法添加自定义 ReactPackage
+ * 使用 ReactNativeHost 的受支持方法
  */
 class ReactHostManager private constructor() {
 
@@ -53,30 +46,12 @@ class ReactHostManager private constructor() {
         externalPackages.addAll(packages)
         
         // 初始化 SoLoader
-        SoLoader.init(application, OpenSourceMergedSoMapping)
+        SoLoader.init(application, false)
         
-        // 创建 ReactNativeHost
+        // 创建 ReactNativeHost（但不立即获取 ReactInstanceManager）
         reactNativeHost = createReactNativeHost(application)
         
-        // 预创建 ReactInstanceManager（在后台线程）
-        // 注意：不在这里调用 createReactContextInBackground，而是在有 Activity 时调用
-        reactNativeHost?.reactInstanceManager
-        
         isInitialized = true
-    }
-
-    /**
-     * 在 Activity 创建时调用，启动 React 上下文
-     * 
-     * @param activity 当前 Activity
-     */
-    fun onActivityCreate(activity: Activity) {
-        val reactInstanceManager = reactNativeHost?.reactInstanceManager ?: return
-        
-        // 如果还没有创建 ReactContext，则在 Activity 中启动
-        if (!reactInstanceManager.hasStartedCreatingInitialContext()) {
-            reactInstanceManager.createReactContextInBackground()
-        }
     }
 
     /**
@@ -84,13 +59,6 @@ class ReactHostManager private constructor() {
      */
     fun getReactNativeHost(): ReactNativeHost? {
         return reactNativeHost
-    }
-
-    /**
-     * 获取 ReactInstanceManager
-     */
-    fun getReactInstanceManager(): ReactInstanceManager? {
-        return reactNativeHost?.reactInstanceManager
     }
 
     /**
@@ -108,22 +76,10 @@ class ReactHostManager private constructor() {
     }
 
     /**
-     * 添加 ReactPackage（用于 rn-android 模块注册自定义 Package）
-     * 
-     * 注意：必须在 initialize() 之前调用，或者在添加后重新创建 ReactInstanceManager
-     * 
-     * @param packageInstance ReactPackage 实例
+     * 添加 ReactPackage
      */
     fun addPackage(packageInstance: ReactPackage) {
         externalPackages.add(packageInstance)
-        
-        // 如果已经初始化，需要重新创建 ReactInstanceManager
-        if (isInitialized) {
-            reactNativeHost?.reactInstanceManager?.destroy()
-            application?.let { app ->
-                reactNativeHost = createReactNativeHost(app)
-            }
-        }
     }
 
     /**
@@ -131,18 +87,10 @@ class ReactHostManager private constructor() {
      */
     fun addPackages(packages: List<ReactPackage>) {
         externalPackages.addAll(packages)
-        
-        // 如果已经初始化，需要重新创建 ReactInstanceManager
-        if (isInitialized) {
-            reactNativeHost?.reactInstanceManager?.destroy()
-            application?.let { app ->
-                reactNativeHost = createReactNativeHost(app)
-            }
-        }
     }
 
     /**
-     * 获取已注册的 Packages 列表（用于调试）
+     * 获取已注册的 Packages 列表
      */
     fun getRegisteredPackages(): List<ReactPackage> {
         return externalPackages.toList()
@@ -150,19 +98,14 @@ class ReactHostManager private constructor() {
 
     /**
      * 创建 ReactNativeHost
-     * 
-     * 注意：不依赖 PackageList，而是使用外部传入的 packages
      */
     private fun createReactNativeHost(application: Application): ReactNativeHost {
         return object : ReactNativeHost(application) {
             override fun getUseDeveloperSupport(): Boolean {
-                // 使用自动生成的 BuildConfig
                 return com.wgt.rn.host.BuildConfig.DEBUG
             }
 
             override fun getPackages(): List<ReactPackage> {
-                // 返回外部注册的 packages
-                // rn-android 等模块应该通过 addPackage() 方法注册自己的 packages
                 return externalPackages.toList()
             }
 
@@ -180,7 +123,6 @@ class ReactHostManager private constructor() {
      * 销毁 React Native 环境
      */
     fun destroy() {
-        reactNativeHost?.reactInstanceManager?.destroy()
         reactNativeHost = null
         application = null
         externalPackages.clear()
