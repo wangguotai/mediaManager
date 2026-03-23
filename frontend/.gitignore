@@ -42,7 +42,7 @@ rn-plugin/rn-test-app/*.log
 rn-plugin/rn-test-app/npm-debug.log*
 rn-plugin/rn-test-app/yarn-debug.log*
 rn-plugin/rn-test-app/yarn-error.log*
-
+rn-plugin/packages/*
 # KSP Generated (keep for build, but can be regenerated)
 # build/generated/ksp/
 

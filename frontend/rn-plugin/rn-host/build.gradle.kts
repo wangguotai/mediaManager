@@ -1,10 +1,7 @@
 /**
  * React Native 宿主模块
  * 
- * 这个模块：
- * 1. 依赖 RN 源码（解压后的 classes.jar）
- * 2. 提供 ReactHostManager 等核心类
- * 3. 其他模块只需要依赖 rn-host
+ * 依赖 MyApp/android/rn-aar 生成的 AAR
  */
 
 plugins {
@@ -60,32 +57,28 @@ android {
     }
 }
 
-// 从 rn-source 获取解压后的路径
-val rnSourceExtracted = rootProject.file("rn-plugin/rn-source/extracted")
-val reactClasses = rnSourceExtracted.resolve("react-android-0.82.1/classes.jar")
-val hermesClasses = rnSourceExtracted.resolve("hermes-android-0.82.1/classes.jar")
+// 查找 MyApp 生成的 AAR
+val myAppAar = file("libs/rn-aar-release.aar")
+val myAppAarDebug = file("libs/rn-aar-debug.aar")
 
 dependencies {
-    // 依赖 RN classes.jar（使用 api 让依赖传递）
-    if (reactClasses.exists()) {
-        println("📦 rn-host: 使用 rn-source 的 React Native")
-        api(files(reactClasses))
+    // 优先使用 MyApp 生成的 AAR
+    if (myAppAar.exists()) {
+        println("📦 使用 MyApp 生成的 RN AAR: ${myAppAar.absolutePath}")
+        implementation(files(myAppAar))
+    } else if (myAppAarDebug.exists()) {
+        println("📦 使用 MyApp 生成的 RN AAR (Debug): ${myAppAarDebug.absolutePath}")
+        implementation(files(myAppAarDebug))
     } else {
-        println("⚠️  rn-host: 使用 Maven RN")
-        api(libs.react.android)
+        println("⚠️  MyApp AAR 不存在，使用 Maven 依赖")
+        println("   请运行: cd MyApp/android && ./gradlew :rn-aar:assembleRelease")
+        
+
     }
-    
-    if (hermesClasses.exists()) {
-        api(files(hermesClasses))
-    } else {
-        api(libs.react.hermes.android)
-    }
-    
-    // Soloader
-    api("com.facebook.soloader:soloader:0.12.1")
-    
-    // Facebook Infer 注解 (RN 依赖)
-    api("com.facebook.infer.annotation:infer-annotation:0.18.0")
+
+    // 降级方案：使用 Maven 依赖
+    implementation(libs.react.android)
+    implementation(libs.react.hermes.android)
     
     // AndroidX
     implementation(libs.androidx.core.ktx)
