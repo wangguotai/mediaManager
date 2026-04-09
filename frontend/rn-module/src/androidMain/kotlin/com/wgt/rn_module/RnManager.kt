@@ -1,19 +1,18 @@
 package com.wgt.rn_module
 
 import android.app.Application
+import com.wgt.architecture.di.annotations.ManagerProvider
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactInstanceEventListener
 import com.facebook.react.bridge.ReactContext
 import com.facebook.react.internal.featureflags.ReactNativeFeatureFlags
 import com.facebook.react.internal.featureflags.ReactNativeFeatureFlagsDefaults
-import com.facebook.react.runtime.ReactHostImpl
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
-import com.wgt.architecture.manager.IManager
+import com.wgt.architecture.dispatchers.DispatcherProvider
 import com.wgt.platform.logger.logger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
-import com.wgt.architecture.dispatchers.DispatcherProvider
 
 /**
  * RN Manager 实现 - Android 平台
@@ -22,7 +21,17 @@ import com.wgt.architecture.dispatchers.DispatcherProvider
  * 1. 实现 IManager 接口，支持完整的生命周期管理
  * 2. 使用 suspend 函数支持协程
  * 3. 支持多 Host 管理（多 Bundle 场景）
+ * 
+ * 使用 @ManagerProvider 注解，KSP 将自动生成：
+ * - expect/actual RnManagerProvider
+ * - initRnManager() 注册函数
  */
+@ManagerProvider(
+    interfaceClass = "com.wgt.rn_module.IRnManager",
+    initFunctionName = "initRnManager",
+    providerName = "RnManagerProvider",
+    requiresApplication = true
+)
 internal class RnManager private constructor(
     private val application: Application
 ) : IRnManager {
