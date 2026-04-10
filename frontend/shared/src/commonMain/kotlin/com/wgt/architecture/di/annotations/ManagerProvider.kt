@@ -6,45 +6,54 @@ import kotlin.annotation.AnnotationTarget
 
 /**
  * 标记一个类为 Manager 提供者
- * KSP 将自动生成 Provider 代码和注册函数
+ * KSP 将自动生成注册函数
+ * 
+ * 使用方式：
+ * 1. 在 commonMain 中声明 expect class
+ * 2. 在 expect class 上添加 @ManagerProvider 注解
+ * 3. 在各平台（androidMain/iosMain）提供 actual 实现
+ * 4. 确保 expect/actual 类都有 companion object { fun getInstance() }
  * 
  * 使用示例:
  * ```kotlin
+ * // commonMain
  * @ManagerProvider(
  *     initFunctionName = "initRnManager",
- *     providerName = "RnManagerProvider"
+ *     interfaceClass = "com.wgt.rn_module.IRnManager"
  * )
- * internal class RnManager : IRnManager {
- *     // ...
+ * internal expect class RnManager private constructor() : IRnManager {
+ *     companion object {
+ *         fun getInstance(): RnManager
+ *     }
+ * }
+ * 
+ * // androidMain
+ * internal actual class RnManager private actual constructor() : IRnManager {
+ *     actual companion object {
+ *         actual fun getInstance(): RnManager = // Android 实现
+ *     }
+ * }
+ * 
+ * // iosMain
+ * internal actual class RnManager private actual constructor() : IRnManager {
+ *     actual companion object {
+ *         actual fun getInstance(): RnManager = // iOS 实现
+ *     }
  * }
  * ```
  * 
  * 生成的代码:
  * ```kotlin
- * // Expect Provider（commonMain）
- * expect object RnManagerProvider {
- *     fun initialize(app: Application)
- *     fun getManager(): IRnManager
- * }
- * 
- * // Actual Provider（androidMain）
- * actual object RnManagerProvider {
- *     private lateinit var application: Application
- *     actual fun initialize(app: Application) { application = app }
- *     actual fun getManager(): IRnManager = RnManager.getInstance(application)
- * }
- * 
  * // 注册函数
  * fun initRnManager() {
  *     registerManager<IRnManager>(Lifecycle.SINGLETON) {
- *         RnManagerProvider.getManager()
+ *         RnManager.getInstance()
  *     }
  * }
  * ```
  * 
- * @property interfaceClass Manager 接口类名，默认从实现类名推断
- * @property initFunctionName 注册函数名，默认 init + 类名
- * @property providerName Provider 对象名，默认类名 + Provider
+ * @property interfaceClass Manager 接口类名（全限定名），默认从实现类名推断
+ * @property initFunctionName 注册函数名，默认 "init" + 类名
  * @property lifecycle 生命周期类型，默认为单例
  */
 @Target(AnnotationTarget.CLASS)
@@ -53,7 +62,7 @@ annotation class ManagerProvider(
     /**
      * Manager 接口类名（全限定名）
      * 例如："com.wgt.rn_module.IRnManager"
-     * 默认推断：类名去掉 "Manager" 后缀，加 "I" 前缀
+     * 默认推断：类名前加 "I" 前缀
      */
     val interfaceClass: String = "",
     
@@ -65,23 +74,9 @@ annotation class ManagerProvider(
     val initFunctionName: String = "",
     
     /**
-     * Provider 对象名
-     * 例如："RnManagerProvider"
-     * 默认：类名 + "Provider"
-     */
-    val providerName: String = "",
-    
-    /**
      * 生命周期类型
      * SINGLETON: 单例模式（默认）
      * TRANSIENT: 瞬态模式
      */
-    val lifecycle: Lifecycle = Lifecycle.SINGLETON,
-    
-    /**
-     * 是否需要 Application 上下文
-     * true: Provider 需要接收 Application 参数
-     * false: Provider 无参构造
-     */
-    val requiresApplication: Boolean = true
+    val lifecycle: Lifecycle = Lifecycle.SINGLETON
 )

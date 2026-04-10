@@ -1,10 +1,16 @@
 package com.wgt.rn_module
 
+import com.wgt.architecture.di.annotations.ManagerProvider
+
 /**
  * RN Manager - expect 定义
  *
  * Kotlin Multiplatform 期望声明，具体实现在各平台中
  */
+@ManagerProvider(
+    interfaceClass = "com.wgt.rn_module.IRnManager",
+    initFunctionName = "initRnManager"
+)
 internal expect class RnManager private constructor() : IRnManager {
 
     companion object {
