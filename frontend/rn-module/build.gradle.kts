@@ -1,24 +1,31 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidKotlinMultiplatformLibrary)
-    alias(libs.plugins.androidLint)
+    alias(libs.plugins.androidLibrary)
     alias(libs.plugins.ksp)
 }
 
 kotlin {
+
+    androidTarget {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
     // Target declarations - add or remove as needed below. These define
     // which platforms this KMP module supports.
     // See: https://kotlinlang.org/docs/multiplatform-discover-project.html#targets
-    androidLibrary {
-        namespace = "com.wgt.rn_module"
-        compileSdk = 36
-        minSdk = 24
-        
-        // 编译选项必须与 KSP Processor 的 JVM 版本一致
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        }
-    }
+//    androidLibrary {
+//        namespace = "com.wgt.rn_module"
+//        compileSdk = 36
+//        minSdk = 24
+//
+//        // 编译选项必须与 KSP Processor 的 JVM 版本一致
+//        compilerOptions {
+//            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+//        }
+//    }
 
     // For iOS targets, this is also where you should
     // configure native binary output. For more information, see:
@@ -128,4 +135,30 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().con
 // TODO 暂未处理IOS的编译
 tasks.matching { it.name.contains("compileKotlinAndroid") }.configureEach {
     dependsOn("kspCommonMainKotlinMetadata")
+}
+
+
+android {
+    namespace = "com.wgt.rn_module"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+    buildToolsVersion = libs.versions.android.buildToolsVersion.get()
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    defaultConfig {
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        // 启用 BuildConfig 生成
+        buildFeatures {
+            buildConfig = true
+        }
+    }
+//    buildTypes {
+//        release {
+//            isMinifyEnabled = false
+//        }
+//        debug {
+//            // Debug 配置
+//        }
+//    }
 }
