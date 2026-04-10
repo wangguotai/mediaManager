@@ -1,7 +1,6 @@
 package com.wgt.rn_module
 
 import android.app.Application
-import com.wgt.architecture.di.annotations.ManagerProvider
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactInstanceEventListener
 import com.facebook.react.bridge.ReactContext
@@ -15,34 +14,29 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
 
 /**
- * RN Manager 实现 - Android 平台
- * 
+ * RN Manager 实现 - Android 平台 (actual)
+ *
  * 遵循项目 Manager 体系：
- * 1. 实现 IManager 接口，支持完整的生命周期管理
+ * 1. 实现 IRnManager 接口，支持完整的生命周期管理
  * 2. 使用 suspend 函数支持协程
  * 3. 支持多 Host 管理（多 Bundle 场景）
- * 
- * 使用 @ManagerProvider 注解，KSP 将自动生成：
- * - expect/actual RnManagerProvider
- * - initRnManager() 注册函数
  */
-@ManagerProvider(
-    interfaceClass = "com.wgt.rn_module.IRnManager",
-    initFunctionName = "initRnManager",
-    providerName = "RnManagerProvider",
-    requiresApplication = true
-)
-internal class RnManager private constructor(
-    private val application: Application
-) : IRnManager {
+internal actual class RnManager private actual constructor() : IRnManager {
 
-    companion object {
+    // Android 平台特定：需要 Application 实例
+    private lateinit var application: Application
+
+    actual companion object {
         @Volatile
         private var instance: RnManager? = null
 
-        fun getInstance(application: Application): RnManager {
+        /**
+         * 获取 RnManager 实例（Android 版本）
+         * 需要在首次调用前通过 setApplication 设置 Application
+         */
+        actual fun getInstance(): RnManager {
             return instance ?: synchronized(this) {
-                instance ?: RnManager(application).also {
+                instance ?: RnManager().also {
                     instance = it
                 }
             }
@@ -53,12 +47,12 @@ internal class RnManager private constructor(
 
     // ========== IManager 状态 ==========
     private var _isInitialized = false
-    override val isInitialized: Boolean get() = _isInitialized
+    actual override val isInitialized: Boolean get() = _isInitialized
 
     private var _isActive = false
-    override val isActive: Boolean get() = _isActive
+    actual override val isActive: Boolean get() = _isActive
 
-    override val name: String = "RnManager"
+    actual override val name: String = "RnManager"
 
     // ========== RN 容器管理器 ==========
     private val containerManager by lazy { RNContainerManager.getInstance(application) }
@@ -69,7 +63,7 @@ internal class RnManager private constructor(
     private var currentComponentName: String = "MediaManagerApp"
 
     // ========== ReactContext 初始化等待器 ==========
-    private val contextInitializedDeferred = CompletableDeferred<ReactContext?>()
+    private var contextInitializedDeferred = CompletableDeferred<ReactContext?>()
 
     // ========== 生命周期监听 ==========
     private val reactInstanceListener = object : ReactInstanceEventListener {
@@ -81,16 +75,31 @@ internal class RnManager private constructor(
         }
     }
 
+    // ========== Android 平台特定方法 ==========
+
+    /**
+     * 设置 Application 实例（必须在首次使用前调用）
+     */
+    fun setApplication(app: Application) {
+        if (!::application.isInitialized) {
+            application = app
+        }
+    }
+
     // ========== IManager 生命周期实现 ==========
 
     /**
      * 初始化 RN 环境
      * 在 Manager 被首次使用时调用
      */
-    override suspend fun initialize() {
-        if (_isInitialized) {
+    actual override suspend fun initialize() {
+        if (!_isInitialized) {
             logger.debug(TAG, "已初始化，跳过")
             return
+        }
+
+        if (!::application.isInitialized) {
+            throw IllegalStateException("Application 未设置，请先调用 setApplication()")
         }
 
         logger.info(TAG, "初始化 RN 环境")
@@ -111,7 +120,7 @@ internal class RnManager private constructor(
      * 激活 RN 容器
      * 启动 ReactHost
      */
-    override suspend fun activate() {
+    actual override suspend fun activate() {
         if (!_isInitialized) {
             initialize()
         }
@@ -151,7 +160,7 @@ internal class RnManager private constructor(
      * 停用 RN 容器
      * 暂停但不销毁
      */
-    override suspend fun deactivate() {
+    actual override suspend fun deactivate() {
         if (!_isActive) {
             logger.debug(TAG, "未激活，跳过")
             return
@@ -177,7 +186,7 @@ internal class RnManager private constructor(
     /**
      * 销毁 RN 容器
      */
-    override suspend fun destroy() {
+    actual override suspend fun destroy() {
         if (!_isInitialized) {
             return
         }
@@ -194,6 +203,7 @@ internal class RnManager private constructor(
         }
 
         _isInitialized = false
+        instance = null
         logger.info(TAG, "RN 容器已销毁")
     }
 
@@ -202,7 +212,7 @@ internal class RnManager private constructor(
     /**
      * 预加载 ReactContext
      */
-    override suspend fun preload() {
+    actual override suspend fun preload() {
         if (!_isInitialized) {
             initialize()
         }
@@ -219,7 +229,7 @@ internal class RnManager private constructor(
     /**
      * 重新加载 Bundle
      */
-    override suspend fun reload(reason: String) {
+    actual override suspend fun reload(reason: String) {
         if (!_isActive) {
             logger.warning(TAG, "未激活，无法重载")
             return
@@ -235,12 +245,12 @@ internal class RnManager private constructor(
     /**
      * 获取当前 Host ID
      */
-    override fun getCurrentHostId(): String = currentHostId
+    actual override fun getCurrentHostId(): String = currentHostId
 
     /**
      * 切换 Host（多 Bundle 场景）
      */
-    override suspend fun switchHost(
+    actual override suspend fun switchHost(
         hostId: String,
         bundleAssetName: String,
         componentName: String
@@ -278,19 +288,19 @@ internal class RnManager private constructor(
         }
     }
 
-    // ========== 公共方法 ==========
+    // ========== 平台特有方法 ==========
 
     /**
      * 获取 ReactHost
      */
-    fun getReactHost(): ReactHost {
+    actual fun getReactHost(): ReactHost {
         return getOrCreateReactHost()
     }
 
     /**
      * 获取 ReactContext（异步等待初始化完成）
      */
-    suspend fun awaitReactContext(): ReactContext? {
+    actual suspend fun awaitReactContext(): ReactContext? {
         if (!_isActive) {
             activate()
         }
@@ -300,7 +310,7 @@ internal class RnManager private constructor(
     /**
      * 获取当前 ReactContext（如果已初始化）
      */
-    fun getCurrentReactContext(): ReactContext? {
+    actual fun getCurrentReactContext(): ReactContext? {
         return containerManager.getCurrentReactContext(currentHostId)
     }
 
