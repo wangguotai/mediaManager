@@ -3,7 +3,7 @@
  *
  * 功能：
  * - 扫描所有模块（包括 rn-module）的 KSP 生成目录
- * - 提取生成的 initXXXManager 函数
+ * - 提取生成的 initXxxManager 函数
  * - 更新 composeApp 模块中的 InitManager.kt 文件
  * - 添加必要的导入语句和函数调用
  */
@@ -16,10 +16,10 @@ data class ManagerInitFunction(
     val functionName: String
 )
 
-// 创建更新 InitManagerProvider.kt 的任务
+// 创建更新 InitManager.kt 的任务
 tasks.register("updateInitManager") {
     group = "ksp"
-    description = "更新 InitManagerProvider.kt 文件，添加所有 Manager 的初始化调用"
+    description = "更新 InitManager.kt 文件，添加所有 Manager 的初始化调用"
 
     // 禁用配置缓存，因为任务需要在执行阶段访问文件系统
     notCompatibleWithConfigurationCache("需要在执行阶段动态扫描模块目录")
@@ -69,8 +69,29 @@ tasks.register("updateInitManager") {
         val initManagerFile = file("src/commonMain/kotlin/com/wgt/architecture/di/generated/InitManager.kt")
 
         if (!initManagerFile.exists()) {
-            println("InitManager.kt 文件不存在: ${initManagerFile.absolutePath}")
-            return@doLast
+            println("InitManager.kt 文件不存在，创建新文件: ${initManagerFile.absolutePath}")
+            initManagerFile.parentFile.mkdirs()
+            initManagerFile.writeText(
+                """package com.wgt.architecture.di.generated
+
+/**
+ * Manager 初始化聚合函数
+ *
+ * 此函数在应用启动时调用，用于初始化所有标注了 @ManagerProvider 的 Manager
+ * KSP 处理 @ManagerProvider 注解后，自动写入 initXXXManager() 的调用代码
+ *
+ * 使用方式：
+ * ```kotlin
+ * fun initializeApplication() {
+ *     InitManager()
+ * }
+ * ```
+ */
+fun InitManager() {
+    // KSP 会自动生成调用所有 initXXXManager() 的代码
+}
+"""
+            )
         }
 
         println("InitManager.kt 文件路径: ${initManagerFile.absolutePath}")
@@ -102,11 +123,11 @@ tasks.register("updateInitManager") {
         }
 
         if (initFunctions.isEmpty()) {
-            println("没有发现任何 initXXXManager 函数")
+            println("没有发现任何 initXxxManager 函数")
             return@doLast
         }
 
-        println("发现 ${initFunctions.size} 个 initXXXManager 函数:")
+        println("发现 ${initFunctions.size} 个 initXxxManager 函数:")
         initFunctions.forEach { println("  - ${it.packageName}.${it.functionName}") }
 
         // 更新 InitManager.kt 文件
@@ -119,7 +140,7 @@ fun scanKspOutput(kspDir: File, initFunctions: MutableList<ManagerInitFunction>)
     println("  KSP目录: $kspDir")
     println("  存在: ${kspDir.exists()}")
     
-    // 查找所有 .generated.kt 文件
+    // 查找所有 .generated.kt 文件（Manager KSP 生成的文件格式）
     val generatedFiles = kspDir.walk().filter { file -> 
         file.name.endsWith(".generated.kt") 
     }.toList()
@@ -140,7 +161,7 @@ tasks.findByName("compileCommonMainKotlinMetadata")?.let {
     it.dependsOn("updateInitManager")
 }
 
-// 提取 initXXXManager 函数信息
+// 提取 initXxxManager 函数信息
 fun extractInitManagerFunctions(file: File): List<ManagerInitFunction>? {
     val content = file.readText()
     val initFunctions = mutableListOf<ManagerInitFunction>()
@@ -150,8 +171,9 @@ fun extractInitManagerFunctions(file: File): List<ManagerInitFunction>? {
     val packageMatch = packagePattern.find(content)
     val packageName = packageMatch?.groupValues?.get(1) ?: return null
 
-    // 提取所有 initXXXManager 函数（在 generated 文件中的注册函数）
-    val functionPattern = Regex("""fun\s+(init\w+Manager)\s*\(""")
+    // 提取所有 initXxx 函数（在 generated 文件中的注册函数）
+    // 匹配形如：public fun initRnManager() { ... }
+    val functionPattern = Regex("""fun\s+(init[A-Z]\w+)\s*\(\)""")
     functionPattern.findAll(content).forEach { match ->
         initFunctions.add(ManagerInitFunction(packageName, match.groupValues[1]))
     }
