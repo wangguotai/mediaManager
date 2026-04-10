@@ -8,7 +8,7 @@ import com.facebook.react.internal.featureflags.ReactNativeFeatureFlags
 import com.facebook.react.internal.featureflags.ReactNativeFeatureFlagsDefaults
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
-import com.wgt.architecture.dispatchers.DispatcherProvider
+import com.wgt.platform.architecture.dispatchers.dispatchers
 import com.wgt.platform.logger.logger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
@@ -104,7 +104,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "初始化 RN 环境")
 
-        withContext(DispatcherProvider.io) {
+        withContext(dispatchers.io) {
             // 1. 初始化 SoLoader
             initSoLoader()
 
@@ -131,7 +131,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "激活 RN 容器")
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             // 重置 deferred，支持多次激活
             if (contextInitializedDeferred.isCompleted) {
                 contextInitializedDeferred = CompletableDeferred()
@@ -168,7 +168,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "停用 RN 容器")
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             // 获取当前 Host
             val host = containerManager.getDefaultReactHost()
 
@@ -197,7 +197,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
             deactivate()
         }
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             // 清理所有 Host
             containerManager.destroyAll()
         }
@@ -219,7 +219,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "预加载 ReactContext")
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             containerManager.preloadReactContext(currentHostId)
         }
 
@@ -237,7 +237,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "重新加载 Bundle: $reason")
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             containerManager.reloadReactContext(currentHostId, reason)
         }
     }
@@ -262,7 +262,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
 
         logger.info(TAG, "切换 Host: $hostId, bundle=$bundleAssetName, component=$componentName")
 
-        withContext(DispatcherProvider.main) {
+        withContext(dispatchers.main) {
             // 销毁旧 Host
             containerManager.destroyReactHost(currentHostId)
 
@@ -293,7 +293,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
     /**
      * 获取 ReactHost
      */
-    actual fun getReactHost(): ReactHost {
+    actual fun getReactHost(): PlatformReactHost? {
         return getOrCreateReactHost()
     }
 

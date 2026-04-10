@@ -21,19 +21,19 @@ internal expect class RnManager private constructor() : IRnManager {
 
     /**
      * 获取 ReactHost（Android 特有）
-     * iOS 实现返回空
+     * iOS 实现返回 null
      */
-    fun getReactHost(): Any?
+    fun getReactHost(): PlatformReactHost?
 
     /**
      * 获取 ReactContext（异步等待初始化完成）
      */
-    suspend fun awaitReactContext(): Any?
+    suspend fun awaitReactContext(): PlatformReactContext?
 
     /**
      * 获取当前 ReactContext（如果已初始化）
      */
-    fun getCurrentReactContext(): Any?
+    fun getCurrentReactContext(): PlatformReactContext?
 
     override suspend fun preload()
     override suspend fun reload(reason: String)

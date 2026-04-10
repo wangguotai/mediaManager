@@ -58,7 +58,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
     private var currentHostId: String = "default"
 
     // ========== ReactContext 初始化等待器 ==========
-    private var contextInitializedDeferred = CompletableDeferred<Any?>()
+    private var contextInitializedDeferred = CompletableDeferred<PlatformReactContext?>()
 
     // ========== IManager 生命周期实现 ==========
 
@@ -237,7 +237,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
      * 获取 ReactHost
      * iOS 平台返回 null（使用 RCTBridge 而非 ReactHost）
      */
-    actual fun getReactHost(): Any? {
+    actual fun getReactHost(): PlatformReactHost? {
         logger.debug(TAG, "iOS 平台不支持 ReactHost，返回 null")
         return null
     }
@@ -245,7 +245,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
     /**
      * 获取 ReactContext（异步等待初始化完成）
      */
-    actual suspend fun awaitReactContext(): Any? {
+    actual suspend fun awaitReactContext(): PlatformReactContext? {
         if (!_isActive) {
             activate()
         }
@@ -255,7 +255,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
     /**
      * 获取当前 ReactContext（如果已初始化）
      */
-    actual fun getCurrentReactContext(): Any? {
+    actual fun getCurrentReactContext(): PlatformReactContext? {
         // iOS 平台获取当前 RCTBridge 或 RCTRootView 的 context
         return getCurrentRNContext()
     }
@@ -300,7 +300,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
         NSLog("[RnManager] 切换 RN Host: $hostId (iOS)")
     }
 
-    private fun getCurrentRNContext(): Any? {
+    private fun getCurrentRNContext(): PlatformReactContext? {
         // iOS 获取当前 RN Context
         // 返回 RCTBridge 或相关对象
         NSLog("[RnManager] 获取当前 RN Context (iOS)")
