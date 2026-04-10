@@ -1,5 +1,7 @@
 package com.wgt.architecture.di.generated
 
+import com.wgt.rn_module.initRnManager
+
 /**
  * Manager 初始化函数
  *
@@ -15,5 +17,7 @@ package com.wgt.architecture.di.generated
  * ```
  */
 fun InitManager() {
+    initRnManager()
     // KSP 会自动生成调用所有 initXXXManager() 的代码
 }
+
