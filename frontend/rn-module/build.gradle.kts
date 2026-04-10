@@ -125,6 +125,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().con
 }
 
 // 额外确保 Android 编译任务依赖 KSP
+// TODO 暂未处理IOS的编译
 tasks.matching { it.name.contains("compileKotlinAndroid") }.configureEach {
     dependsOn("kspCommonMainKotlinMetadata")
 }
