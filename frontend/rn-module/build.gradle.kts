@@ -13,6 +13,11 @@ kotlin {
         namespace = "com.wgt.rn_module"
         compileSdk = 36
         minSdk = 24
+        
+        // 编译选项必须与 KSP Processor 的 JVM 版本一致
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     // For iOS targets, this is also where you should

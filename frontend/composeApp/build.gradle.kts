@@ -39,6 +39,7 @@ kotlin {
             implementation(projects.shared)
             implementation(projects.featureMedia)
             implementation(projects.featureCommon)
+            implementation(projects.rnModule)
             // 对应的生成资源强要求，必须有该依赖
             implementation(libs.compose.components.resources)
             // Coil 3 for KMP image loading
@@ -59,9 +60,6 @@ kotlin.sourceSets.commonMain {
 // KSP依赖配置
 dependencies {
     add("kspCommonMainMetadata", project(":ksp-processor"))
-    add("kspAndroid", project(":ksp-processor"))
-    add("kspIosArm64", project(":ksp-processor"))
-    add("kspIosSimulatorArm64", project(":ksp-processor"))
 }
 
 // 配置KSP任务依赖
