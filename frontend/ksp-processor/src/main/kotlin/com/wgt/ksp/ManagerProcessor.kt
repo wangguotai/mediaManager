@@ -10,9 +10,10 @@ import com.squareup.kotlinpoet.ksp.writeTo
  * 扫描 @ManagerProvider 注解并自动生成注册函数
  * 
  * 使用方式：
- * 1. 在 commonMain 的 expect class 上添加 @ManagerProvider 注解
- * 2. 在 expect/actual 类中提供 companion object { fun getInstance() }
- * 3. KSP 自动生成 initXxxManager() 注册函数
+ * 1. 在 commonMain 的 expect class 上添加 @ManagerProvider 注解（无需参数）
+ * 2. expect class 必须实现 IManager 的子接口（如 IRnManager）
+ * 3. 在 expect/actual 类中提供 companion object { fun getInstance() }
+ * 4. KSP 自动生成 initXxxManager() 注册函数
  */
 class ManagerProcessor(
     private val codeGenerator: CodeGenerator,
@@ -49,14 +50,9 @@ class ManagerProcessor(
 
         logger.info("发现 ${managers.size} 个 Manager，开始生成代码...")
 
-        managers.forEach { manager ->
-            try {
-                generateRegistrationFunction(manager)
-                logger.info("生成完成: ${manager.simpleName}")
-            } catch (e: Exception) {
-                logger.error("生成 ${manager.simpleName} 代码时出错: ${e.message}")
-            }
-        }
+        generateRegistrationFunctions()
+
+        logger.info("代码生成完成")
     }
 
     private fun processManagerClass(classDecl: KSClassDeclaration) {
@@ -67,34 +63,10 @@ class ManagerProcessor(
             return
         }
 
-        // 验证类是否实现 IManager 接口
-        val isValidManager = classDecl.superTypes.any { superType ->
-            val resolvedType = superType.resolve()
-            val qualifiedName = resolvedType.declaration.qualifiedName?.asString()
-            qualifiedName == "com.wgt.architecture.manager.IManager"
-        }
-
-        if (!isValidManager) {
-            logger.warn(
-                "${classDecl.simpleName.asString()} 可能未直接实现 IManager，请确保它继承自 IManager 或其子接口",
-                classDecl
-            )
-        }
-
-        // 获取注解参数
+        // 获取注解参数（只有 lifecycle）
         val annotation = classDecl.annotations.first {
             it.shortName.asString() == "ManagerProvider"
         }
-
-        val interfaceClass = annotation.arguments
-            .find { it.name?.asString() == "interfaceClass" }
-            ?.value as? String
-            ?: inferInterfaceClass(classDecl)
-
-        val initFunctionName = annotation.arguments
-            .find { it.name?.asString() == "initFunctionName" }
-            ?.value as? String
-            ?: "init${classDecl.simpleName.asString()}"
 
         val lifecycleArg = annotation.arguments
             .find { it.name?.asString() == "lifecycle" }
@@ -106,11 +78,21 @@ class ManagerProcessor(
             else -> "SINGLETON"
         }
 
+        // 自动推断接口类
+        val interfaceClass = inferInterfaceClass(classDecl)
+            ?: run {
+                logger.warn(
+                    "无法推断 ${classDecl.simpleName.asString()} 的接口类，将使用默认规则 I${classDecl.simpleName.asString()}",
+                    classDecl
+                )
+                "${classDecl.packageName.asString()}.I${classDecl.simpleName.asString()}"
+            }
+
         val managerInfo = ManagerInfo(
             className = classDecl.qualifiedName?.asString() ?: return,
             simpleName = classDecl.simpleName.asString(),
             interfaceClass = interfaceClass,
-            initFunctionName = initFunctionName,
+            initFunctionName = generateInitFunctionName(classDecl.simpleName.asString()),
             lifecycle = lifecycle,
             packageName = classDecl.packageName.asString()
         )
@@ -120,63 +102,95 @@ class ManagerProcessor(
         logger.info("处理 Manager: ${managerInfo.simpleName} -> ${managerInfo.interfaceClass}")
     }
 
-    private fun inferInterfaceClass(classDecl: KSClassDeclaration): String {
-        // 从 superTypes 中找到包含 IManager 的接口
-        val superInterface = classDecl.superTypes
-            .map { it.resolve().declaration.qualifiedName?.asString() ?: "" }
-            .firstOrNull { it.startsWith("I") && it != "com.wgt.architecture.manager.IManager" }
-        
-        return superInterface ?: run {
-            // 默认推断：类名去掉 Manager，加 I 前缀
-            val simpleName = classDecl.simpleName.asString()
-            "I${simpleName}"
+    /**
+     * 从类的超类型中推断接口类
+     * 寻找直接继承自 IManager 的子接口（如 IRnManager）
+     */
+    private fun inferInterfaceClass(classDecl: KSClassDeclaration): String? {
+        return try {
+            classDecl.superTypes
+                .mapNotNull { superType ->
+                    try {
+                        val resolved = superType.resolve()
+                        val declaration = resolved.declaration
+                        val qualifiedName = declaration.qualifiedName?.asString()
+                        
+                        // 跳过 IManager 本身，找它的子接口
+                        if (qualifiedName != null && 
+                            qualifiedName != "com.wgt.architecture.manager.IManager" &&
+                            declaration is KSClassDeclaration &&
+                            declaration.classKind == com.google.devtools.ksp.symbol.ClassKind.INTERFACE) {
+                            
+                            // 检查这个接口是否继承自 IManager
+                            val extendsIManager = declaration.superTypes.any { parentType ->
+                                try {
+                                    parentType.resolve().declaration.qualifiedName?.asString() == 
+                                        "com.wgt.architecture.manager.IManager"
+                                } catch (e: Exception) {
+                                    false
+                                }
+                            }
+                            
+                            if (extendsIManager) qualifiedName else null
+                        } else null
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+                .firstOrNull()
+        } catch (e: Exception) {
+            null
         }
     }
 
-    /**
-     * 生成注册函数
-     */
-    private fun generateRegistrationFunction(manager: ManagerInfo) {
-        val fileSpec = FileSpec.builder(
-            packageName = manager.packageName,
-            fileName = "${manager.initFunctionName}.generated"
-        ).apply {
-            addFileComment("Auto-generated by KSP. Do not modify.")
-            addFileComment("Generated at: ${System.currentTimeMillis()}")
-            
-            val interfaceType = ClassName.bestGuess(manager.interfaceClass)
-            val managerClass = ClassName.bestGuess(manager.className)
-            
-            val funSpec = FunSpec.builder(manager.initFunctionName)
-                .addKdoc(
-                    """
-                    Auto-generated initialization function for ${manager.simpleName}.
-                    
-                    Register ${manager.simpleName} to the global Manager system.
-                    
-                    Usage:
-                    ```kotlin
-                    fun InitManager() {
-                        ${manager.initFunctionName}()
-                    }
-                    ```
-                    """.trimIndent()
-                )
-                .addStatement(
-                    "registerManager<%T>(Lifecycle.%L) { %T.getInstance() }",
-                    interfaceType,
-                    manager.lifecycle,
-                    managerClass
-                )
-                .build()
-            
-            addFunction(funSpec)
-            addImport("com.wgt.architecture.di", "Lifecycle")
-            addImport("com.wgt.architecture.manager", "registerManager")
-            
-        }.build()
+    private fun generateInitFunctionName(className: String): String {
+        // 生成 initXxxManager 格式的函数名
+        return "init${className}"
+    }
 
-        fileSpec.writeTo(codeGenerator, Dependencies(false))
+    private fun generateRegistrationFunctions() {
+        // 按包名分组聚合所有 Manager
+        val managersByPackage = managers.groupBy { it.packageName }
+        
+        // 为每个包生成一个文件，包含所有 init 函数
+        managersByPackage.forEach { (packageName, packageManagers) ->
+            val fileSpec = FileSpec.builder(
+                packageName = packageName,
+                fileName = "ManagerRegistrations"
+            ).apply {
+                addFileComment("Auto-generated by KSP. Do not modify.")
+                addFileComment("Generated at: ${System.currentTimeMillis()}")
+                
+                // 为该包下的所有 Manager 生成初始化函数
+                packageManagers.forEach { manager ->
+                    val interfaceType = ClassName.bestGuess(manager.interfaceClass)
+                    val managerClass = ClassName.bestGuess(manager.className)
+                    
+                    val funSpec = FunSpec.builder(manager.initFunctionName)
+                        .addKdoc(
+                            """
+                            Auto-generated initialization function for ${manager.simpleName}.
+                            
+                            Register ${manager.simpleName} to the global Manager system.
+                            """.trimIndent()
+                        )
+                        .addStatement(
+                            "registerManager<%T>(Lifecycle.%L) { %T.getInstance() }",
+                            interfaceType,
+                            manager.lifecycle,
+                            managerClass
+                        )
+                        .build()
+                    
+                    addFunction(funSpec)
+                }
+                
+                addImport("com.wgt.architecture.di", "Lifecycle")
+                addImport("com.wgt.architecture.manager", "registerManager")
+            }.build()
+            
+            fileSpec.writeTo(codeGenerator, Dependencies(false))
+        }
     }
 }
 

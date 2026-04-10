@@ -7,10 +7,7 @@ import com.wgt.architecture.di.annotations.ManagerProvider
  *
  * Kotlin Multiplatform 期望声明，具体实现在各平台中
  */
-@ManagerProvider(
-    interfaceClass = "com.wgt.rn_module.IRnManager",
-    initFunctionName = "initRnManager"
-)
+@ManagerProvider
 internal expect class RnManager private constructor() : IRnManager {
 
     companion object {
