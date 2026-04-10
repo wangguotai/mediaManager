@@ -116,8 +116,15 @@ dependencies {
     // 注意：不要添加 kspAndroid/kspAndroidMain，否则会导致重复生成
 }
 
-tasks.configureEach {
-    if (name.startsWith("compileKotlin") && name != "kspCommonMainKotlinMetadata") {
+// 配置 KSP 任务依赖 - 确保所有编译任务都依赖 KSP 生成
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().configureEach {
+    // 排除 KSP 任务本身，避免循环依赖
+    if (!name.contains("ksp", ignoreCase = true)) {
         dependsOn("kspCommonMainKotlinMetadata")
     }
+}
+
+// 额外确保 Android 编译任务依赖 KSP
+tasks.matching { it.name.contains("compileKotlinAndroid") }.configureEach {
+    dependsOn("kspCommonMainKotlinMetadata")
 }
