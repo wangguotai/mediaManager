@@ -107,6 +107,7 @@ kotlin.sourceSets.commonMain {
 
 dependencies {
     add("kspCommonMainMetadata", project(":ksp-processor"))
+    add("kspAndroid", project(":ksp-processor"))
 }
 
 tasks.configureEach {

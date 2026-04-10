@@ -11,6 +11,8 @@ plugins {
 }
 // 应用更新 InitFeature.kt 的脚本
 apply(from = "../scripts/composeApp/updateInitFeature.gradle.kts")
+// 应用 Manager 初始化聚合脚本
+apply(from = "../scripts/composeApp/updateInitManager.gradle.kts")
 
 kotlin {
     androidTarget {
@@ -124,5 +126,3 @@ compose.desktop {
         }
     }
 }
-
-
