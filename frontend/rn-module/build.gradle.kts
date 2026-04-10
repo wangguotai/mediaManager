@@ -106,8 +106,9 @@ kotlin.sourceSets.commonMain {
 }
 
 dependencies {
+    // 只在 commonMain 中生成代码，这样可以通过 expect/actual 模式在多平台共享
     add("kspCommonMainMetadata", project(":ksp-processor"))
-    add("kspAndroid", project(":ksp-processor"))
+    // 注意：不要添加 kspAndroid/kspAndroidMain，否则会导致重复生成
 }
 
 tasks.configureEach {
