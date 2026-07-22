@@ -80,10 +80,50 @@ message GetMediaMetadataResponse {
   MediaMetadata metadata = 1;
 }
 
+// Get media stream (original binary) request
+message GetMediaStreamRequest {
+  string media_id = 1;
+  int64 offset = 2; // byte offset to start reading from (0-based), optional, defaults to 0
+  int64 length = 3; // number of bytes to stream, 0 means until EOF
+}
+
+// Streamed response chunk for GetMediaStream
+message GetMediaStreamResponse {
+  oneof data {
+    MediaMetadata metadata = 1; // sent once as the first message
+    bytes chunk_data = 2;       // file bytes in order; empty chunk signals EOF
+  }
+}
+
+// Thumbnail size preset
+enum ThumbnailSize {
+  THUMBNAIL_SMALL = 0;  // ~128px on the long edge
+  THUMBNAIL_MEDIUM = 1; // ~256px
+  THUMBNAIL_LARGE = 2;  // ~512px
+}
+
+// Get thumbnail request
+message GetThumbnailRequest {
+  string media_id = 1;
+  ThumbnailSize size = 2;
+}
+
+// Get thumbnail response
+message GetThumbnailResponse {
+  bytes data = 1;
+  string mime_type = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
 // Media service definition
 service MediaService {
   rpc UploadMedia(stream UploadMediaRequest) returns (UploadMediaResponse);
   rpc GetMediaList(GetMediaListRequest) returns (GetMediaListResponse);
   rpc DeleteMedia(DeleteMediaRequest) returns (DeleteMediaResponse);
   rpc GetMediaMetadata(GetMediaMetadataRequest) returns (GetMediaMetadataResponse);
+  // Stream the original media binary (chunked). First message carries metadata.
+  rpc GetMediaStream(GetMediaStreamRequest) returns (stream GetMediaStreamResponse);
+  // Get a (cached) thumbnail for an image media, generated on demand.
+  rpc GetThumbnail(GetThumbnailRequest) returns (GetThumbnailResponse);
 }

@@ -6,15 +6,18 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"media-manager/backend/gen"
+	"media-manager/backend/internal/gateway"
 	"media-manager/backend/internal/service"
 
 	"google.golang.org/grpc"
 )
 
 const (
-	port = ":50051"
+	grpcPort = ":50051"
+	restPort = ":8080"
 )
 
 func main() {
@@ -24,17 +27,20 @@ func main() {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	// Create uploads directory
 	uploadsDir := filepath.Join(dataDir, "uploads")
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		log.Fatalf("Failed to create uploads directory: %v", err)
 	}
 
-	// Initialize media service
-	mediaService := service.NewMediaService(uploadsDir)
+	thumbsDir := filepath.Join(dataDir, "thumbnails")
+	if err := os.MkdirAll(thumbsDir, 0755); err != nil {
+		log.Fatalf("Failed to create thumbnails directory: %v", err)
+	}
+
+	mediaService := service.NewMediaService(uploadsDir, thumbsDir)
 
 	// Start gRPC server
-	lis, err := net.Listen("tcp", port)
+	lis, err := net.Listen("tcp", grpcPort)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
@@ -42,8 +48,28 @@ func main() {
 	grpcServer := grpc.NewServer()
 	gen.RegisterMediaServiceServer(grpcServer, mediaService)
 
-	fmt.Printf("Media Manager gRPC server listening on %s\n", port)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+	go func() {
+		fmt.Printf("Media Manager gRPC server listening on %s\n", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("Failed to serve gRPC: %v", err)
+		}
+	}()
+
+	// Start REST gateway (OpenClaw bridge + future HTTP endpoints)
+	restAddr := envOr("REST_PORT", restPort)
+	restSrv := gateway.NewServer(restAddr, gateway.OpenClawConfig{
+		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
+		Timeout: 10 * time.Second,
+	})
+	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())
+	if err := restSrv.ListenAndServe(); err != nil {
+		log.Fatalf("Failed to serve REST: %v", err)
 	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
