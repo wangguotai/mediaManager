@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wgt.common.util.formatBytesToMB
-import kotlinx.coroutines.Dispatchers
+import com.wgt.platform.architecture.dispatchers.dispatchers
 import kotlinx.coroutines.launch
 import media.MediaMetadata
 import mediamanager.composeapp.generated.resources.*
@@ -237,7 +237,7 @@ fun ImagePreviewDialog(
 
     // 加载完整图片
     LaunchedEffect(media.id) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(dispatchers.io) {
             try {
                 val image = loadFullImage(media.id)
                 fullImageBitmap = image
@@ -423,7 +423,7 @@ fun MediaGridItem(
 
     // 异步加载缩略图
     LaunchedEffect(media.id) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(dispatchers.io) {
             try {
                 val thumbnail = loadThumbnail(media.id)
                 thumbnailBitmap = thumbnail

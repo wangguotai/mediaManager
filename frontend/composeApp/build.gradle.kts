@@ -63,10 +63,27 @@ dependencies {
     add("kspCommonMainMetadata", project(":ksp-processor"))
 }
 
-// 配置KSP任务依赖
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>()
-    .matching { it.name.startsWith("ksp") && it.name != "kspCommonMainKotlinMetadata" }.all {
-    dependsOn("kspCommonMainKotlinMetadata")
+// 确保所有消费 commonMain 的编译任务都依赖 kspCommonMainKotlinMetadata。
+// 原第67行用 name.startsWith("ksp") 匹配，只让 KSP 同族任务互相依赖，
+// 并未让 compileDebugKotlinAndroid / compileReleaseKotlinAndroid 依赖 KSP 任务，
+// 一直被"KSP 判 UP-TO-DATE、产物巧合存在"的缓存幽灵掩盖。
+// 强制每次真跑(见下)后幽灵消失，Gradle task-output 校验即暴露此隐式消费缺失：
+// "uses this output of :composeApp:kspCommonMainKotlinMetadata without declaring an explicit dependency"。
+// 用 compile 前缀统一覆盖 compileDebug/ReleaseKotlinAndroid + compileCommonMainKotlinMetadata 等。
+tasks.configureEach {
+    if (name.startsWith("compile") && name != "kspCommonMainKotlinMetadata") {
+        dependsOn("kspCommonMainKotlinMetadata")
+    }
+}
+
+// 彻底禁用 KSP metadata 任务的构建缓存与 UP-TO-DATE 旁路。
+// 根因同 feature-common/rn-module：org.gradle.caching + configuration-cache 下，
+// KSP 任务会被判 UP-TO-DATE / FROM-CACHE 而不真正生成，build/generated/ksp/... 为空，
+// kotlin.srcDir 读到空目录，导致编译报 Unresolved reference。
+// upToDateWhen{false}+cacheIf{false} 双保险强制每次真跑，产物永远新鲜。
+tasks.matching { it.name == "kspCommonMainKotlinMetadata" }.configureEach {
+    outputs.cacheIf { false }
+    outputs.upToDateWhen { false }
 }
 
 

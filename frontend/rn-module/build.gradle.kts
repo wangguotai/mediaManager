@@ -123,9 +123,13 @@ dependencies {
     // 注意：不要添加 kspAndroid/kspAndroidMain，否则会导致重复生成
 }
 
-// 禁用 KSP metadata 任务的构建缓存，防止 Gradle 从缓存恢复时清空生成代码
+// 彻底禁用 KSP metadata 任务的构建缓存与 UP-TO-DATE 旁路。
+// 根因同 feature-common：org.gradle.caching + configuration-cache 下，
+// 仅 cacheIf{false} 不阻止"从缓存恢复"和 UP-TO-DATE 跳过，KSP 产物会空，
+// 导致下游编译报 Unresolved reference。upToDateWhen{false}+cacheIf{false} 双保险强制每次真跑。
 tasks.matching { it.name == "kspCommonMainKotlinMetadata" || it.name == "kspCommonMainMetadata" }.configureEach {
     outputs.cacheIf { false }
+    outputs.upToDateWhen { false }
 }
 
 // 配置 KSP 任务依赖 - 确保所有编译任务都依赖 KSP 生成

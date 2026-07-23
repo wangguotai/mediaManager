@@ -70,13 +70,24 @@ kotlin {
 
         iosMain {
             dependencies {
-                // Add iOS-specific dependencies here. This a source set created by Kotlin Gradle
-                // Plugin (KGP) that each specific iOS target (e.g., iosX64) depends on as
-                // part of KMP’s default source set hierarchy. Note that this source set depends
-                // on common by default and will correctly pull the iOS artifacts of any
-                // KMP dependencies declared in commonMain.
+                // Add iOS-specific dependencies here. This is a source set created by Kotlin Gradle
+                // Plugin (KGP) that each specific iOS target (e.g. iosX64) depends on as
+                // part of KMP's default source set hierarchy. Note that this source set depends
+                // on common by default and will correctly pull the iOS artifacts of any KMP
+                // dependencies declared in commonMain.
             }
         }
     }
 
+}
+
+// Wire 插件把 protobuf 代码生成到 src/commonMain（源码目录，见上方 wire{} 的 out = "src/commonMain"）。
+// AGP 的 prepareAndroidMainArtProfile (ProcessLibraryArtProfileTask) 扫描源码时，
+// 发现这些文件是 generateCommonMainProtos 的输出却无显式依赖，报：
+// "uses this output of task ':protobuf-gen:generateCommonMainProtos' without declaring an explicit dependency"。
+// 该问题此前被 build cache（prepareAndroidMainArtProfile FROM-CACHE）掩盖，clean 后才暴露。
+// 这里显式声明依赖，保证 art profile 任务在 Wire 代码生成之后执行。
+// 用懒配置 matching+configureEach，避免任务尚未注册时 named() 报找不到。
+tasks.matching { it.name == "prepareAndroidMainArtProfile" }.configureEach {
+    dependsOn("generateCommonMainProtos")
 }
