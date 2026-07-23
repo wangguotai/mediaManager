@@ -3,6 +3,10 @@ package com.wgt.media
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -10,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,8 +42,6 @@ import media.MediaMetadata
 import mediamanager.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * 媒体列表屏幕
@@ -50,8 +54,13 @@ fun MediaListScreen(viewModel: MediaViewModel) {
     // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
     var selectedTab by remember { mutableStateOf(2) }
 
-    // 图片预览状态
-    var previewMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+    // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
+    // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
+    var previewIndex by remember { mutableStateOf<Int?>(null) }
+
+    // OpenClaw 桥梁对话框状态 + 视图模型（与媒体列表同生命周期，复用即可）
+    var showOpenClawDialog by remember { mutableStateOf(false) }
+    val openClawViewModel = remember { OpenClawViewModel() }
 
     // 监听错误信息并显示 Snackbar
     LaunchedEffect(viewModel.errorMessage) {
@@ -72,12 +81,27 @@ fun MediaListScreen(viewModel: MediaViewModel) {
         }
     }
 
-    // 图片预览对话框
-    previewMedia?.let { media ->
-        ImagePreviewDialog(
-            media = media,
-            useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
-            onDismiss = { previewMedia = null }
+    // 图片预览对话框：基于当前 mediaList 的索引，支持预览内左右滑动切换。
+    previewIndex?.let { index ->
+        val list = viewModel.mediaList
+        if (index in list.indices) {
+            ImagePreviewDialog(
+                mediaList = list,
+                initialIndex = index,
+                useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                onDismiss = { previewIndex = null }
+            )
+        } else {
+            // 列表刷新后索引越界，直接关闭
+            previewIndex = null
+        }
+    }
+
+    // OpenClaw 桥梁命令对话框
+    if (showOpenClawDialog) {
+        OpenClawCommandDialog(
+            viewModel = openClawViewModel,
+            onDismiss = { showOpenClawDialog = false }
         )
     }
 
@@ -93,6 +117,13 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                         )
                     },
                     actions = {
+                        // OpenClaw 桥梁入口：点击弹出命令输入对话框，经后端 /api/openclaw/command 转发。
+                        IconButton(onClick = { showOpenClawDialog = true }) {
+                            Icon(
+                                painterResource(Res.drawable.ic_openclaw),
+                                contentDescription = "OpenClaw 桥梁"
+                            )
+                        }
                         IconButton(
                             onClick = {
                                 when (selectedTab) {
@@ -247,12 +278,12 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                         selectedMediaIds = viewModel.selectedMediaIds,
                         onMediaClick = { media ->
                             if (selectedTab == 2) {
-                                previewMedia = media
+                                previewIndex = mediaList.indexOf(media)
                             } else {
                                 viewModel.toggleMediaSelection(media.id)
                             }
                         },
-                        onMediaLongClick = { media -> previewMedia = media },
+                        onMediaLongClick = { media -> previewIndex = mediaList.indexOf(media) },
                         useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -264,19 +295,127 @@ fun MediaListScreen(viewModel: MediaViewModel) {
 
 /**
  * 图片预览对话框
+ *
+ * 基于 [androidx.compose.foundation.pager.HorizontalPager] 实现左右滑动切换上一张/下一张；
+ * 每页是一个可双指缩放/平移的 [ZoomableImage]。点击空白或关闭按钮退出。
+ *
+ * @param mediaList 当前 Tab 的完整媒体列表
+ * @param initialIndex 进入预览时聚焦的媒体在 [mediaList] 中的索引
+ * @param useBackendLoader true 走 [BackendImageLoader]（后端 HTTP），false 走平台相册加载器
  */
-@OptIn(ExperimentalResourceApi::class)
+@OptIn(ExperimentalResourceApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun ImagePreviewDialog(
-    media: MediaMetadata,
+    mediaList: List<MediaMetadata>,
+    initialIndex: Int,
     onDismiss: () -> Unit,
     useBackendLoader: Boolean = false
 ) {
-    var fullImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var scale by remember { mutableStateOf(1f) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
+    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
+        mediaList.size
+    }
+    val currentIndex by remember { derivedStateOf { pagerState.currentPage } }
+    val currentMedia = mediaList[currentIndex]
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.95f))
+        ) {
+            // 可滑动切换的图片页
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                ZoomableImage(
+                    media = mediaList[page],
+                    useBackendLoader = useBackendLoader,
+                    onTapClose = onDismiss
+                )
+            }
+
+            // 关闭按钮
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    painter = painterResource(Res.drawable.ic_close),
+                    contentDescription = "关闭",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            // 当前图片信息 + 页码
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                Text(
+                    currentMedia.filename,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${formatFileSize(currentMedia.size)} • ${currentMedia.width}x${currentMedia.height}",
+                    color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (mediaList.size > 1) {
+                    Text(
+                        "${currentIndex + 1} / ${mediaList.size}",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            // 操作提示
+            Text(
+                "左右滑动切换 • 双击重置 • 捏合缩放",
+                color = Color.White.copy(alpha = 0.5f),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 单张可缩放图片。
+ *
+ * 缩放交互：双指捏合缩放 + 单指拖动平移（缩放>1 时生效）；双击在 1x/2x 间切换；
+ * 单击（无拖动）触发关闭回调。缩放>1 时消费手势，避免误触发 pager 滑动——
+ * 这里用 `pointerInput(scale)` 的 key 随缩放重建，使 `detectTransformGestures`
+ * 与 pager 的水平滑动在缩放态下互不抢占（缩放态下主要由 transform 手势消费平移）。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ZoomableImage(
+    media: MediaMetadata,
+    useBackendLoader: Boolean,
+    onTapClose: () -> Unit
+) {
+    var fullImageBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(media.id) { mutableStateOf(true) }
+    var scale by remember(media.id) { mutableStateOf(1f) }
+    var offsetX by remember(media.id) { mutableStateOf(0f) }
+    var offsetY by remember(media.id) { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
 
     // 加载完整图片：本地相册走平台加载器；后端图片走 BackendImageLoader（HTTP stream）。
@@ -297,124 +436,67 @@ fun ImagePreviewDialog(
         }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.9f))
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { onDismiss() },
-                        onDoubleTap = {
-                            // 双击重置缩放
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(scale) {
+                detectTapGestures(
+                    onTap = { onTapClose() },
+                    onDoubleTap = {
+                        // 双击在 1x 与 2x 间切换，并复位平移
+                        if (scale > 1f) {
                             scale = 1f
                             offsetX = 0f
                             offsetY = 0f
+                        } else {
+                            scale = 2f
                         }
+                    }
+                )
+            }
+            .pointerInput(scale) {
+                detectTransformGestures(panZoomLock = false) { _, pan, zoom, _ ->
+                    val newScale = (scale * zoom).coerceIn(1f, 5f)
+                    // 仅在已放大时累加平移，避免 1x 下平移把图片拖出视口
+                    if (newScale > 1f) {
+                        offsetX += pan.x
+                        offsetY += pan.y
+                    }
+                    scale = newScale
+                }
+            }
+            .graphicsLayer(
+                scaleX = scale,
+                scaleY = scale,
+                translationX = offsetX,
+                translationY = offsetY
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            isLoading -> {
+                CircularProgressIndicator(color = Color.White)
+            }
+            fullImageBitmap != null -> {
+                androidx.compose.foundation.Image(
+                    bitmap = fullImageBitmap!!,
+                    contentDescription = media.filename,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            }
+            else -> {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_image_placeholder),
+                        contentDescription = "加载失败",
+                        modifier = Modifier.size(64.dp),
+                        tint = Color.Gray
                     )
-                }
-        ) {
-            // 关闭按钮
-            IconButton(
-                onClick = onDismiss,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp)
-            ) {
-                Icon(
-                    painter = painterResource(Res.drawable.ic_close),
-                    contentDescription = "关闭",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
-
-            // 图片信息
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp)
-            ) {
-                Text(
-                    media.filename,
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    "${formatFileSize(media.size)} • ${media.width}x${media.height}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            // 图片内容
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp)
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            scale = max(0.5f, min(5f, scale * zoom))
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        }
-                    }
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offsetX,
-                        translationY = offsetY
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                when {
-                    isLoading -> {
-                        CircularProgressIndicator(color = Color.White)
-                    }
-                    fullImageBitmap != null -> {
-                        androidx.compose.foundation.Image(
-                            bitmap = fullImageBitmap!!,
-                            contentDescription = media.filename,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                    else -> {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                painter = painterResource(Res.drawable.ic_image_placeholder),
-                                contentDescription = "加载失败",
-                                modifier = Modifier.size(64.dp),
-                                tint = Color.Gray
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                "图片加载失败",
-                                color = Color.Gray
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("图片加载失败", color = Color.Gray)
                 }
             }
-
-            // 缩放提示
-            Text(
-                "双击重置 • 捏合缩放 • 点击关闭",
-                color = Color.White.copy(alpha = 0.5f),
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(16.dp)
-            )
         }
     }
 }
@@ -510,10 +592,8 @@ fun MediaGridItem(
             ) {
                 when {
                     isLoading -> {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp
-                        )
+                        // shimmer 呼吸占位：比固定小圆圈更顺滑，覆盖整格、视觉连贯。
+                        ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
                     }
 
                     thumbnailBitmap != null -> {
@@ -599,6 +679,28 @@ fun MediaGridItem(
             }
         }
     }
+}
+
+/**
+ * Shimmer 占位：在缩略图加载期间显示一段平滑的明暗呼吸渐变，比单个固定 loading
+ * 小圆圈更连贯、信息量更足（覆盖整格，视觉上明确"正在填充此处"）。
+ * 使用 [rememberInfiniteTransition] 做无限循环，frame 开销低。
+ */
+@Composable
+private fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.75f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "shimmerAlpha"
+    )
+    Box(
+        modifier = modifier.background(Color.Gray.copy(alpha = alpha))
+    )
 }
 
 /**

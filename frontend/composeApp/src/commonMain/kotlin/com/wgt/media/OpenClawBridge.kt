@@ -61,5 +61,6 @@ object OpenClawBridge {
         body = buildJsonObject { put("message", JsonPrimitive(message)) }
     )
 
-    private const val DEFAULT_COMMAND_PATH = "/api/v1/chat"
+    /** 默认命令路径，作为输入框占位示例（桥梁文档 §3.2 示例）。 */
+    const val DEFAULT_COMMAND_PATH = "/api/v1/chat"
 }
