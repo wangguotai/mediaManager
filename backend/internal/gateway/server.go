@@ -125,8 +125,8 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/stream/")
-	if mediaID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
 		return
 	}
 
@@ -145,8 +145,8 @@ func (s *Server) handleMediaThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/thumbnail/")
-	if mediaID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
 		return
 	}
 	sizeStr := r.URL.Query().Get("size")
@@ -221,8 +221,8 @@ func (s *Server) handleMediaMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/metadata/")
-	if mediaID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
 		return
 	}
 	resp, err := s.mediaSvc.GetMediaMetadata(r.Context(), &gen.GetMediaMetadataRequest{MediaId: mediaID})
