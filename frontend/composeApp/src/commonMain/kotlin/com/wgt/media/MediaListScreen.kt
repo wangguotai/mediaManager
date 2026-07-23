@@ -208,10 +208,18 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                 }
             } else {
                 // 媒体网格列表
+                // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
+                // 其余 Tab 保持原有交互：短按选中，长按预览。
                 MediaGrid(
                     mediaList = mediaList,
                     selectedMediaIds = viewModel.selectedMediaIds,
-                    onMediaClick = { media -> viewModel.toggleMediaSelection(media.id) },
+                    onMediaClick = { media ->
+                        if (selectedTab == 2) {
+                            previewMedia = media
+                        } else {
+                            viewModel.toggleMediaSelection(media.id)
+                        }
+                    },
                     onMediaLongClick = { media -> previewMedia = media },
                     useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
                     modifier = Modifier.fillMaxSize()
