@@ -39,6 +39,14 @@ dependencyResolutionManagement {
         maven {
             url = uri("https://jitpack.io")
         }
+        // 本地 flatDir 仓库：承载 rn-module/libs 下的 rn-sdk-debug.aar。
+        // rn-module 是 com.android.library（产 AAR），AGP 的 hasLocalAarDeps 校验禁止
+        // “AAR 产物模块用 fileTree 直接依赖本地 .aar”。改为经此 flatDir 仓库以“外部依赖”
+        // 形式引用（rn-module: implementation("rn-sdk-debug@aar")），绕过该校验。
+        // 路径相对 settings 所在目录（frontend）。
+        flatDir {
+            dirs("rn-module/libs")
+        }
     }
 }
 

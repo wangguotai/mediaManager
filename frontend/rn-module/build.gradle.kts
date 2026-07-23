@@ -66,8 +66,14 @@ kotlin {
 
                 // ============================================================================
                 // RN SDK (AAR)
+                // 经 settings.gradle.kts 声明的 flatDir 仓库（指向 rn-module/libs）以“外部依赖”
+                // 形式引用，而非 fileTree 直接依赖。原因：rn-module 是 com.android.library（产 AAR），
+                // AGP 的 hasLocalAarDeps 校验禁止“AAR 产物模块用 fileTree 直接依赖本地 .aar”
+                // （classes/resources 不会被打包进产出 AAR）。fileTree 形式会被拒绝，仅增量构建
+                // （不触发 bundleAar）时被缓存掩盖，clean assemble 全量构建才暴露。
+                // flatDir 下 group 默认为空；KMP 的 KotlinDependencyHandler 不接受 name/ext 形式，
+                // 故在文件底部 dependencies{} 用原生 add(mapOf) 走 androidMainImplementation 配置引用。
                 // ============================================================================
-                implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
                 // ============================================================================
                 // React Native 编译依赖 (api 由 rn-sdk 提供，需要在应用中显式声明)
                 // ============================================================================
@@ -121,6 +127,12 @@ dependencies {
     // 只在 commonMain 中生成代码，这样可以通过 expect/actual 模式在多平台共享
     add("kspCommonMainMetadata", project(":ksp-processor"))
     // 注意：不要添加 kspAndroid/kspAndroidMain，否则会导致重复生成
+
+    // RN SDK (AAR)：经 settings.gradle.kts 的 flatDir 仓库（指向 rn-module/libs）以“外部依赖”
+    // 形式引用。rn-module 是 com.android.library（产 AAR），AGP 的 hasLocalAarDeps 校验禁止
+    // 用 fileTree 直接依赖本地 .aar；改用原生 add(mapOf) 走 androidMainImplementation 配置，
+    // 使其作为仓库解析的外部依赖，绕过该校验。flatDir 按 name 匹配 rn-sdk-debug.aar。
+    add("androidMainImplementation", mapOf("group" to "", "name" to "rn-sdk-debug", "ext" to "aar"))
 }
 
 // 彻底禁用 KSP metadata 任务的构建缓存与 UP-TO-DATE 旁路。
