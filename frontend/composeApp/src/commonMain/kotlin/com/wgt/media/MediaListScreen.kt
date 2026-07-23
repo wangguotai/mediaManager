@@ -1,12 +1,14 @@
 package com.wgt.media
 
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -16,14 +18,18 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -222,19 +228,23 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                 }
             }
 
-            if (mediaList.isEmpty()) {
-                if (isLoading) {
-                    // 加载中状态
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator()
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("加载中...")
-                    }
-                } else {
+            // 网络错误优先级最高：后端未启动 / 请求异常时 listLoadError 持续占位，
+            // 驱动"加载失败 + 重试"页，避免落入"暂无 X"误导为白屏。
+            val listError = viewModel.listLoadError
+            when {
+                mediaList.isEmpty() && listError != null && !isLoading -> {
+                    ErrorStateView(
+                        message = listError,
+                        onRetry = onRefresh
+                    )
+                }
+
+                mediaList.isEmpty() && isLoading -> {
+                    // 加载中状态：圆圈 + 文案，背景留脉动 shimmer 条点缀，比纯圆圈更连贯。
+                    FullScreenLoading()
+                }
+
+                mediaList.isEmpty() -> {
                     // 空状态：仍包一层 PullToRefreshBox，便于在有数据前下拉重试请求。
                     PullToRefreshBox(
                         isRefreshing = isLoading,
@@ -264,29 +274,31 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                         }
                     }
                 }
-            } else {
-                // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
-                // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
-                // 其余 Tab 保持原有交互：短按选中，长按预览。
-                PullToRefreshBox(
-                    isRefreshing = isLoading,
-                    onRefresh = onRefresh,
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    MediaGrid(
-                        mediaList = mediaList,
-                        selectedMediaIds = viewModel.selectedMediaIds,
-                        onMediaClick = { media ->
-                            if (selectedTab == 2) {
-                                previewIndex = mediaList.indexOf(media)
-                            } else {
-                                viewModel.toggleMediaSelection(media.id)
-                            }
-                        },
-                        onMediaLongClick = { media -> previewIndex = mediaList.indexOf(media) },
-                        useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+
+                else -> {
+                    // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
+                    // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
+                    // 其余 Tab 保持原有交互：短按选中，长按预览。
+                    PullToRefreshBox(
+                        isRefreshing = isLoading,
+                        onRefresh = onRefresh,
                         modifier = Modifier.fillMaxSize()
-                    )
+                    ) {
+                        MediaGrid(
+                            mediaList = mediaList,
+                            selectedMediaIds = viewModel.selectedMediaIds,
+                            onMediaClick = { media ->
+                                if (selectedTab == 2) {
+                                    previewIndex = mediaList.indexOf(media)
+                                } else {
+                                    viewModel.toggleMediaSelection(media.id)
+                                }
+                            },
+                            onMediaLongClick = { media -> previewIndex = mediaList.indexOf(media) },
+                            useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
         }
@@ -297,7 +309,7 @@ fun MediaListScreen(viewModel: MediaViewModel) {
  * 图片预览对话框
  *
  * 基于 [androidx.compose.foundation.pager.HorizontalPager] 实现左右滑动切换上一张/下一张；
- * 每页是一个可双指缩放/平移的 [ZoomableImage]。点击空白或关闭按钮退出。
+ * 每页是一个可双指缩放/平移的 [ZoomableImage]。点击空白或按钮退出。
  *
  * @param mediaList 当前 Tab 的完整媒体列表
  * @param initialIndex 进入预览时聚焦的媒体在 [mediaList] 中的索引
@@ -326,7 +338,7 @@ fun ImagePreviewDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.95f))
+                .background(Color.Black)
         ) {
             // 可滑动切换的图片页
             HorizontalPager(
@@ -400,9 +412,12 @@ fun ImagePreviewDialog(
  * 单张可缩放图片。
  *
  * 缩放交互：双指捏合缩放 + 单指拖动平移（缩放>1 时生效）；双击在 1x/2x 间切换；
- * 单击（无拖动）触发关闭回调。缩放>1 时消费手势，避免误触发 pager 滑动——
+ * 单击逻辑修正——缩放态下单击**先复位缩放与平移**而非直接关闭，避免放大浏览时
+ * 单击误退预览；1x 下单击才触发关闭。缩放>1 时消费手势，避免误触发 pager 滑动——
  * 这里用 `pointerInput(scale)` 的 key 随缩放重建，使 `detectTransformGestures`
  * 与 pager 的水平滑动在缩放态下互不抢占（缩放态下主要由 transform 手势消费平移）。
+ *
+ * 复位用动画过渡，缩放/平移回落而非瞬切，手感更顺。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -417,6 +432,9 @@ private fun ZoomableImage(
     var offsetX by remember(media.id) { mutableStateOf(0f) }
     var offsetY by remember(media.id) { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
+
+    // 缩放/平移直接用手势值（瞬切，与原双击行为一致），优先保证手势跟手与
+    // 单击语义正确，避免动画与手势状态源互相干扰。放大态单击只复位不关闭。
 
     // 加载完整图片：本地相册走平台加载器；后端图片走 BackendImageLoader（HTTP stream）。
     LaunchedEffect(media.id, useBackendLoader) {
@@ -441,9 +459,18 @@ private fun ZoomableImage(
             .fillMaxSize()
             .pointerInput(scale) {
                 detectTapGestures(
-                    onTap = { onTapClose() },
+                    onTap = {
+                        if (scale > 1f) {
+                            // 放大态单击：只复位缩放/平移，不关闭预览，避免误退。
+                            scale = 1f
+                            offsetX = 0f
+                            offsetY = 0f
+                        } else {
+                            onTapClose()
+                        }
+                    },
                     onDoubleTap = {
-                        // 双击在 1x 与 2x 间切换，并复位平移
+                        // 双击在 1x 与 2x 间切换，并复位平移。
                         if (scale > 1f) {
                             scale = 1f
                             offsetX = 0f
@@ -475,16 +502,30 @@ private fun ZoomableImage(
     ) {
         when {
             isLoading -> {
-                CircularProgressIndicator(color = Color.White)
+                // 全屏加载占位：居中圆圈 + 下方 shimmer 条，比单一圆圈信息量更足。
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    ShimmerPlaceholder(
+                        modifier = Modifier
+                            .width(140.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                    )
+                }
             }
+
             fullImageBitmap != null -> {
-                androidx.compose.foundation.Image(
+                Image(
                     bitmap = fullImageBitmap!!,
                     contentDescription = media.filename,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit
                 )
             }
+
             else -> {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
@@ -515,8 +556,11 @@ fun MediaGrid(
     modifier: Modifier = Modifier
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 120.dp),
+        columns = GridCells.Adaptive(minSize = 110.dp),
+        // 外边距 8dp，项间 6dp：密集但不挤压，圆角卡片间留呼吸缝。
         contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
     ) {
         items(
@@ -530,7 +574,7 @@ fun MediaGrid(
                 onClick = { onMediaClick(media) },
                 onLongClick = { onMediaLongClick(media) },
                 useBackendLoader = useBackendLoader,
-                modifier = Modifier.padding(4.dp)
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }
@@ -572,32 +616,45 @@ fun MediaGridItem(
         }
     }
 
+    // 选中时加 primary 色细边框，强化点击反馈。
+    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
     Card(
         modifier = modifier
             .aspectRatio(1f)
+            .shadow(
+                elevation = if (isSelected) 6.dp else 3.dp,
+                shape = RoundedCornerShape(12.dp),
+                clip = false
+            )
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
-        shape = RoundedCornerShape(8.dp)
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
     ) {
-        Box {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .border(2.dp, borderColor, RoundedCornerShape(12.dp))
+        ) {
             // 媒体缩略图
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color.LightGray),
+                    .clip(RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 when {
                     isLoading -> {
-                        // shimmer 呼吸占位：比固定小圆圈更顺滑，覆盖整格、视觉连贯。
+                        // 扫光 shimmer 占位：覆盖整格、左→右高光扫过，明确"正在填充此处"。
                         ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
                     }
 
                     thumbnailBitmap != null -> {
-                        androidx.compose.foundation.Image(
+                        Image(
                             bitmap = thumbnailBitmap!!,
                             contentDescription = media.filename,
                             modifier = Modifier.fillMaxSize(),
@@ -611,37 +668,51 @@ fun MediaGridItem(
                             painter = painterResource(Res.drawable.ic_image_placeholder),
                             contentDescription = "占位图",
                             modifier = Modifier.size(48.dp),
-                            tint = Color.Gray
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                     }
+                }
+
+                // 选中遮罩：轻微暗化 + 边框已突出选中态，双重视觉提示。
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+                    )
                 }
 
                 // Live 图标识
                 if (media.is_live_photo) {
-                    Box(
+                    Row(
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(4.dp)
-                            .size(24.dp)
-                            .background(Color.Black.copy(alpha = 0.7f), CircleShape),
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.BottomStart)
+                            .padding(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            painterResource(Res.drawable.ic_play_arrow),
-                            contentDescription = "Live Photo",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                painterResource(Res.drawable.ic_play_arrow),
+                                contentDescription = "Live Photo",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
 
-            // 选中状态指示器
+            // 选中状态指示器（角落勾选）
             if (isSelected) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(4.dp)
+                        .padding(6.dp)
                         .size(24.dp)
                         .background(MaterialTheme.colorScheme.primary, CircleShape),
                     contentAlignment = Alignment.Center
@@ -660,7 +731,7 @@ fun MediaGridItem(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.7f))
+                    .background(Color.Black.copy(alpha = 0.55f))
                     .padding(4.dp)
             ) {
                 Text(
@@ -682,25 +753,121 @@ fun MediaGridItem(
 }
 
 /**
- * Shimmer 占位：在缩略图加载期间显示一段平滑的明暗呼吸渐变，比单个固定 loading
- * 小圆圈更连贯、信息量更足（覆盖整格，视觉上明确"正在填充此处"）。
- * 使用 [rememberInfiniteTransition] 做无限循环，frame 开销低。
+ * Shimmer 占位扫光：一段左→右移动的高光渐变扫过基色，模拟内容正在加载填充。
+ *
+ * - 宽高由 [modifier] 决定：网格项传 fillMaxSize() 覆盖整格；
+ *   预览加载态传固定宽度窄条做进度点缀。
+ * - 用 [rememberInfiniteTransition] 驱动高光水平位置（0f→1f 循环），
+ *   [drawBehind] 按比例构建线性渐变 brush，frame 开销低。
  */
 @Composable
 private fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "shimmer")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.75f,
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+            animation = tween(1100, easing = androidx.compose.animation.core.LinearEasing),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "shimmerAlpha"
+        label = "shimmerProgress"
     )
+    val baseLow = MaterialTheme.colorScheme.surfaceVariant
+    val baseHigh = MaterialTheme.colorScheme.surface
+    val highlight = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
     Box(
-        modifier = modifier.background(Color.Gray.copy(alpha = alpha))
+        modifier = modifier.drawBehind {
+            val w = size.width
+            val h = size.height
+            // 高光中心从 -0.5w 移到 1.5w，覆盖整宽，循环无缝。
+            val center = (progress * 2f - 0.5f) * w
+            val sweep = w * 0.5f
+            val brush = Brush.linearGradient(
+                colors = listOf(baseLow, baseHigh, highlight, baseHigh, baseLow),
+                start = Offset(center - sweep, 0f),
+                end = Offset(center + sweep, h)
+            )
+            drawRect(brush)
+        }
     )
+}
+
+/**
+ * 全屏加载态：圆圈 + 文案 + shimmer 进度条，比单一圆圈更连贯。
+ */
+@Composable
+private fun FullScreenLoading() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        ShimmerPlaceholder(
+            modifier = Modifier
+                .width(180.dp)
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+        )
+    }
+}
+
+/**
+ * 列表加载失败占位：图标 + 错误文案 + 重试按钮。
+ *
+ * 用于后端未启动 / 网络异常导致 [MediaViewModel.listLoadError] 非空且 mediaList 为空时，
+ * 替代"暂无 X"误导为白屏的场景。重试走对应 Tab 的强制刷新。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ErrorStateView(
+    message: String,
+    onRetry: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            painter = painterResource(Res.drawable.ic_image_placeholder),
+            contentDescription = null,
+            modifier = Modifier.size(72.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "加载失败",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        FilledTonalButton(onClick = onRetry) {
+            Icon(
+                painterResource(Res.drawable.ic_refresh),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("重试")
+        }
+    }
 }
 
 /**

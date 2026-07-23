@@ -15,8 +15,15 @@ private const val TAG = "BackendImageLoader"
  *
  * 取字节流在 commonMain 完成；解码交给平台实现 [decodeImageBitmap]（Android 用
  * BitmapFactory，iOS 用 skia），因为 skia 在 commonMain 不直接可见。
+ *
+ * 内置按 mediaId 的 [ImageBitmap] 内存缓存，命中即返回，避免预览左右滑动回滑、
+ * 网格上下滚动回滑时重复走 HTTP + 解码。缓存无上限（媒体量有限），缩略图/原图分别缓存。
  */
 object BackendImageLoader {
+
+    // 内存缓存：缩略图与原图按 "id" / "full:id" 区分 key，互不串扰。
+    private val thumbnailCache = mutableMapOf<String, ImageBitmap>()
+    private val fullImageCache = mutableMapOf<String, ImageBitmap>()
 
     /**
      * 加载缩略图。走 `GET /api/media/thumbnail/{id}?size=medium`。
@@ -25,9 +32,13 @@ object BackendImageLoader {
      * @return 解码后的 [ImageBitmap]；网络失败或解码失败返回 null
      */
     suspend fun loadThumbnail(mediaId: String): ImageBitmap? {
+        // 命中缓存直接返回，避免滚动/回滑重复请求。
+        thumbnailCache[mediaId]?.let { return it }
         return try {
             val bytes = MediaService.getThumbnail(mediaId, size = "medium")
-            decodeImageBitmap(bytes)
+            val decoded = decodeImageBitmap(bytes)
+            if (decoded != null) thumbnailCache[mediaId] = decoded
+            decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadThumbnail failed for $mediaId: ${e.message}")
             null
@@ -41,9 +52,12 @@ object BackendImageLoader {
      * @return 解码后的 [ImageBitmap]；失败返回 null
      */
     suspend fun loadFullImage(mediaId: String): ImageBitmap? {
+        fullImageCache[mediaId]?.let { return it }
         return try {
             val bytes = MediaService.getMediaStream(mediaId)
-            decodeImageBitmap(bytes)
+            val decoded = decodeImageBitmap(bytes)
+            if (decoded != null) fullImageCache[mediaId] = decoded
+            decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadFullImage failed for $mediaId: ${e.message}")
             null

@@ -42,8 +42,16 @@ class MediaViewModel {
     var isLoading by mutableStateOf(false)
         private set
 
-    // 错误状态
+    // 错误状态：一次性 Snackbar 消息（用于上传/删除等操作反馈，显示后即清）
     var errorMessage by mutableStateOf<String?>(null)
+        private set
+
+    // 列表加载失败占位文案（持续性）。
+    // 与 [errorMessage] 区分：errorMessage 是一次性 Snackbar，转瞬即逝；
+    // listLoadError 在列表为空且加载失败时驱动网格区显示“加载失败 + 重试”占位，
+    // 避免后端未启动时落入“暂无网盘图片”分支造成白屏/误导。
+    // 重试成功或命中缓存（说明曾成功过）后清空。
+    var listLoadError by mutableStateOf<String?>(null)
         private set
 
     // 上传状态
@@ -86,6 +94,7 @@ class MediaViewModel {
         if (!forceRefresh && cachedUploadedMedia != null) {
             mediaList = cachedUploadedMedia!!
             currentSource = MediaSource.BACKEND
+            listLoadError = null
             return
         }
 
@@ -93,6 +102,7 @@ class MediaViewModel {
 
         isLoading = true
         errorMessage = null
+        listLoadError = null
         currentSource = MediaSource.BACKEND
 
         viewModelScope.launch {
@@ -101,6 +111,8 @@ class MediaViewModel {
                 cachedUploadedMedia = uploadedMedia
                 mediaList = uploadedMedia
             } catch (e: Exception) {
+                mediaList = cachedUploadedMedia ?: emptyList()
+                listLoadError = e.message ?: "加载媒体列表失败"
                 errorMessage = "加载媒体列表失败: ${e.message}"
             } finally {
                 isLoading = false
@@ -117,8 +129,10 @@ class MediaViewModel {
      */
     fun loadCloudMediaList(forceRefresh: Boolean = false) {
         if (!forceRefresh && cachedCloudMedia != null) {
+            // 命中缓存：曾经成功加载过，无需提示错误。
             mediaList = cachedCloudMedia!!
             currentSource = MediaSource.BACKEND
+            listLoadError = null
             return
         }
 
@@ -126,18 +140,22 @@ class MediaViewModel {
 
         isCloudLoading = true
         errorMessage = null
+        listLoadError = null
         currentSource = MediaSource.BACKEND
 
         viewModelScope.launch {
             try {
                 // cloud=true → 后端附加 q=source=cloud，命中 LocalCloudSource（data/cloud-images）。
-                // 出错时 MediaService 不再回退 mock，直接抛出，这里捕获后展示错误与空列表。
+                // 出错时 MediaService 不再回退 mock，直接抛出，这里捕获后置 listLoadError。
                 val cloudMedia = MediaService.getMediaList(pageSize = 50, cloud = true)
                 cachedCloudMedia = cloudMedia
                 mediaList = cloudMedia
             } catch (e: Exception) {
-                mediaList = emptyList()
-                errorMessage = "加载网盘图片失败: ${e.message}"
+                // 列表加载失败：保留 listLoadError 持续占位，而非落入“暂无网盘图片”误导。
+                // mediaList 保持既有值（首次失败时为空），UI 由 listLoadError 驱动重试占位。
+                mediaList = cachedCloudMedia ?: emptyList()
+                listLoadError = e.message ?: "无法连接后端"
+                errorMessage = "加载网盘图片失败: ${listLoadError}"
             } finally {
                 isCloudLoading = false
             }
@@ -153,6 +171,7 @@ class MediaViewModel {
         if (!forceRefresh && cachedLocalMedia != null) {
             mediaList = cachedLocalMedia!!
             currentSource = MediaSource.LOCAL
+            listLoadError = null
             return
         }
 
@@ -160,6 +179,7 @@ class MediaViewModel {
 
         isGalleryLoading = true
         errorMessage = null
+        listLoadError = null
         currentSource = MediaSource.LOCAL
 
         viewModelScope.launch {
@@ -179,6 +199,8 @@ class MediaViewModel {
                 mediaList = galleryMedia
 
             } catch (e: Exception) {
+                mediaList = cachedLocalMedia ?: emptyList()
+                listLoadError = e.message ?: "加载照片图库失败"
                 errorMessage = "加载照片图库失败: ${e.message}"
             } finally {
                 isGalleryLoading = false
