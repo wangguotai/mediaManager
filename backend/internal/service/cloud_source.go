@@ -23,6 +23,10 @@ var cloudImageExts = map[string]bool{
 type CloudImageSource interface {
 	// GetCloudImages 返回网盘图片源中的图片元数据列表。
 	GetCloudImages() ([]*gen.MediaMetadata, error)
+
+	// Root 返回网盘图片源的数据根目录（本地目录扫描实现可用其作文件内容回退查找）。
+	// 对于无本地目录的远端实现，返回空串即可，调用方据此决定是否启用本地回退。
+	Root() string
 }
 
 // LocalCloudSource 基于本地目录扫描的网盘图片源实现。

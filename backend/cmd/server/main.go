@@ -67,6 +67,8 @@ func main() {
 		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
 		Timeout: 10 * time.Second,
 	}, mediaService, uploadsDir)
+	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
+	restSrv.SetCloudDir(cloudImagesDir)
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())
 	if err := restSrv.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to serve REST: %v", err)

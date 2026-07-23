@@ -34,9 +34,14 @@ type Server struct {
 	mux        *http.ServeMux
 	mediaSvc   gen.MediaServiceServer
 	uploadsDir string
+	cloudDir   string // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
+//
+// cloudDir 为网盘图片源根目录（data/cloud-images），供 /api/media/stream 在 uploads
+// 目录找不到时回退查找网盘原图；传空串则禁用回退。mediaSvc 若实现了 service.MediaService，
+// 会自动取其 CloudImagesDir() 填充，调用方也可直接通过 cloudDir 覆盖。
 func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer, uploadsDir string) *Server {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
@@ -52,6 +57,9 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 	s.registerRoutes()
 	return s
 }
+
+// SetCloudDir 注入网盘图片源根目录，启用 /api/media/stream 对网盘原图的回退查找。
+func (s *Server) SetCloudDir(dir string) { s.cloudDir = dir }
 
 func (s *Server) registerRoutes() {
 	// OpenClaw bridge
@@ -133,8 +141,14 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 	// Direct file read (bypasses gRPC streaming for REST)
 	files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*"))
 	if err != nil || len(files) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
-		return
+		// uploads 目录未命中 → 回退到网盘图片源目录（网盘图片 id 为去扩展名的文件名）。
+		if s.cloudDir != "" {
+			files, err = filepath.Glob(filepath.Join(s.cloudDir, mediaID+".*"))
+		}
+		if err != nil || len(files) == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+			return
+		}
 	}
 	http.ServeFile(w, r, files[0])
 }

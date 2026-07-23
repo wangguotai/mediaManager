@@ -49,6 +49,34 @@ func (s *MediaService) SetCloudSource(src CloudImageSource) {
 
 const cloudSearchPrefix = "source=cloud"
 
+// CloudImagesDir 返回注入的网盘图片源根目录；未配置 LocalCloudSource 时返回空串。
+// 供 REST gateway 的 /api/media/stream 在 uploads 目录找不到时回退查找网盘原图。
+func (s *MediaService) CloudImagesDir() string {
+	if src, ok := s.cloudSource.(*LocalCloudSource); ok {
+		return src.Root()
+	}
+	return ""
+}
+
+// resolveMediaPath 按 mediaID 查找源文件的磁盘路径：先在 uploads 目录按
+// "mediaID.*" 匹配，未命中再回退到网盘图片源根目录（data/cloud-images）。
+// 网盘图片的 id 是去扩展名的文件名（如 test-cloud-image），与 uploads 的 uuid id
+// 同样适用 "id+.*" glob。返回空串表示未找到。
+func (s *MediaService) resolveMediaPath(mediaID string) string {
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		return ""
+	}
+	if files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*")); err == nil && len(files) > 0 {
+		return files[0]
+	}
+	if root := s.CloudImagesDir(); root != "" {
+		if files, err := filepath.Glob(filepath.Join(root, mediaID+".*")); err == nil && len(files) > 0 {
+			return files[0]
+		}
+	}
+	return ""
+}
+
 func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) error {
 	var currentMediaID string
 	var currentFile *os.File
@@ -304,11 +332,11 @@ func (s *MediaService) GetMediaMetadata(ctx context.Context, req *gen.GetMediaMe
 func (s *MediaService) GetMediaStream(req *gen.GetMediaStreamRequest, stream gen.MediaService_GetMediaStreamServer) error {
 	ctx := stream.Context()
 
-	files, err := filepath.Glob(filepath.Join(s.uploadsDir, req.MediaId+".*"))
-	if err != nil || len(files) == 0 {
+	// resolveMediaPath 同时覆盖 uploads 与网盘图片目录，使网盘原图也能通过 gRPC 流式获取。
+	path := s.resolveMediaPath(req.MediaId)
+	if path == "" {
 		return fmt.Errorf("media not found: %s", req.MediaId)
 	}
-	path := files[0]
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
@@ -390,11 +418,11 @@ func (s *MediaService) GetMediaStream(req *gen.GetMediaStreamRequest, stream gen
 }
 
 func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRequest) (*gen.GetThumbnailResponse, error) {
-	files, err := filepath.Glob(filepath.Join(s.uploadsDir, req.MediaId+".*"))
-	if err != nil || len(files) == 0 {
+	// resolveMediaPath 同时覆盖 uploads 与网盘图片目录，使网盘图片也能生成缩略图。
+	path := s.resolveMediaPath(req.MediaId)
+	if path == "" {
 		return nil, fmt.Errorf("media not found: %s", req.MediaId)
 	}
-	path := files[0]
 
 	if s.detectMediaType(path) != gen.MediaType_IMAGE {
 		return nil, fmt.Errorf("thumbnails are only supported for images")
