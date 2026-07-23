@@ -1,23 +1,14 @@
 {
-  "codex": {
-    "task": "后端网盘图片源 (cloud_source.go)",
-    "status": "done",
-    "commit": "ea4f6ad",
-    "files": ["backend/internal/service/cloud_source.go", "backend/internal/service/media_service.go", "backend/cmd/server/main.go"],
-    "started_at": "2026-07-23T14:08:00+08:00",
-    "completed_at": "2026-07-23T14:18:00+08:00",
-    "retries": 0,
-    "max_retries": 3,
-    "build_verified": true
-  },
-  "claude": {
+  "codex-001": {
+    "product": "codex",
     "task": "前端编译检查修复",
-    "status": "in_progress",
+    "status": "running",
+    "log": "/tmp/agent-codex-001.log",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "started_at": "2026-07-23T15:59:00+08:00",
     "commit": null,
-    "files": ["frontend/feature-media/src/commonMain/kotlin/com/wgt/feature/media/MediaService.kt"],
-    "started_at": "2026-07-23T14:08:00+08:00",
     "retries": 0,
     "max_retries": 3,
-    "note": "Claude 已运行 20min，仍在处理中"
+    "files": ["frontend/"]
   }
 }
