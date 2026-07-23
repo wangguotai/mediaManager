@@ -88,9 +88,23 @@ dependencies {
 //    add("kspIosArm64", project(":ksp-processor"))
 //    add("kspIosSimulatorArm64", project(":ksp-processor"))
 }
-// 确保所有平台的编译任务都依赖 kspCommonMainMetadata
+
+// 禁用 KSP metadata 任务的构建缓存。
+// 原因：KSP 的缓存键不能随 ksp-processor 源码变更而失效，processor 变更后
+// 会命中旧的（空的）缓存快照，Gradle 从缓存恢复时会先清空输出目录，
+// 把真实生成的代码删掉，导致 compileAndroidMain 等任务报 Unresolved reference。
+// 该任务执行很快，禁用缓存可保证每次都真正生成代码。
+tasks.named("kspCommonMainKotlinMetadata") {
+    outputs.cacheIf { false }
+}
+
+// 确保所有消费 commonMain 的编译任务都依赖 kspCommonMainKotlinMetadata，
+// 否则 clean 后 build/generated/ksp/... 被清理，编译任务不会重新触发生成，
+// 导致 KSP 生成的符号（如 permission）无法解析。
+// 注意：compileAndroidMain 和 compileCommonMainKotlinMetadata 都不以 "compileKotlin" 开头，
+// 故用 "compile" 前缀统一覆盖。
 tasks.configureEach {
-    if (name.startsWith("compileKotlin") && name != "kspCommonMainKotlinMetadata") {
+    if (name.startsWith("compile") && name != "kspCommonMainKotlinMetadata") {
         dependsOn("kspCommonMainKotlinMetadata")
     }
 }
