@@ -73,6 +73,7 @@ fun MediaListScreen(viewModel: MediaViewModel) {
     previewMedia?.let { media ->
         ImagePreviewDialog(
             media = media,
+            useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
             onDismiss = { previewMedia = null }
         )
     }
@@ -212,6 +213,7 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                     selectedMediaIds = viewModel.selectedMediaIds,
                     onMediaClick = { media -> viewModel.toggleMediaSelection(media.id) },
                     onMediaLongClick = { media -> previewMedia = media },
+                    useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -226,7 +228,8 @@ fun MediaListScreen(viewModel: MediaViewModel) {
 @Composable
 fun ImagePreviewDialog(
     media: MediaMetadata,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    useBackendLoader: Boolean = false
 ) {
     var fullImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -235,11 +238,15 @@ fun ImagePreviewDialog(
     var offsetY by remember { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
 
-    // 加载完整图片
-    LaunchedEffect(media.id) {
+    // 加载完整图片：本地相册走平台加载器；后端图片走 BackendImageLoader（HTTP stream）。
+    LaunchedEffect(media.id, useBackendLoader) {
         scope.launch(dispatchers.io) {
             try {
-                val image = loadFullImage(media.id)
+                val image = if (useBackendLoader) {
+                    BackendImageLoader.loadFullImage(media.id)
+                } else {
+                    loadFullImage(media.id)
+                }
                 fullImageBitmap = image
             } catch (e: Exception) {
                 // 加载失败
@@ -381,6 +388,7 @@ fun MediaGrid(
     selectedMediaIds: List<String>,
     onMediaClick: (MediaMetadata) -> Unit,
     onMediaLongClick: (MediaMetadata) -> Unit,
+    useBackendLoader: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     LazyVerticalGrid(
@@ -398,6 +406,7 @@ fun MediaGrid(
                 isSelected = selectedMediaIds.contains(media.id),
                 onClick = { onMediaClick(media) },
                 onLongClick = { onMediaLongClick(media) },
+                useBackendLoader = useBackendLoader,
                 modifier = Modifier.padding(4.dp)
             )
         }
@@ -414,6 +423,7 @@ fun MediaGridItem(
     isSelected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    useBackendLoader: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // 缩略图状态
@@ -421,11 +431,15 @@ fun MediaGridItem(
     var isLoading by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
-    // 异步加载缩略图
-    LaunchedEffect(media.id) {
+    // 异步加载缩略图：本地相册走平台 MediaStore/PHAsset；后端图片走 BackendImageLoader（HTTP）。
+    LaunchedEffect(media.id, useBackendLoader) {
         scope.launch(dispatchers.io) {
             try {
-                val thumbnail = loadThumbnail(media.id)
+                val thumbnail = if (useBackendLoader) {
+                    BackendImageLoader.loadThumbnail(media.id)
+                } else {
+                    loadThumbnail(media.id)
+                }
                 thumbnailBitmap = thumbnail
             } catch (e: Exception) {
                 // 加载失败

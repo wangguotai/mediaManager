@@ -11,9 +11,13 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.delay
+import com.wgt.platform.logger.logger
 import kotlin.time.Clock
 
-private const val BASE_URL = "http://192.168.31.20:8080"
+// 后端 REST gateway 地址。必须用运行后端的机器在局域网内的 IP，而非 localhost：
+// Android 真机的 localhost 指向真机自身，访问不到开发机的服务。
+// 此处为本机局域网 IP（确认方式：ifconfig 看 en0/wlan 的 inet）。
+private const val BASE_URL = "http://192.168.31.251:8080"
 
 private val jsonClient = HttpClient {
     install(ContentNegotiation) {
@@ -29,22 +33,50 @@ object MediaService {
     private var mediaCache: List<MediaMetadata>? = null
 
     /**
-     * 从后端获取媒体列表（分页）
+     * 媒体来源 —— 用于前端区分缩略图/原图该走本地相册还是后端 HTTP。
+     * 网盘图片与已上传图片都来自后端，缩略图/原图需通过 REST 端点加载；
+     * 本地图片来自设备相册，走平台 MediaStore/PHAsset。
      */
-    suspend fun getMediaList(page: Int = 1, pageSize: Int = 20): List<MediaMetadata> {
-        // 暂时回退 MOCK —— 后端未启动时保证 UI 可用
+    enum class MediaSource { LOCAL, BACKEND }
+
+    /**
+     * 从后端获取媒体列表（分页）。
+     *
+     * @param source 当为 [MediaSource.BACKEND] 且 [cloud] 为 true 时，附加 `q=source=cloud`
+     *               查询参数，命中后端网盘图片源（LocalCloudSource）。默认查 uploads 目录。
+     * @param cloud 是否查询网盘图片源（仅对 BACKEND 有意义）。
+     *
+     * 注意：网盘场景（cloud=true）出错时**不**回退 mock 数据，直接抛出——避免假数据
+     * 污染网盘 Tab；调用方捕获异常后展示空状态/错误提示。其余场景保持原有 mock 容错。
+     */
+    suspend fun getMediaList(
+        page: Int = 1,
+        pageSize: Int = 20,
+        source: MediaSource = MediaSource.BACKEND,
+        cloud: Boolean = false
+    ): List<MediaMetadata> {
         return try {
             val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/list") {
                 parameter("page", page)
                 parameter("page_size", pageSize)
+                if (cloud) parameter("q", "source=cloud")
             }
             if (response.status == HttpStatusCode.OK) {
                 val body: String = response.body()
-                parseMediaList(body)
+                val parsed = parseMediaList(body)
+                logger.info(
+                    "MediaService",
+                    "getMediaList cloud=$cloud status=${response.status} parsed=${parsed.size}"
+                )
+                parsed
             } else {
+                // 网盘场景不回退 mock，保证 UI 真实性
+                if (cloud) throw RuntimeException("后端返回 ${response.status}")
                 mockMediaList(page)
             }
         } catch (e: Exception) {
+            logger.error("MediaService", "getMediaList FAILED cloud=$cloud: ${e::class.simpleName} ${e.message}")
+            if (cloud) throw e
             mockMediaList(page)
         }
     }

@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import com.wgt.architecture.manager.claim.feature
 import com.wgt.architecture.manager.manager
 import com.wgt.feature.media.MediaService
+import com.wgt.feature.media.MediaService.MediaSource
 import com.wgt.platform.logger.logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +28,11 @@ class MediaViewModel {
 
     // 媒体列表状态
     var mediaList by mutableStateOf<List<MediaMetadata>>(emptyList())
+        private set
+
+    // 当前 mediaList 的来源 —— 决定 UI 用本地相册加载器还是后端 HTTP 加载器解码缩略图/原图。
+    // 切换 Tab / 加载完成时更新；默认 LOCAL（与初始 loadMediaFromGallery 一致）。
+    var currentSource by mutableStateOf(MediaSource.LOCAL)
         private set
 
     // 选中的媒体ID列表
@@ -79,6 +85,7 @@ class MediaViewModel {
         // 如果有缓存且不需要强制刷新，直接使用缓存
         if (!forceRefresh && cachedUploadedMedia != null) {
             mediaList = cachedUploadedMedia!!
+            currentSource = MediaSource.BACKEND
             return
         }
 
@@ -86,6 +93,7 @@ class MediaViewModel {
 
         isLoading = true
         errorMessage = null
+        currentSource = MediaSource.BACKEND
 
         viewModelScope.launch {
             try {
@@ -110,6 +118,7 @@ class MediaViewModel {
     fun loadCloudMediaList(forceRefresh: Boolean = false) {
         if (!forceRefresh && cachedCloudMedia != null) {
             mediaList = cachedCloudMedia!!
+            currentSource = MediaSource.BACKEND
             return
         }
 
@@ -117,13 +126,17 @@ class MediaViewModel {
 
         isCloudLoading = true
         errorMessage = null
+        currentSource = MediaSource.BACKEND
 
         viewModelScope.launch {
             try {
-                val cloudMedia = MediaService.getMediaList(pageSize = 50)
+                // cloud=true → 后端附加 q=source=cloud，命中 LocalCloudSource（data/cloud-images）。
+                // 出错时 MediaService 不再回退 mock，直接抛出，这里捕获后展示错误与空列表。
+                val cloudMedia = MediaService.getMediaList(pageSize = 50, cloud = true)
                 cachedCloudMedia = cloudMedia
                 mediaList = cloudMedia
             } catch (e: Exception) {
+                mediaList = emptyList()
                 errorMessage = "加载网盘图片失败: ${e.message}"
             } finally {
                 isCloudLoading = false
@@ -139,6 +152,7 @@ class MediaViewModel {
         // 如果有缓存且不需要强制刷新，直接使用缓存
         if (!forceRefresh && cachedLocalMedia != null) {
             mediaList = cachedLocalMedia!!
+            currentSource = MediaSource.LOCAL
             return
         }
 
@@ -146,6 +160,7 @@ class MediaViewModel {
 
         isGalleryLoading = true
         errorMessage = null
+        currentSource = MediaSource.LOCAL
 
         viewModelScope.launch {
             try {
