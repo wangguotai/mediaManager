@@ -1,6 +1,3 @@
-// 在文件顶部添加
-apply(from = "scripts/dev/init.gradle.kts")
-
 rootProject.name = "mediaManager"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
