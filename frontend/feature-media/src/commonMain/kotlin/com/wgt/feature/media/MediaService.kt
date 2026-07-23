@@ -87,8 +87,17 @@ object MediaService {
     suspend fun getMediaStream(mediaId: String): ByteArray? {
         return try {
             val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/stream/$mediaId")
-            if (response.status == HttpStatusCode.OK) response.body() else null
-        } catch (e: Exception) { null }
+            val bytes = if (response.status == HttpStatusCode.OK) response.body<ByteArray>() else null
+            if (bytes != null) {
+                logger.info("MediaService", "getMediaStream id=$mediaId status=${response.status} bytes=${bytes.size}")
+            } else {
+                logger.info("MediaService", "getMediaStream id=$mediaId status=${response.status} (no body)")
+            }
+            bytes
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaStream FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
     }
 
     /**
@@ -99,8 +108,17 @@ object MediaService {
             val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/thumbnail/$mediaId") {
                 parameter("size", size)
             }
-            if (response.status == HttpStatusCode.OK) response.body() else null
-        } catch (e: Exception) { null }
+            val bytes = if (response.status == HttpStatusCode.OK) response.body<ByteArray>() else null
+            if (bytes != null) {
+                logger.info("MediaService", "getThumbnail id=$mediaId status=${response.status} bytes=${bytes.size}")
+            } else {
+                logger.info("MediaService", "getThumbnail id=$mediaId status=${response.status} (no body)")
+            }
+            bytes
+        } catch (e: Exception) {
+            logger.error("MediaService", "getThumbnail FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
     }
 
     /**

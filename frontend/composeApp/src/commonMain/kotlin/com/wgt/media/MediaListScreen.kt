@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -95,9 +96,9 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                         IconButton(
                             onClick = {
                                 when (selectedTab) {
-                                    0 -> viewModel.loadMediaFromGallery()
-                                    1 -> viewModel.loadUploadedMediaList()
-                                    else -> viewModel.loadCloudMediaList()
+                                    0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                                    1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
                                 }
                             },
                             enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
@@ -179,53 +180,83 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                 else -> viewModel.isLoading
             }
             val mediaList = viewModel.mediaList
-
-            if (isLoading && mediaList.isEmpty()) {
-                // 加载中状态
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator()
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("加载中...")
+            // 下拉刷新：网格为空时走全屏加载/空状态占位，无法也不必下拉；
+            // 有内容后下拉即触发对应 Tab 的强制刷新（forceRefresh=true，绕过缓存真正请求后端）。
+            // isRefreshing 直接复用各 Tab 的 loading 状态，刷新指示器会随请求开始/结束自动显隐。
+            val onRefresh = {
+                when (selectedTab) {
+                    0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                    1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
                 }
-            } else if (mediaList.isEmpty()) {
-                // 空状态
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        when (selectedTab) {
-                            0 -> "暂无本地图片"
-                            2 -> "暂无网盘图片"
-                            else -> "暂无已上传图片"
-                        },
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
+            }
+
+            if (mediaList.isEmpty()) {
+                if (isLoading) {
+                    // 加载中状态
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("加载中...")
+                    }
+                } else {
+                    // 空状态：仍包一层 PullToRefreshBox，便于在有数据前下拉重试请求。
+                    PullToRefreshBox(
+                        isRefreshing = isLoading,
+                        onRefresh = onRefresh,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                when (selectedTab) {
+                                    0 -> "暂无本地图片"
+                                    2 -> "暂无网盘图片"
+                                    else -> "暂无已上传图片"
+                                },
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "下拉刷新",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            )
+                        }
+                    }
                 }
             } else {
-                // 媒体网格列表
+                // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
                 // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
                 // 其余 Tab 保持原有交互：短按选中，长按预览。
-                MediaGrid(
-                    mediaList = mediaList,
-                    selectedMediaIds = viewModel.selectedMediaIds,
-                    onMediaClick = { media ->
-                        if (selectedTab == 2) {
-                            previewMedia = media
-                        } else {
-                            viewModel.toggleMediaSelection(media.id)
-                        }
-                    },
-                    onMediaLongClick = { media -> previewMedia = media },
-                    useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                PullToRefreshBox(
+                    isRefreshing = isLoading,
+                    onRefresh = onRefresh,
                     modifier = Modifier.fillMaxSize()
-                )
+                ) {
+                    MediaGrid(
+                        mediaList = mediaList,
+                        selectedMediaIds = viewModel.selectedMediaIds,
+                        onMediaClick = { media ->
+                            if (selectedTab == 2) {
+                                previewMedia = media
+                            } else {
+                                viewModel.toggleMediaSelection(media.id)
+                            }
+                        },
+                        onMediaLongClick = { media -> previewMedia = media },
+                        useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
     }
