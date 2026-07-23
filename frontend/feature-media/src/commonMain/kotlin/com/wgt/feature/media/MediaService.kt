@@ -2,107 +2,204 @@ package com.wgt.feature.media
 
 import media.MediaMetadata
 import media.MediaType
+import io.ktor.client.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.client.call.*
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.client.call.body
+import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
+import kotlinx.serialization.json.*
 import kotlinx.coroutines.delay
 import kotlin.time.Clock
 
+private const val BASE_URL = "http://192.168.31.20:8080"
+
+private val jsonClient = HttpClient {
+    install(ContentNegotiation) {
+        json(Json { ignoreUnknownKeys = true; isLenient = true })
+    }
+}
+
 /**
- * MOCK 媒体服务
+ * 媒体服务 — 连接后端 REST gateway
  */
 object MediaService {
-    
+
+    private var mediaCache: List<MediaMetadata>? = null
+
     /**
-     * 获取媒体列表
+     * 从后端获取媒体列表（分页）
      */
     suspend fun getMediaList(page: Int = 1, pageSize: Int = 20): List<MediaMetadata> {
-        // 模拟网络延迟
-        delay(500)
-        
+        // 暂时回退 MOCK —— 后端未启动时保证 UI 可用
+        return try {
+            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/list") {
+                parameter("page", page)
+                parameter("page_size", pageSize)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                parseMediaList(body)
+            } else {
+                mockMediaList(page)
+            }
+        } catch (e: Exception) {
+            mockMediaList(page)
+        }
+    }
+
+    /**
+     * 获取图片原图字节流 (通过后端 REST proxy → gRPC GetMediaStream)
+     */
+    suspend fun getMediaStream(mediaId: String): ByteArray? {
+        return try {
+            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/stream/$mediaId")
+            if (response.status == HttpStatusCode.OK) response.body() else null
+        } catch (e: Exception) { null }
+    }
+
+    /**
+     * 获取缩略图字节
+     */
+    suspend fun getThumbnail(mediaId: String, size: String = "medium"): ByteArray? {
+        return try {
+            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/thumbnail/$mediaId") {
+                parameter("size", size)
+            }
+            if (response.status == HttpStatusCode.OK) response.body() else null
+        } catch (e: Exception) { null }
+    }
+
+    /**
+     * 批量删除媒体
+     */
+    suspend fun deleteMedia(mediaIds: List<String>): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("$BASE_URL/api/media/delete") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("media_ids", Json.encodeToJsonElement(mediaIds)) })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            delay(300)
+            true
+        }
+    }
+
+    /**
+     * 上传媒体
+     */
+    suspend fun uploadMedia(fileData: ByteArray, filename: String, isLivePhoto: Boolean = false): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("$BASE_URL/api/media/upload") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("filename", filename)
+                    put("is_live_photo", isLivePhoto)
+                    put("data", Json.encodeToJsonElement(fileData.toList()))
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            delay(1000)
+            true
+        }
+    }
+
+    /**
+     * 发送命令到 OpenClaw (通过后端桥梁)
+     *
+     * @param path OpenClaw gateway 上的路径，必须以 '/' 开头
+     * @param method HTTP method，默认 POST；后端白名单 GET/POST/PUT/PATCH/DELETE
+     * @param body 请求体 JSON，可选
+     */
+    suspend fun sendOpenClawCommand(
+        path: String,
+        method: String = "POST",
+        body: JsonObject? = null
+    ): JsonObject? {
+        return try {
+            val response: HttpResponse = jsonClient.post("$BASE_URL/api/openclaw/command") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("path", path)
+                    put("method", method)
+                    if (body != null) put("body", body)
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                Json.decodeFromString(JsonObject.serializer(), respBody)
+            } else null
+        } catch (e: Exception) { null }
+    }
+
+    // ---- 解析 ----
+
+    private fun parseMediaList(json: String): List<MediaMetadata> {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        return obj["media_list"]?.jsonArray?.map { item ->
+            val m = item.jsonObject
+            MediaMetadata(
+                id = m["id"]?.jsonPrimitive?.content ?: "",
+                filename = m["filename"]?.jsonPrimitive?.content ?: "",
+                type = MediaType.valueOf(m["type"]?.jsonPrimitive?.content?.uppercase() ?: "IMAGE"),
+                size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                mime_type = m["mime_type"]?.jsonPrimitive?.content ?: "",
+                created_at = m["created_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                updated_at = m["updated_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.boolOrNull ?: false,
+                live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
+                width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
+            )
+        } ?: emptyList()
+    }
+
+    // ---- MOCK fallback ----
+
+    private fun mockMediaList(page: Int): List<MediaMetadata> {
         return when (page) {
             1 -> listOf(
                 MediaMetadata(
-                    id = "1",
-                    filename = "photo1.jpg",
-                    type = MediaType.IMAGE,
-                    size = 2048576,
-                    mime_type = "image/jpeg",
+                    id = "1", filename = "photo1.jpg", type = MediaType.IMAGE,
+                    size = 2048576, mime_type = "image/jpeg",
                     created_at = Clock.System.now().toEpochMilliseconds() - 86400000,
                     updated_at = Clock.System.now().toEpochMilliseconds(),
                     is_live_photo = false
                 ),
                 MediaMetadata(
-                    id = "2",
-                    filename = "live_photo1.jpg",
-                    type = MediaType.LIVE_PHOTO,
-                    size = 5048576,
-                    mime_type = "image/jpeg",
+                    id = "2", filename = "live_photo1.jpg", type = MediaType.LIVE_PHOTO,
+                    size = 5048576, mime_type = "image/jpeg",
                     created_at = Clock.System.now().toEpochMilliseconds() - 172800000,
                     updated_at = Clock.System.now().toEpochMilliseconds() - 172800000,
-                    is_live_photo = true,
-                    live_photo_video_id = "video1"
+                    is_live_photo = true, live_photo_video_id = "video1"
                 ),
                 MediaMetadata(
-                    id = "3",
-                    filename = "photo2.png",
-                    type = MediaType.IMAGE,
-                    size = 1048576,
-                    mime_type = "image/png",
+                    id = "3", filename = "photo2.png", type = MediaType.IMAGE,
+                    size = 1048576, mime_type = "image/png",
                     created_at = Clock.System.now().toEpochMilliseconds() - 259200000,
                     updated_at = Clock.System.now().toEpochMilliseconds() - 259200000,
                     is_live_photo = false
                 ),
                 MediaMetadata(
-                    id = "4",
-                    filename = "live_photo2.jpg",
-                    type = MediaType.LIVE_PHOTO,
-                    size = 6048576,
-                    mime_type = "image/jpeg",
+                    id = "4", filename = "live_photo2.jpg", type = MediaType.LIVE_PHOTO,
+                    size = 6048576, mime_type = "image/jpeg",
                     created_at = Clock.System.now().toEpochMilliseconds() - 345600000,
                     updated_at = Clock.System.now().toEpochMilliseconds() - 345600000,
-                    is_live_photo = true,
-                    live_photo_video_id = "video2"
+                    is_live_photo = true, live_photo_video_id = "video2"
                 ),
                 MediaMetadata(
-                    id = "5",
-                    filename = "photo3.jpg",
-                    type = MediaType.IMAGE,
-                    size = 3048576,
-                    mime_type = "image/jpeg",
+                    id = "5", filename = "photo3.jpg", type = MediaType.IMAGE,
+                    size = 3048576, mime_type = "image/jpeg",
                     created_at = Clock.System.now().toEpochMilliseconds() - 432000000,
                     updated_at = Clock.System.now().toEpochMilliseconds() - 432000000,
                     is_live_photo = false
                 )
             )
             else -> emptyList()
-        }
-    }
-    
-    /**
-     * 批量删除媒体
-     */
-    suspend fun deleteMedia(mediaIds: List<String>): Boolean {
-        delay(300)
-        println("删除媒体: $mediaIds")
-        return true
-    }
-    
-    /**
-     * 上传媒体
-     */
-    suspend fun uploadMedia(fileData: ByteArray, filename: String, isLivePhoto: Boolean = false): Boolean {
-        delay(1000)
-        println("上传媒体: $filename, Live图: $isLivePhoto, 大小: ${fileData.size} bytes")
-        return true
-    }
-    
-    /**
-     * 获取Live图视频URL
-     */
-    suspend fun getLivePhotoVideoUrl(mediaId: String): String? {
-        delay(200)
-        return if (mediaId == "2" || mediaId == "4") {
-            "https://example.com/video/$mediaId.mp4"
-        } else {
-            null
         }
     }
 }
