@@ -4,6 +4,7 @@ import com.wgt.feature.media.MediaService
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * OpenClaw 桥梁 — 通过 media-manager 后端的 /api/openclaw/command 端点
