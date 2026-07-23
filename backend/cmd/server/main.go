@@ -37,7 +37,13 @@ func main() {
 		log.Fatalf("Failed to create thumbnails directory: %v", err)
 	}
 
+	cloudImagesDir := filepath.Join(dataDir, "cloud-images")
+	if err := os.MkdirAll(cloudImagesDir, 0755); err != nil {
+		log.Fatalf("Failed to create cloud-images directory: %v", err)
+	}
+
 	mediaService := service.NewMediaService(uploadsDir, thumbsDir)
+	mediaService.SetCloudSource(service.NewLocalCloudSource(cloudImagesDir))
 
 	// Start gRPC server
 	lis, err := net.Listen("tcp", grpcPort)

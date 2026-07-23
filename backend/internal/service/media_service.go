@@ -30,8 +30,9 @@ var thumbnailLongEdge = map[gen.ThumbnailSize]int{
 
 type MediaService struct {
 	gen.UnimplementedMediaServiceServer
-	uploadsDir string
-	thumbsDir  string
+	uploadsDir  string
+	thumbsDir   string
+	cloudSource CloudImageSource
 }
 
 func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
@@ -40,6 +41,13 @@ func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
 		thumbsDir:  thumbsDir,
 	}
 }
+
+// SetCloudSource 注入网盘图片源；为 nil 表示禁用 source=cloud 查询能力。
+func (s *MediaService) SetCloudSource(src CloudImageSource) {
+	s.cloudSource = src
+}
+
+const cloudSearchPrefix = "source=cloud"
 
 func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) error {
 	var currentMediaID string
@@ -105,6 +113,11 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 }
 
 func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRequest) (*gen.GetMediaListResponse, error) {
+	// 当 searchQuery 以 "source=cloud" 开头时，改用网盘图片源返回图片。
+	if strings.HasPrefix(req.SearchQuery, cloudSearchPrefix) {
+		return s.getCloudMediaList(req)
+	}
+
 	// Scan uploads directory for media files
 	files, err := os.ReadDir(s.uploadsDir)
 	if err != nil {
@@ -156,6 +169,62 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 	})
 
 	// Apply pagination
+	startIndex := int(req.Page-1) * int(req.PageSize)
+	endIndex := startIndex + int(req.PageSize)
+	if startIndex >= len(mediaList) {
+		return &gen.GetMediaListResponse{
+			MediaList:  []*gen.MediaMetadata{},
+			TotalCount: int32(len(mediaList)),
+			Page:       req.Page,
+			PageSize:   req.PageSize,
+		}, nil
+	}
+
+	if endIndex > len(mediaList) {
+		endIndex = len(mediaList)
+	}
+
+	return &gen.GetMediaListResponse{
+		MediaList:  mediaList[startIndex:endIndex],
+		TotalCount: int32(len(mediaList)),
+		Page:       req.Page,
+		PageSize:   req.PageSize,
+	}, nil
+}
+
+// getCloudMediaList 通过注入的 CloudImageSource 获取网盘图片，支持附加的关键字过滤与分页。
+func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest) (*gen.GetMediaListResponse, error) {
+	if s.cloudSource == nil {
+		return nil, fmt.Errorf("cloud source is not configured")
+	}
+
+	allImages, err := s.cloudSource.GetCloudImages()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch cloud images: %v", err)
+	}
+
+	// 去掉 "source=cloud" 前缀，剩余部分作为文件名关键字过滤条件。
+	remainingQuery := strings.TrimSpace(strings.TrimPrefix(req.SearchQuery, cloudSearchPrefix))
+
+	var mediaList []*gen.MediaMetadata
+	for _, meta := range allImages {
+		// 网盘源仅返回图片，已隐含 image 过滤；这里仍尊重非图片过滤的拒绝语义。
+		if req.FilterType != gen.MediaType_IMAGE && req.FilterType != meta.Type {
+			continue
+		}
+
+		if remainingQuery != "" && !strings.Contains(strings.ToLower(meta.Filename), strings.ToLower(remainingQuery)) {
+			continue
+		}
+
+		mediaList = append(mediaList, meta)
+	}
+
+	// Sort by creation time (newest first)
+	sort.Slice(mediaList, func(i, j int) bool {
+		return mediaList[i].CreatedAt > mediaList[j].CreatedAt
+	})
+
 	startIndex := int(req.Page-1) * int(req.PageSize)
 	endIndex := startIndex + int(req.PageSize)
 	if startIndex >= len(mediaList) {
@@ -461,7 +530,6 @@ func encodeImage(img image.Image, ext, srcMimeType string) ([]byte, string, erro
 		return buf.Bytes(), "image/png", nil
 	}
 }
-
 func imageDimensions(path string) (int, int) {
 	f, err := os.Open(path)
 	if err != nil {
