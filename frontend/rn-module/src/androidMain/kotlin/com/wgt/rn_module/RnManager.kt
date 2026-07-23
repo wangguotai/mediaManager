@@ -294,24 +294,26 @@ internal actual class RnManager private actual constructor() : IRnManager {
      * 获取 ReactHost
      */
     actual fun getReactHost(): PlatformReactHost? {
-        return getOrCreateReactHost()
+        return PlatformReactHost.Android(getOrCreateReactHost())
     }
 
     /**
      * 获取 ReactContext（异步等待初始化完成）
      */
-    actual suspend fun awaitReactContext(): ReactContext? {
+    actual suspend fun awaitReactContext(): PlatformReactContext? {
         if (!_isActive) {
             activate()
         }
-        return contextInitializedDeferred.await()
+        val ctx = contextInitializedDeferred.await()
+        return ctx?.let { PlatformReactContext.Android(it) }
     }
 
     /**
      * 获取当前 ReactContext（如果已初始化）
      */
-    actual fun getCurrentReactContext(): ReactContext? {
-        return containerManager.getCurrentReactContext(currentHostId)
+    actual fun getCurrentReactContext(): PlatformReactContext? {
+        val ctx = containerManager.getCurrentReactContext(currentHostId)
+        return ctx?.let { PlatformReactContext.Android(it) }
     }
 
     /**
