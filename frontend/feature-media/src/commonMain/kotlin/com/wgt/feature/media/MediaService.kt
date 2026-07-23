@@ -149,7 +149,7 @@ object MediaService {
                 mime_type = m["mime_type"]?.jsonPrimitive?.content ?: "",
                 created_at = m["created_at"]?.jsonPrimitive?.longOrNull ?: 0L,
                 updated_at = m["updated_at"]?.jsonPrimitive?.longOrNull ?: 0L,
-                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.boolOrNull ?: false,
+                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull ?: false,
                 live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
                 width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
                 height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
