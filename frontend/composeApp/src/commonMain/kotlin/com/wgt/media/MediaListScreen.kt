@@ -45,8 +45,10 @@ import kotlin.math.min
 @Composable
 fun MediaListScreen(viewModel: MediaViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
-    var selectedTab by remember { mutableStateOf(0) }
-    
+    // 默认打开"网盘图片" Tab（index=2）：真机启动即对后端发 q=source=cloud 请求，
+    // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
+    var selectedTab by remember { mutableStateOf(2) }
+
     // 图片预览状态
     var previewMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 

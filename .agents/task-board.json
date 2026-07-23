@@ -1,25 +1,20 @@
 {
-  "claude-orchestrate-update": {
+  "claude-frontend-polish": {
     "product": "claude",
-    "task": "worktree 隔离改造 orchestrate.sh",
+    "task": "前端网盘图片功能完善",
     "status": "done",
-    "commit": "acf9812",
-    "note": "worktree隔离+串行merge gate, bash -n 通过"
+    "commit": "c655b8a"
   },
-  "codex-backend-test": {
+  "codex-cloud-thumb": {
     "product": "codex",
-    "task": "后端 endpoint 验证",
+    "task": "后端cloud缩略图",
     "status": "done",
-    "note": "所有 endpoint PASS, 测试报告 /tmp/backend-test-result.txt"
+    "commit": "ffb7454"
   },
-  "claude-apk-build": {
-    "product": "claude",
-    "task": "构建 APK 部署到真机",
+  "apk-rebuild-deploy": {
+    "product": "openclaw",
+    "task": "重新构建APK部署真机",
     "status": "done",
-    "log": "/tmp/agent-claude-apk.log",
-    "started_at": "2026-07-23T23:22:00+08:00",
-    "finished_at": "2026-07-23T23:25:00+08:00",
-    "device": "6e78d805 小米 23127PN0CC Android 16",
-    "note": "BUILD SUCCESSFUL(JDK17 Zulu,4s); app-debug.apk 124M 安装 Success; PID 22084 存活无 crash,首帧绘制+MediaViewModel init 正常;结果 /tmp/apk-build-result.txt。注意APK产物名为 app-debug.apk 而非 composeApp-debug.apk"
+    "note": "BUILD SUCCESSFUL, 安装成功, 无crash, PID 30740"
   }
 }
