@@ -60,7 +60,7 @@ func main() {
 	restSrv := gateway.NewServer(restAddr, gateway.OpenClawConfig{
 		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
 		Timeout: 10 * time.Second,
-	})
+	}, mediaService, uploadsDir)
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())
 	if err := restSrv.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to serve REST: %v", err)
