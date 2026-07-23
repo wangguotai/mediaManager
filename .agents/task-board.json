@@ -1,16 +1,24 @@
 {
-  "codex-002": {
-    "product": "codex",
-    "task": "gradlew build 前端编译验证",
+  "ksp-fix": {
+    "product": "claude",
+    "task": "KSP 生成代码被 Gradle 清理问题",
     "status": "done",
-    "log": "/tmp/agent-codex-002.log",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "started_at": "2026-07-23T16:36:00+08:00",
-    "completed_at": "2026-07-23T17:05:00+08:00",
-    "commit": "5f2b613",
-    "retries": 2,
-    "max_retries": 3,
-    "build_verified": "partial",
-    "note": "feature-media ✅ composeApp 仅剩 rn-module initRnManager（已有兼容性问题）"
+    "commits": ["b2b341a"],
+    "note": "Claude Code 已修复"
+  },
+  "claude-conflict-design": {
+    "product": "claude",
+    "task": "多 Agent 仓库冲突解决方案设计",
+    "status": "done",
+    "log": "/tmp/agent-claude-conflict.log",
+    "output": "/Users/wgt/ai/agent-dashboard/docs/conflict-resolution-design.md",
+    "note": "方案已输出: worktree隔离+串行merge gate"
+  },
+  "claude-orchestrate-update": {
+    "product": "claude",
+    "task": "基于冲突方案更新 orchestrate.sh 实现 worktree 隔离",
+    "status": "running",
+    "log": "/tmp/agent-claude-orchestrate.log",
+    "started_at": "2026-07-23T23:09:00+08:00"
   }
 }
