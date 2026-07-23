@@ -43,7 +43,7 @@ object LivePhotoHandler {
                         showLivePhotoDialog = true
                         // 异步获取视频 URL
                         CoroutineScope(Dispatchers.Default).launch {
-                            videoUrl = MediaService.getLivePhotoVideoUrl(media.id)
+                            videoUrl = null // TODO: 后端 API 待实现
                         }
                     } else {
                         // 普通图片直接处理点击

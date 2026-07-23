@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * OpenClaw 桥梁 — 通过 media-manager 后端的 /api/openclaw/command 端点
@@ -57,7 +58,7 @@ object OpenClawBridge {
     ): JsonObject? = send(
         path = path,
         method = "POST",
-        body = buildJsonObject { put("message", message) }
+        body = buildJsonObject { put("message", JsonPrimitive(message)) }
     )
 
     private const val DEFAULT_COMMAND_PATH = "/api/v1/chat"

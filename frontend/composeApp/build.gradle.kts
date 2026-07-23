@@ -40,6 +40,7 @@ kotlin {
             implementation(projects.featureMedia)
             implementation(projects.featureCommon)
             implementation(projects.rnModule)
+            implementation(libs.kotlinx.serialization.json)
             // 对应的生成资源强要求，必须有该依赖
             implementation(libs.compose.components.resources)
             // Coil 3 for KMP image loading
