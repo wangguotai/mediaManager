@@ -59,12 +59,14 @@ fun MediaListScreen(viewModel: MediaViewModel) {
         }
     }
 
-    // 加载本地照片图库或已上传图片（使用缓存）
+    // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
     LaunchedEffect(selectedTab) {
         if (selectedTab == 0 && viewModel.canAccessGallery) {
             viewModel.loadMediaFromGallery(forceRefresh = false)
         } else if (selectedTab == 1) {
             viewModel.loadUploadedMediaList(forceRefresh = false)
+        } else if (selectedTab == 2) {
+            viewModel.loadCloudMediaList(forceRefresh = false)
         }
     }
 
@@ -90,13 +92,13 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                     actions = {
                         IconButton(
                             onClick = {
-                                if (selectedTab == 0) {
-                                    viewModel.loadMediaFromGallery()
-                                } else {
-                                    viewModel.loadUploadedMediaList()
+                                when (selectedTab) {
+                                    0 -> viewModel.loadMediaFromGallery()
+                                    1 -> viewModel.loadUploadedMediaList()
+                                    else -> viewModel.loadCloudMediaList()
                                 }
                             },
-                            enabled = !viewModel.isLoading && !viewModel.isGalleryLoading
+                            enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
                         ) {
                             Icon(
                                 painterResource(Res.drawable.ic_refresh),
@@ -131,11 +133,21 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                             )
                         }
                     )
+                    Tab(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        text = {
+                            Text(
+                                "网盘图片",
+                                fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    )
                 }
             }
         },
         bottomBar = {
-            if (viewModel.hasSelection) {
+            if (viewModel.hasSelection && selectedTab != 2) {
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
                     onDelete = { viewModel.deleteSelectedMedia() },
@@ -159,7 +171,11 @@ fun MediaListScreen(viewModel: MediaViewModel) {
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues)) {
-            val isLoading = if (selectedTab == 0) viewModel.isGalleryLoading else viewModel.isLoading
+            val isLoading = when (selectedTab) {
+                0 -> viewModel.isGalleryLoading
+                2 -> viewModel.isCloudLoading
+                else -> viewModel.isLoading
+            }
             val mediaList = viewModel.mediaList
 
             if (isLoading && mediaList.isEmpty()) {
@@ -183,6 +199,7 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                     Text(
                         when (selectedTab) {
                             0 -> "暂无本地图片"
+                            2 -> "暂无网盘图片"
                             else -> "暂无已上传图片"
                         },
                         style = MaterialTheme.typography.bodyLarge,

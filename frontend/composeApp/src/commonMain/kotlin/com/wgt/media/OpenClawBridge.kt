@@ -37,4 +37,27 @@ object OpenClawBridge {
         method: String = "POST",
         bodyBuilder: JsonObjectBuilder.() -> Unit
     ): JsonObject? = send(path, method, buildJsonObject(bodyBuilder))
+
+    /**
+     * 发送一条命令/消息到 OpenClaw。
+     *
+     * 面向"消息文本"场景的语义化便捷方法：把 [message] 包成
+     * `{ "message": message }` 的 JSON body，经后端 `/api/openclaw/command`
+     * 转发到 OpenClaw gateway。等价于 `send(path, "POST", body)`。
+     *
+     * @param message 命令/消息文本，作为 upstream body 的 `message` 字段
+     * @param path OpenClaw gateway 上的路径，默认 `/api/v1/chat`（见 openclaw-bridge-design.md §3.2 示例）；
+     *             必须以 '/' 开头
+     * @return upstream 响应（JsonObject）；失败或后端不可达返回 null
+     */
+    suspend fun sendCommand(
+        message: String,
+        path: String = DEFAULT_COMMAND_PATH
+    ): JsonObject? = send(
+        path = path,
+        method = "POST",
+        body = buildJsonObject { put("message", message) }
+    )
+
+    private const val DEFAULT_COMMAND_PATH = "/api/v1/chat"
 }

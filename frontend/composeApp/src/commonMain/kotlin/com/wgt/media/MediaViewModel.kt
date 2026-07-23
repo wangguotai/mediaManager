@@ -56,9 +56,14 @@ class MediaViewModel {
     var isGalleryLoading by mutableStateOf(false)
         private set
 
+    // 网盘图片加载状态（第三个 Tab）
+    var isCloudLoading by mutableStateOf(false)
+        private set
+
     // 缓存管理
     private var cachedLocalMedia: List<MediaMetadata>? = null
     private var cachedUploadedMedia: List<MediaMetadata>? = null
+    private var cachedCloudMedia: List<MediaMetadata>? = null
 
 
     init {
@@ -96,9 +101,41 @@ class MediaViewModel {
     }
 
     /**
+     * 从后端加载网盘图片列表（第三个 Tab "网盘图片"）
+     *
+     * 与 [loadUploadedMediaList] 同样走 [MediaService.getMediaList]，但维护独立的
+     * 缓存与加载状态（[cachedCloudMedia] / [isCloudLoading]），避免与"已上传"页
+     * 互相串扰 mediaList 显示。
+     */
+    fun loadCloudMediaList(forceRefresh: Boolean = false) {
+        if (!forceRefresh && cachedCloudMedia != null) {
+            mediaList = cachedCloudMedia!!
+            return
+        }
+
+        if (isCloudLoading) return
+
+        isCloudLoading = true
+        errorMessage = null
+
+        viewModelScope.launch {
+            try {
+                val cloudMedia = MediaService.getMediaList(pageSize = 50)
+                cachedCloudMedia = cloudMedia
+                mediaList = cloudMedia
+            } catch (e: Exception) {
+                errorMessage = "加载网盘图片失败: ${e.message}"
+            } finally {
+                isCloudLoading = false
+            }
+        }
+    }
+
+    /**
      * 从本地照片图库加载媒体
      */
     fun loadMediaFromGallery(forceRefresh: Boolean = false) {
+
         // 如果有缓存且不需要强制刷新，直接使用缓存
         if (!forceRefresh && cachedLocalMedia != null) {
             mediaList = cachedLocalMedia!!
