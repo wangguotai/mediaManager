@@ -124,7 +124,7 @@ dependencies {
 }
 
 // 禁用 KSP metadata 任务的构建缓存，防止 Gradle 从缓存恢复时清空生成代码
-tasks.named("kspCommonMainKotlinMetadata") {
+tasks.matching { it.name == "kspCommonMainKotlinMetadata" || it.name == "kspCommonMainMetadata" }.configureEach {
     outputs.cacheIf { false }
 }
 
@@ -132,13 +132,13 @@ tasks.named("kspCommonMainKotlinMetadata") {
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>().configureEach {
     // 排除 KSP 任务本身，避免循环依赖
     if (!name.contains("ksp", ignoreCase = true)) {
-        dependsOn("kspCommonMainKotlinMetadata")
+        dependsOn(tasks.matching { it.name == "kspCommonMainKotlinMetadata" || it.name == "kspCommonMainMetadata" })
     }
 }
 
 // 额外确保所有编译任务依赖 KSP（覆盖 compileAndroidMain 等）
 tasks.matching { it.name.startsWith("compile") && !name.contains("ksp", ignoreCase = true) }.configureEach {
-    dependsOn("kspCommonMainKotlinMetadata")
+    dependsOn(tasks.matching { it.name == "kspCommonMainKotlinMetadata" || it.name == "kspCommonMainMetadata" })
 }
 
 
