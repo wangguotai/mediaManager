@@ -94,7 +94,8 @@ dependencies {
 // 会命中旧的（空的）缓存快照，Gradle 从缓存恢复时会先清空输出目录，
 // 把真实生成的代码删掉，导致 compileAndroidMain 等任务报 Unresolved reference。
 // 该任务执行很快，禁用缓存可保证每次都真正生成代码。
-tasks.named("kspCommonMainKotlinMetadata") {
+// 用 matching+configureEach 懒配置，避免 KSP 任务懒注册时 named() 报找不到。
+tasks.matching { it.name == "kspCommonMainKotlinMetadata" }.configureEach {
     outputs.cacheIf { false }
 }
 
