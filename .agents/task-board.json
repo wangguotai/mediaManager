@@ -1,20 +1,14 @@
 {
-  "claude-frontend-polish": {
+  "claude-feature": {
     "product": "claude",
-    "task": "前端网盘图片功能完善",
-    "status": "done",
-    "commit": "c655b8a"
+    "task": "业务功能完善-预览切换+分页+错误处理",
+    "status": "running",
+    "log": "/tmp/agent-claude-feature.log"
   },
-  "codex-cloud-thumb": {
+  "codex-npm": {
     "product": "codex",
-    "task": "后端cloud缩略图",
-    "status": "done",
-    "commit": "ffb7454"
-  },
-  "apk-rebuild-deploy": {
-    "product": "openclaw",
-    "task": "重新构建APK部署真机",
-    "status": "done",
-    "note": "BUILD SUCCESSFUL, 安装成功, 无crash, PID 30740"
+    "task": "agent-orchestrator npm包化",
+    "status": "running",
+    "log": "/tmp/agent-codex-npm.log"
   }
 }
