@@ -1,14 +1,32 @@
 {
-  "claude-feature": {
+  "claude-apk2": {
     "product": "claude",
-    "task": "业务功能完善-预览切换+分页+错误处理",
+    "task": "APK构建部署模拟器验证",
     "status": "running",
-    "log": "/tmp/agent-claude-feature.log"
+    "log": "/tmp/agent-claude-apk2.log"
   },
-  "codex-npm": {
-    "product": "codex",
-    "task": "agent-orchestrator npm包化",
+  "claude-npm2": {
+    "product": "claude",
+    "task": "Node调度器+看板server+README",
     "status": "running",
-    "log": "/tmp/agent-codex-npm.log"
+    "log": "/tmp/agent-claude-npm2.log"
+  },
+  "codex-feat-r3": {
+    "product": "codex",
+    "task": "预览滑动+分页验证",
+    "status": "done",
+    "commit": "5f77575"
+  },
+  "codex-comm": {
+    "product": "openclaw",
+    "task": "agent间通信层",
+    "status": "done",
+    "commit": "af39cf9"
+  },
+  "codex-cli": {
+    "product": "openclaw",
+    "task": "CLI入口+package.json",
+    "status": "done",
+    "commit": "292ef5c"
   }
 }
