@@ -15,7 +15,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
+import com.wgt.media.SettingsScreen
+import com.wgt.media.SettingsState
 import com.wgt.media.SplashScreen
+import com.wgt.media.ThemeMode
 
 private val viewModel = MediaViewModel()
 
@@ -24,7 +27,12 @@ private val viewModel = MediaViewModel()
  *
  * 主题色板由各平台 [resolveColorScheme] 决定：
  * - Android 12+（API 31）取系统壁纸动态取色（dynamicColor）；
- * - iOS 及低版本 Android 回退到内置中性色板（[FallbackLightColors]/[FallbackDarkColors]）。
+ * - iOS 及低版本 Android 回退到内置中性色板。
+ *
+ * 主题模式来自 [SettingsState]（已持久化）：
+ *   SYSTEM → 跟随系统
+ *   LIGHT  → 强制浅色
+ *   DARK   → 强制暗色
  *
  * 启动时先展示 [SplashScreen]（App 名称居中淡入，约 2s），完成后通过
  * [AnimatedContent] 交叉淡入淡出过渡到 [MediaListScreen]，避免主界面突入。
@@ -32,9 +40,15 @@ private val viewModel = MediaViewModel()
 @Composable
 @Preview
 fun App() {
-    val isDark = isSystemInDarkTheme()
+    val isDark = when (SettingsState.themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     val colors = resolveColorScheme(isDark)
+
     var showSplash by remember { mutableStateOf(true) }
+    var screen by remember { mutableStateOf(Screen.MEDIA) }
 
     MaterialTheme(colorScheme = colors) {
         AnimatedContent(
@@ -45,8 +59,17 @@ fun App() {
             if (splash) {
                 SplashScreen(onFinish = { showSplash = false })
             } else {
-                MediaListScreen(viewModel = viewModel)
+                when (screen) {
+                    Screen.MEDIA -> MediaListScreen(
+                        viewModel = viewModel,
+                        onNavigateToSettings = { screen = Screen.SETTINGS }
+                    )
+                    Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
+                }
             }
         }
     }
 }
+
+/** 顶层屏幕路由。 */
+private enum class Screen { MEDIA, SETTINGS }

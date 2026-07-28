@@ -170,3 +170,8 @@ dist
 # Temporary folders
 tmp/
 temp/
+
+# agent-orchestrator
+.agents/worktrees/
+.agents/state/
+.agents/*.lock

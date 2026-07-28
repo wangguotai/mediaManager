@@ -65,7 +65,7 @@ import org.jetbrains.compose.resources.painterResource
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
 @Composable
-fun MediaListScreen(viewModel: MediaViewModel) {
+fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit = {}) {
     val snackbarHostState = remember { SnackbarHostState() }
     // 默认打开"网盘图片" Tab（index=2）：真机启动即对后端发 q=source=cloud 请求，
     // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
@@ -133,12 +133,19 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                             fontSize = 20.sp
                         )
                     },
-                    actions = {
-                        // OpenClaw 桥梁入口：点击弹出命令输入对话框，经后端 /api/openclaw/command 转发。
-                        IconButton(onClick = { showOpenClawDialog = true }) {
+                   actions = {
+                       // OpenClaw 桥梁入口：点击弹出命令输入对话框，经后端 /api/openclaw/command 转发。
+                       IconButton(onClick = { showOpenClawDialog = true }) {
+                           Icon(
+                               painterResource(Res.drawable.ic_openclaw),
+                               contentDescription = "OpenClaw 桥梁"
+                           )
+                       }
+                        // 设置入口：齿轮图标，点击切换到 SettingsScreen（后端地址 / 主题 / 关于）。
+                        IconButton(onClick = onNavigateToSettings) {
                             Icon(
-                                painterResource(Res.drawable.ic_openclaw),
-                                contentDescription = "OpenClaw 桥梁"
+                                painterResource(Res.drawable.ic_settings),
+                                contentDescription = "设置"
                             )
                         }
                         IconButton(

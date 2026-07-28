@@ -1,7 +1,0 @@
-{
-  "status": "done",
-  "files": "backend/",
-  "verify_commands": [],
-  "clean_commands": [],
-  "merge_strategy": "merge"
-}

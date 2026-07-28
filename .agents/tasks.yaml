@@ -1,0 +1,203 @@
+# Sprint 1 — Media Manager 敏捷迭代 (v2)
+# 调整: 增大 timeout, 精简 prompt, 全用 codex
+# 7 个任务, 3 层 DAG
+
+tasks:
+  # ===== Layer 0 (并行启动) =====
+
+  - id: backend-video-api
+    product: codex
+    prompt: |
+      在 backend/ 中实现视频文件支持。
+
+      1. backend/internal/service/media_service.go:
+         - GetMediaList 返回视频文件 (.mp4,.mov,.avi,.mkv)
+         - GetThumbnail 对视频用 ffmpeg 抽第一帧 (os/exec ffmpeg -i input -ss 00:00:01 -frames:v 1 -f image2 output)
+         - GetMediaStream 支持视频文件流式传输
+      2. backend/internal/service/cloud_source.go:
+         - 新增 videoExts map，含 .mp4 .mov .avi .mkv
+         - GetCloudImages 同时返回视频文件，Type 设为 VIDEO
+      3. backend/internal/gateway/server.go:
+         - /api/media/stream/{id} 支持 Range 请求头 (返回 206 Partial Content)
+      4. .agents/interface-contract.md: 末尾追加视频 API 说明
+
+      完成后: cd backend && go build ./... && go vet ./...
+      然后 git add -A && git commit -m "feat: backend video support"
+    files: [backend/, shared/, .agents/interface-contract.md]
+    depends_on: []
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+    clean_commands: []
+    merge_strategy: merge
+
+  - id: frontend-ui-polish
+    product: codex
+    prompt: |
+      在 frontend/composeApp/src/ 中做 UI 精美化。
+
+      1. 修改 commonMain/kotlin/com/wgt/App.kt:
+         - 添加动态色调支持 (Android 12+ dynamicColor)
+         - 精致过渡动画
+      2. 修改 commonMain/kotlin/com/wgt/media/MediaListScreen.kt:
+         - 网格项加载渐入动画 (animateItemPlacement)
+         - Tab 切换淡入淡出
+         - 预览 Dialog 进入/退出动画
+         - 选中项缩放反馈
+      3. 新建 commonMain/kotlin/com/wgt/media/SplashScreen.kt:
+         - 启动屏，App名称居中展示，2秒后淡出
+      4. 优化空状态文案
+
+      注意: 不要动 backend/ 目录。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: UI polish — animations, splash, dynamic color"
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge
+
+  - id: frontend-settings-page
+    product: codex
+    prompt: |
+      创建设置页面。
+
+      1. 新建 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/SettingsScreen.kt:
+         - 后端地址输入框 + 保存按钮 + 测试连通性按钮
+         - 主题选择: 跟随系统/浅色/暗色
+         - 关于: 版本 0.2.0
+      2. 新建 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/SettingsStorage.kt:
+         - expect class SettingsStorage { fun getString(key, default): String; fun putString(key, value) }
+      3. 新建 androidMain/kotlin/com/wgt/media/SettingsStorage.android.kt:
+         - actual class 用 SharedPreferences
+      4. 新建 iosMain/kotlin/com/wgt/media/SettingsStorage.ios.kt:
+         - actual class 用 NSUserDefaults
+      5. 修改 App.kt: TopAppBar 加齿轮图标，点击切换到 SettingsScreen
+
+      注意: 不要动 backend/。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: settings page"
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge
+
+  # ===== Layer 1 (依赖 Layer 0) =====
+
+  - id: frontend-search-filter
+    product: codex
+    prompt: |
+      实现搜索和筛选功能。
+
+      1. 新建 commonMain/kotlin/com/wgt/media/SearchBar.kt:
+         - 可展开搜索栏，输入关键词 300ms debounce 过滤
+         - 清除按钮
+      2. 新建 commonMain/kotlin/com/wgt/media/FilterChips.kt:
+         - 全部/图片/视频 三个 FilterChip
+      3. 修改 MediaViewModel.kt:
+         - 加 searchQuery, filterType 状态
+         - 加 filteredList 属性: 按 filename 和 type 过滤
+      4. 修改 MediaListScreen.kt:
+         - TabRow 下方加 SearchBar + FilterChips
+         - 网格用 filteredList
+
+      不要动 backend/。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: search and filter"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [frontend-ui-polish]
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge
+
+  - id: frontend-video-player
+    product: codex
+    prompt: |
+      实现视频播放支持。
+
+      1. 新建 commonMain/kotlin/com/wgt/media/VideoPlayer.kt:
+         - expect @Composable fun VideoPlayer(url: String)
+         - 播放/暂停/进度条
+      2. 新建 androidMain/kotlin/com/wgt/media/VideoPlayer.android.kt:
+         - actual fun 用 Android VideoView 或 ExoPlayer
+      3. 新建 iosMain/kotlin/com/wgt/media/VideoPlayer.ios.kt:
+         - actual fun 用 AVPlayerViewController
+      4. 修改 MediaListScreen.kt:
+         - type==VIDEO 的网格项叠加播放图标
+         - 点击视频项打开 VideoPlayer
+      5. 修改 MediaViewModel.kt: 视频列表也加载
+
+      不要动 backend/。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: video player"
+    files: [frontend/composeApp/src/]
+    depends_on: [backend-video-api, frontend-ui-polish]
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge
+
+  - id: frontend-date-grouping
+    product: codex
+    prompt: |
+      实现按日期分组展示。
+
+      1. 新建 commonMain/kotlin/com/wgt/media/DateGroupedGrid.kt:
+         - 按 created_at 日期分组
+         - 每组 sticky header: 今天/昨天/YYYY-MM-DD
+         - 组内用 LazyVerticalGrid
+      2. 修改 MediaViewModel.kt:
+         - 加 groupedMediaList: Map<String, List<MediaMetadata>>
+      3. 修改 MediaListScreen.kt:
+         - 搜索为空时用 DateGroupedGrid，搜索时用平铺网格
+
+      不要动 backend/。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: date grouping"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [frontend-ui-polish]
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge
+
+  # ===== Layer 2 (依赖 Layer 1) =====
+
+  - id: frontend-detail-panel
+    product: codex
+    prompt: |
+      实现图片详情面板。
+
+      1. 新建 commonMain/kotlin/com/wgt/media/DetailPanel.kt:
+         - Bottom sheet 风格，可上滑展开/下滑收起
+         - 显示: 文件名、大小、分辨率、日期、EXIF
+      2. 修改 MediaListScreen.kt 中的 ImagePreviewDialog:
+         - 底部加 DetailPanel 入口
+         - 上滑手势展开
+
+      不要动 backend/。构建必须通过。
+      完成后: cd frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后 git add -A && git commit -m "feat: detail panel"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [frontend-search-filter, frontend-video-player, frontend-date-grouping]
+    timeout: 1800
+    max_retries: 2
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands: []
+    merge_strategy: merge

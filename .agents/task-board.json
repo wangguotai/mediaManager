@@ -1,32 +1,197 @@
 {
-  "claude-apk2": {
-    "product": "claude",
-    "task": "APK构建部署模拟器验证",
-    "status": "running",
-    "log": "/tmp/agent-claude-apk2.log"
-  },
-  "claude-npm2": {
-    "product": "claude",
-    "task": "Node调度器+看板server+README",
-    "status": "running",
-    "log": "/tmp/agent-claude-npm2.log"
-  },
-  "codex-feat-r3": {
+  "backend-video-api": {
     "product": "codex",
-    "task": "预览滑动+分页验证",
-    "status": "done",
-    "commit": "5f77575"
+    "task": "在 backend/ 中实现视频文件支持。\n\n1. backend/internal/service/media_service.go:\n   - GetMed",
+    "status": "ready",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/backend-video-api",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "backend/",
+      "shared/",
+      ".agents/interface-contract.md"
+    ],
+    "depends_on": [],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
   },
-  "codex-comm": {
-    "product": "openclaw",
-    "task": "agent间通信层",
-    "status": "done",
-    "commit": "af39cf9"
+  "frontend-date-grouping": {
+    "product": "codex",
+    "task": "实现按日期分组展示。\n\n1. 新建 commonMain/kotlin/com/wgt/media/DateGroupedGrid.kt:\n   - 按 cre",
+    "status": "pending",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-date-grouping",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
+    ],
+    "depends_on": [
+      "frontend-ui-polish"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
   },
-  "codex-cli": {
-    "product": "openclaw",
-    "task": "CLI入口+package.json",
-    "status": "done",
-    "commit": "292ef5c"
+  "frontend-detail-panel": {
+    "product": "codex",
+    "task": "实现图片详情面板。\n\n1. 新建 commonMain/kotlin/com/wgt/media/DetailPanel.kt:\n   - Bottom she",
+    "status": "pending",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-detail-panel",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
+    ],
+    "depends_on": [
+      "frontend-search-filter",
+      "frontend-video-player",
+      "frontend-date-grouping"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "frontend-search-filter": {
+    "product": "codex",
+    "task": "实现搜索和筛选功能。\n\n1. 新建 commonMain/kotlin/com/wgt/media/SearchBar.kt:\n   - 可展开搜索栏，输入关键",
+    "status": "pending",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-search-filter",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
+    ],
+    "depends_on": [
+      "frontend-ui-polish"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "frontend-settings-page": {
+    "product": "codex",
+    "task": "创建设置页面。\n\n1. 新建 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/SettingsS",
+    "status": "ready",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-settings-page",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/"
+    ],
+    "depends_on": [],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "frontend-ui-polish": {
+    "product": "codex",
+    "task": "在 frontend/composeApp/src/ 中做 UI 精美化。\n\n1. 修改 commonMain/kotlin/com/wgt/App.kt:\n ",
+    "status": "ready",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-ui-polish",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/"
+    ],
+    "depends_on": [],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "frontend-video-player": {
+    "product": "codex",
+    "task": "实现视频播放支持。\n\n1. 新建 commonMain/kotlin/com/wgt/media/VideoPlayer.kt:\n   - expect @Co",
+    "status": "pending",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/frontend-video-player",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 1800,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 2,
+    "files": [
+      "frontend/composeApp/src/"
+    ],
+    "depends_on": [
+      "backend-video-api",
+      "frontend-ui-polish"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [],
+    "merge_strategy": "merge",
+    "shared_files": []
   }
 }
