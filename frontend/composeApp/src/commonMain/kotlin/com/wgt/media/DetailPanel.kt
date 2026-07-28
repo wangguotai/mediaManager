@@ -269,18 +269,19 @@ private fun formatFileSizeForDetail(size: Long): String {
 }
 
 /**
- * epoch 毫秒 → "YYYY年MM月DD日 HH:mm"，无平台依赖。
+ * epoch 毫秒 → "YYYY年MM月DD日 HH:mm"（按本机时区），无 java.time 依赖。
  *
  * 用 Howard Hinnant civil_from_days 拆年月日（与 MediaViewModel 同算法）；
- * 时分由毫秒在当日内的余量折算（按 UTC，受限于 commonMain 无时区偏移，
- * 与该 app 现有"日界按 UTC"兜底口径一致）。
+ * 拆分前先用 [systemTimeZoneOffsetMillis] 把 UTC 毫秒平移到本地，时分由
+ * 本地当日内余量折算，与日期分组口径一致（本地午夜为日界）。
  * 0L 视为无值返回 "—"。
  */
 private fun formatEpochMillis(epochMillis: Long): String {
     if (epochMillis <= 0L) return "—"
-    val days = epochMillis.floorDiv(MILLIS_PER_DAY)
+    val localMillis = epochMillis + systemTimeZoneOffsetMillis()
+    val days = localMillis.floorDiv(MILLIS_PER_DAY)
     val (y, m, d) = civilFromDays(days)
-    val millisOfDay = epochMillis - days * MILLIS_PER_DAY
+    val millisOfDay = localMillis - days * MILLIS_PER_DAY
     val hour = (millisOfDay / MILLIS_PER_HOUR).toInt()
     val minute = ((millisOfDay % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE).toInt()
     return "%d年%02d月%02d日 %02d:%02d".format(y, m, d, hour, minute)

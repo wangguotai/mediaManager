@@ -471,12 +471,13 @@ class MediaViewModel {
      * "YYYY年MM月DD日" 的年月日分解用 civil_from_days（Howard Hinnant 的算法，
      * 纯整数运算、跨平台确定），由 [dateTitleFromEpochDays] 完成；时区取本机
      * （用本地时区偏移把 epoch 毫秒对齐到本地午夜），符合"今天"的用户直觉。
+     * 时区偏移由 [systemTimeZoneOffsetMillis] 提供（平台 expect/actual）。
      */
     private fun groupMediaByDate(list: List<MediaMetadata>): List<DateGroup> {
         if (list.isEmpty()) return emptyList()
 
         val nowMillis = Clock.System.now().toEpochMilliseconds()
-        val tzOffsetMillis = localTimeZoneOffsetMillis(nowMillis)
+        val tzOffsetMillis = systemTimeZoneOffsetMillis()
         // 今天所在的本日历日（用本地时区对齐到本地午夜后的 epoch 天数）。
         val todayDays = epochDaysFromMillis(nowMillis, tzOffsetMillis)
 
@@ -527,18 +528,6 @@ class MediaViewModel {
         return if (shifted >= 0) shifted / MILLIS_PER_DAY
         else (shifted - MILLIS_PER_DAY + 1) / MILLIS_PER_DAY
     }
-
-    /**
-     * 当前时区相对 UTC 的偏移（毫秒）。commonMain 无 java.time，用各平台
-     * expect/actual 取偏移成本高；此处走纯 Kotlin：offset 由当前 epoch 毫秒反推
-     * 本地"当日小时分量"不可行——改为在 actual 提供本地偏移。
-     *
-     * 为避免新增 expect/actual（受限于"仅改 com/wgt/media"约束），这里用一个
-     * 轻量纯 Kotlin 兜底：用 `kotlin.time.Instant` 取不到偏移，故采用固定 0 偏移
-     * 作为近似，日界按 UTC 划分。对绝大多数"今天/昨天"判定而言，仅在跨午夜时
-     * 有最多 1 天的边界偏差，可接受；完整本地时区对齐留待后续接 kotlinx-datetime。
-     */
-    private fun localTimeZoneOffsetMillis(epochMillis: Long): Long = 0L
 
     /**
      * Howard Hinnant civil_from_days：自 1970-01-01 起的天数 → (年, 月, 日)。
