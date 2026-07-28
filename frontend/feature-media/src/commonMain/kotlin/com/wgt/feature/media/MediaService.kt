@@ -169,8 +169,8 @@ object MediaService {
             }
             response.status == HttpStatusCode.OK
         } catch (e: Exception) {
-            delay(300)
-            true
+            logger.error("MediaService", "deleteMedia FAILED: ${e::class.simpleName} ${e.message}")
+            false
         }
     }
 
@@ -189,8 +189,8 @@ object MediaService {
             }
             response.status == HttpStatusCode.OK
         } catch (e: Exception) {
-            delay(1000)
-            true
+            logger.error("MediaService", "uploadMedia FAILED filename=$filename: ${e::class.simpleName} ${e.message}")
+            false
         }
     }
 
