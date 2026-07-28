@@ -65,7 +65,6 @@ shared/kmp/.idea/
 
 # Backend
 backend/data/
-backend/gen/
 backend/.vscode/
 
 # Logs
