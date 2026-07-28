@@ -16,11 +16,14 @@ actual suspend fun loadThumbnail(mediaId: String): ImageBitmap? {
         val context = AppContext.applicationContext
         val id = mediaId.toLongOrNull() ?: return null
 
-        // 加载缩略图
+        // 加载缩略图 — 使用 MICRO_KIND (96x96) 以减少内存占用。
+        // 之前使用 MINI_KIND (512x384)，在瀑布流网格中每屏可见数十个缩略图，
+        // 解码后的 Bitmap 内存累积会导致 MIUI 杀进程。MICRO_KIND 足够网格展示，
+        // 点击预览时再加载高清图。
         val thumbnail = MediaStore.Images.Thumbnails.getThumbnail(
             context.contentResolver,
             id,
-            MediaStore.Images.Thumbnails.MINI_KIND,
+            MediaStore.Images.Thumbnails.MICRO_KIND,
             null
         )
 

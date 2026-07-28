@@ -680,14 +680,18 @@ fun ImagePreviewDialog(
                 )
 
                 // 可滑动切换的图片页：缩放态禁用翻页
+                // 内存优化：仅当前页加载原图，相邻页加载缩略图，
+                // 避免 Pager 预渲染的多个全分辨率 ImageBitmap 同时驻留内存。
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
                     userScrollEnabled = !currentZoomed
                 ) { page ->
+                    val isCurrentPage = page == pagerState.currentPage
                     ZoomableImage(
                         media = mediaList[page],
                         useBackendLoader = useBackendLoader,
+                        loadFullResolution = isCurrentPage,
                         onTapClose = animateOutThenDismiss,
                         onZoomChanged = { zoomed ->
                             // 仅当 page == currentIndex 时更新，避免预加载页干扰
@@ -850,6 +854,10 @@ fun ImagePreviewDialog(
  * 手势冲突处理：detectTransformGestures 与 HorizontalPager 共存时，
  * 缩放>1 的情况下 pager 的 userScrollEnabled 被关闭，
  * 平移手势在缩放态下由 transform 消费；1x 时 pager 正常响应水平滑动。
+ *
+ * @param loadFullResolution true 加载全尺寸原图；false 仅加载缩略图（低内存占位），
+ *   用于非当前页，避免 Pager 预渲染的远页全图占用过多内存。
+ *   当用户滑动到该页时 [loadFullResolution] 变为 true，重新触发 LaunchedEffect 加载原图。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -857,7 +865,8 @@ private fun ZoomableImage(
     media: MediaMetadata,
     useBackendLoader: Boolean,
     onTapClose: () -> Unit,
-    onZoomChanged: (Boolean) -> Unit = {}
+    onZoomChanged: (Boolean) -> Unit = {},
+    loadFullResolution: Boolean = true
 ) {
     // 先加载缩略图立即显示，再异步加载原图（降采样）替换。
     // 避免“点击大图 → 白屏等待 → 内存暴涨”的体验。
@@ -878,39 +887,40 @@ private fun ZoomableImage(
         onZoomChanged(scale > 1f)
     }
 
-    // 阶段 1：立即加载缩略图（通常已在网格加载时缓存，几乎瞬出）
-    LaunchedEffect(media.id, useBackendLoader) {
-        scope.launch(dispatchers.io) {
-            try {
-                val thumb = if (useBackendLoader) {
-                    BackendImageLoader.loadThumbnail(media.id)
-                } else {
-                    loadThumbnail(media.id)
+    // 加载图片：当前页加载原图，非当前页加载缩略图（低内存占位）
+    LaunchedEffect(media.id, useBackendLoader, loadFullResolution) {
+        if (!loadFullResolution && fullImageBitmap == null) {
+            // 非当前页：仅加载缩略图作为低内存占位
+            scope.launch(dispatchers.io) {
+                try {
+                    val thumb = if (useBackendLoader) {
+                        BackendImageLoader.loadThumbnail(media.id)
+                    } else {
+                        loadThumbnail(media.id)
+                    }
+                    fullImageBitmap = thumb
+                } catch (e: Exception) {
+                    // 加载失败
+                } finally {
+                    isLoading = false
                 }
-                thumbnailBitmap = thumb
-            } catch (_: Exception) {
-                // 缩略图失败不影响后续原图加载
             }
-        }
-    }
-
-    // 阶段 2：异步加载原图（降采样，长边 ≤ 2048px）
-    LaunchedEffect(media.id, useBackendLoader) {
-        scope.launch(dispatchers.io) {
-            try {
-                val image = if (useBackendLoader) {
-                    BackendImageLoader.loadFullImage(media.id)
-                } else {
-                    loadFullImage(media.id)
+        } else if (loadFullResolution) {
+            // 当前页：加载全尺寸原图
+            isLoading = true
+            scope.launch(dispatchers.io) {
+                try {
+                    val image = if (useBackendLoader) {
+                        BackendImageLoader.loadFullImage(media.id)
+                    } else {
+                        loadFullImage(media.id)
+                    }
+                    fullImageBitmap = image
+                } catch (e: Exception) {
+                    // 加载失败
+                } finally {
+                    isLoading = false
                 }
-                fullImageBitmap = image
-                if (image == null) {
-                    loadFailed = true
-                }
-            } catch (e: Exception) {
-                loadFailed = true
-            } finally {
-                isLoadingFull = false
             }
         }
     }

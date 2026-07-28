@@ -32,9 +32,12 @@ actual suspend fun loadThumbnail(mediaId: String): ImageBitmap? {
         imageOptions.networkAccessAllowed = true
 
         var result: platform.UIKit.UIImage? = null
+        // 缩略图目标尺寸：128x128（之前 256x256）。
+        // 瀑布流网格项宽约 110-150dp，128px 足够覆盖；更小尺寸显著降低
+        // 解码后 ImageBitmap 的内存占用，避免大量缩略图同时驻留导致 OOM。
         val targetSize = cValue<CGSize> {
-            this.width = 256.0
-            this.height = 256.0
+            this.width = 128.0
+            this.height = 128.0
         }
 
         PHImageManager.defaultManager().requestImageForAsset(
