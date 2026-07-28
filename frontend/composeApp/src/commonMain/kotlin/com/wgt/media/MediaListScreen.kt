@@ -160,24 +160,35 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 1 -> "已上传"
                 else -> "网盘图片"
             }
-            ImagePreviewDialog(
-                mediaList = list,
-                initialIndex = index,
-                useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
-                sourceLabel = sourceLabel,
-                onDismiss = { previewIndex = null },
-                onEdit = { media ->
-                    editorMedia = media
-                },
-                onDelete = { media ->
-                    previewIndex = null
-                    viewModel.deleteSingleMedia(media.id)
-                },
-                onSlideshow = {
-                    previewIndex = null
-                    slideshowActive = true
-                }
-            )
+            // 视频项通过 onMediaClick 直接走 VideoPlayer 路径（不设 previewIndex），
+            // 但 filteredList 仍含视频项，图片预览 pager 左右滑动到视频位会尝试以图片方式加载失败。
+            // 此处过滤掉视频项，使预览只在图片集内切换；视频一律通过 VideoPlayer 播放。
+            val imageOnlyList = list.filter { it.type != MediaType.VIDEO }
+            val clickedMedia = list[index]
+            val imageIndex = imageOnlyList.indexOf(clickedMedia)
+            if (imageIndex >= 0) {
+                ImagePreviewDialog(
+                    mediaList = imageOnlyList,
+                    initialIndex = imageIndex,
+                    useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                    sourceLabel = sourceLabel,
+                    onDismiss = { previewIndex = null },
+                    onEdit = { media ->
+                        editorMedia = media
+                    },
+                    onDelete = { media ->
+                        previewIndex = null
+                        viewModel.deleteSingleMedia(media.id)
+                    },
+                    onSlideshow = {
+                        previewIndex = null
+                        slideshowActive = true
+                    }
+                )
+            } else {
+                // 点击的是视频但不知为何 previewIndex 被设置（理论上不会发生），关关闭
+                previewIndex = null
+            }
         } else {
             // 列表刷新/过滤变化后索引越界，直接关闭
             previewIndex = null
@@ -335,7 +346,19 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             )
                         }
                         // 设置入口：齿轮图标，点击切换到 SettingsScreen
-                        IconButton(onClick = onNavigateToSettings) {
+                        // 真机 IconButton 在 actions 中并排 4 个时点击区域不足，
+                        // 用 Box + explicit 48dp clickable 确保最小触摸目标
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = ripple(),
+                                    role = Role.Button,
+                                    onClick = onNavigateToSettings
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Icon(
                                 painterResource(Res.drawable.ic_settings),
                                 contentDescription = "设置"
