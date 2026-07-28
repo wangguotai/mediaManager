@@ -124,6 +124,31 @@ func probeVideoDimensions(ctx context.Context, path string) (width, height int, 
 	return 0, 0, false
 }
 
+// metadataSidecar represents the JSON structure written by handleMediaUpload
+// to data/metadata/{id}.json. Only the fields we need for enrichment are decoded.
+type metadataSidecar struct {
+	Filename  string `json:"filename"`
+	Size      int64  `json:"size"`
+	CreatedAt int64  `json:"created_at"`
+	MimeType  string `json:"mime_type"`
+}
+
+// readMetadataSidecar reads data/metadata/{id}.json. Returns nil if the file
+// doesn't exist or can't be parsed — callers fall back to file mtime.
+func (s *MediaService) readMetadataSidecar(mediaID string) *metadataSidecar {
+	metaDir := filepath.Join(filepath.Dir(s.uploadsDir), "metadata")
+	metaPath := filepath.Join(metaDir, mediaID+".json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return nil
+	}
+	var ms metadataSidecar
+	if err := json.Unmarshal(data, &ms); err != nil {
+		return nil
+	}
+	return &ms
+}
+
 // fillDimensions 用 probeMediaDimensions 探查文件并在 metadata 上回填
 // Width/Height/ExifData。探查失败时保持零值/nil，不影响其余字段。
 // 所有构造 MediaMetadata 的入口（列表/单条/流首消息/网盘扫描）统一经此填充，
@@ -642,6 +667,20 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 			CreatedAt: fileInfo.ModTime().Unix(),
 			UpdatedAt: fileInfo.ModTime().Unix(),
 			MimeType:  s.getMimeType(file.Name()),
+		}
+
+		// Enrich from metadata sidecar: prefer created_at from data/metadata/{id}.json,
+		// fall back to file mtime (already set above).
+		if sidecar := s.readMetadataSidecar(mediaId); sidecar != nil {
+			if sidecar.CreatedAt > 0 {
+				metadata.CreatedAt = sidecar.CreatedAt
+			}
+			if sidecar.MimeType != "" {
+				metadata.MimeType = sidecar.MimeType
+			}
+			if sidecar.Filename != "" {
+				metadata.Filename = sidecar.Filename
+			}
 		}
 
 		// P1-1: 填充 width/height/exif。读文件头或 ffprobe；失败置零不阻断列表。

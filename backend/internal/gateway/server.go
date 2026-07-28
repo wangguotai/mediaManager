@@ -82,6 +82,7 @@ func (s *Server) registerRoutes() {
 	// 媒体收藏：POST 设置/取消收藏，GET 返回收藏列表。
 	s.mux.HandleFunc("/api/media/favorite", s.handleMediaFavorite)
 	s.mux.HandleFunc("/api/media/favorites", s.handleMediaFavorites)
+	s.mux.HandleFunc("/api/media/favorite-batch", s.handleMediaFavoriteBatch)
 
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
@@ -173,11 +174,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Count favorites via favoriteProvider capability.
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites())
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "ok",
-		"media_count": mediaCount,
-		"uptime":      fmt.Sprintf("%ds", int(uptime.Seconds())),
-		"cache":       cacheStatus,
+		"status":         "ok",
+		"media_count":    mediaCount,
+		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
+		"cache":          cacheStatus,
+		"favorite_count": favoriteCount,
 	})
 }
 
@@ -352,6 +360,15 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+
+	// Write metadata sidecar to data/metadata/{id}.json
+	mimeType := detectMimeType(filename)
+	if err := s.writeUploadMetadata(id, filename, int64(len(body)), mimeType); err != nil {
+		// Metadata write failure is non-fatal; include warning but still return success.
+		writeJSON(w, http.StatusOK, map[string]any{"media_id": id, "status": "success", "size": len(body), "metadata_warning": err.Error()})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"media_id": id, "status": "success", "size": len(body)})
 }
 
@@ -529,6 +546,67 @@ func (s *Server) handleMediaFavorites(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"favorites": fav.ListFavorites()})
 }
 
+// handleMediaFavoriteBatch 处理 POST /api/media/favorite-batch，批量设置/取消收藏。
+// 请求体: {"media_ids":["a","b"],"favorite":true}
+func (s *Server) handleMediaFavoriteBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		MediaIds []string `json:"media_ids"`
+		Favorite bool     `json:"favorite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.MediaIds) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids must not be empty"})
+		return
+	}
+	for _, id := range req.MediaIds {
+		if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id in list"})
+			return
+		}
+	}
+
+	fav, ok := s.mediaSvc.(favoriteProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "favorite is not supported by the configured media service"})
+		return
+	}
+
+	succeeded := 0
+	failed := 0
+	for _, id := range req.MediaIds {
+		var err error
+		if req.Favorite {
+			err = fav.AddFavorite(id)
+		} else {
+			err = fav.RemoveFavorite(id)
+		}
+		if err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+
+	statusMsg := "success"
+	if failed > 0 {
+		statusMsg = fmt.Sprintf("partial: %d succeeded, %d failed", succeeded, failed)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    statusMsg,
+		"succeeded": succeeded,
+		"failed":    failed,
+		"favorite":  req.Favorite,
+	})
+}
+
 // enrichMediaList 将 GetMediaListResponse 中每条媒体补充 favorite 字段，
 // 返回一个兼容原 JSON 结构但多了 favorite 键的 map。
 func enrichMediaList(resp *gen.GetMediaListResponse, fav favoriteProvider) map[string]any {
@@ -550,6 +628,55 @@ func enrichMediaList(resp *gen.GetMediaListResponse, fav favoriteProvider) map[s
 		"total_count":  resp.TotalCount,
 		"page":         resp.Page,
 		"page_size":    resp.PageSize,
+	}
+}
+
+// writeUploadMetadata writes a metadata sidecar JSON to data/metadata/{id}.json
+// after a successful upload. Contains filename, size, created_at, and mime_type.
+func (s *Server) writeUploadMetadata(id, filename string, size int64, mimeType string) error {
+	metaDir := filepath.Join(filepath.Dir(s.uploadsDir), "metadata")
+	if err := os.MkdirAll(metaDir, 0755); err != nil {
+		return fmt.Errorf("failed to create metadata dir: %w", err)
+	}
+	meta := map[string]any{
+		"filename":   filename,
+		"size":       size,
+		"created_at": time.Now().Unix(),
+		"mime_type":  mimeType,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+	metaPath := filepath.Join(metaDir, id+".json")
+	return os.WriteFile(metaPath, data, 0644)
+}
+
+// detectMimeType returns the MIME type for a filename based on its extension.
+func detectMimeType(filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".bmp":
+		return "image/bmp"
+	case ".webp":
+		return "image/webp"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".webm":
+		return "video/webm"
+	default:
+		return "application/octet-stream"
 	}
 }
 
