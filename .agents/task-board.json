@@ -63,17 +63,17 @@
   "fix-backend-address": {
     "product": "claude",
     "task": "你是前端开发专家。修复 P0-1: 后端地址配置不生效。\n\n问题: MediaService.kt 硬编码 BASE_URL = \"http://localho",
-    "status": "ready",
-    "log": null,
-    "worktree": null,
+    "status": "merged",
+    "log": "/tmp/agent-fix-backend-address.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-backend-address",
     "branch": "agent/fix-backend-address",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 600,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
+    "started_at": "2026-07-28T08:36:21.142Z",
+    "completed_at": "2026-07-28T08:43:25.264Z",
+    "exit_code": 0,
     "commit": null,
-    "retries": 0,
+    "retries": 1,
     "max_retries": 3,
     "files": [
       "frontend/"
@@ -86,22 +86,26 @@
       "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "base_ref": "fbaee481bb68f2d93448dfc3d404407675a5e307",
+    "merge_started_at": "2026-07-28T08:56:22.524Z",
+    "merged_at": "2026-07-28T08:56:25.904Z",
+    "merged_ref": "b84154d4564dba846aed3812b7503672b06dc1dc"
   },
   "fix-backend-exif-dimensions": {
     "product": "claude",
     "task": "你是后端开发专家。修复 P1-1: 后端不填充 width/height/exif_data。\n\n问题: media_service.go 和 cloud_so",
-    "status": "ready",
-    "log": null,
-    "worktree": null,
+    "status": "merged",
+    "log": "/tmp/agent-fix-backend-exif-dimensions.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-backend-exif-dimensions",
     "branch": "agent/fix-backend-exif-dimensions",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 600,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
+    "started_at": "2026-07-28T08:46:22.313Z",
+    "completed_at": "2026-07-28T08:52:01.670Z",
+    "exit_code": 0,
     "commit": null,
-    "retries": 0,
+    "retries": 2,
     "max_retries": 3,
     "files": [
       "backend/"
@@ -114,22 +118,26 @@
       "cd /Users/wgt/projects/media-manager/backend && go clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "base_ref": "fbaee481bb68f2d93448dfc3d404407675a5e307",
+    "merge_started_at": "2026-07-28T08:56:25.907Z",
+    "merged_at": "2026-07-28T08:56:28.072Z",
+    "merged_ref": "e476af370391c4ef4f54e512a310d6fcba818c28"
   },
   "fix-frontend-stability": {
     "product": "claude",
     "task": "你是前端开发专家。修复 P1-3/P1-4/P1-5: ViewModel线程安全+缓存无上限+网格项remember缺key。\n\n问题:\n- P1-3: Me",
-    "status": "ready",
-    "log": null,
-    "worktree": null,
+    "status": "merged",
+    "log": "/tmp/agent-fix-frontend-stability.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-frontend-stability",
     "branch": "agent/fix-frontend-stability",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 600,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
+    "started_at": "2026-07-28T08:36:22.953Z",
+    "completed_at": "2026-07-28T08:39:28.864Z",
+    "exit_code": 0,
     "commit": null,
-    "retries": 0,
+    "retries": 1,
     "max_retries": 3,
     "files": [
       "frontend/composeApp/src/"
@@ -142,22 +150,26 @@
       "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "base_ref": "fbaee481bb68f2d93448dfc3d404407675a5e307",
+    "merge_started_at": "2026-07-28T08:56:28.073Z",
+    "merged_at": "2026-07-28T08:56:33.061Z",
+    "merged_ref": "b953511a565f9cd588c370bebc8fdfd68298f19d"
   },
   "fix-timezone-grouping": {
     "product": "claude",
     "task": "你是前端开发专家。修复 P0-2: 日期分组按 UTC 划分，中国时区晚间错分。\n\n问题: MediaViewModel.kt 的 localTimeZoneO",
-    "status": "ready",
-    "log": null,
-    "worktree": null,
+    "status": "failed",
+    "log": "/tmp/agent-fix-timezone-grouping.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-timezone-grouping",
     "branch": "agent/fix-timezone-grouping",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 600,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
+    "started_at": "2026-07-28T08:46:22.201Z",
+    "completed_at": "2026-07-28T08:56:22.509Z",
+    "exit_code": 124,
     "commit": null,
-    "retries": 0,
+    "retries": 3,
     "max_retries": 3,
     "files": [
       "frontend/"
@@ -170,6 +182,8 @@
       "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "base_ref": "fbaee481bb68f2d93448dfc3d404407675a5e307",
+    "failure": "max_retries_exceeded"
   }
 }
