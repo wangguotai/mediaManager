@@ -5,10 +5,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
+import com.wgt.media.SettingsScreen
+import com.wgt.media.SettingsState
+import com.wgt.media.ThemeMode
 
 private val viewModel = MediaViewModel()
 
@@ -45,8 +52,31 @@ private val DarkColors = darkColorScheme(
 @Composable
 @Preview
 fun App() {
-    val colors = if (isSystemInDarkTheme()) DarkColors else LightColors
+    // 主题模式来自 [com.wgt.media.SettingsState]（已持久化）：
+    //   SYSTEM → 跟随系统 [isSystemInDarkTheme]
+    //   LIGHT  → 强制浅色
+    //   DARK   → 强制暗色
+    // 读取的是 mutableStateOf，故设置页切换后此处自动重组切色板。
+    val isDark = when (SettingsState.themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+    val colors = if (isDark) DarkColors else LightColors
+
+    // 顶层导航：媒体列表 ↔ 设置页。用 remember 保留状态，切换不丢媒体列表缓存。
+    var screen by remember { mutableStateOf(Screen.MEDIA) }
+
     MaterialTheme(colorScheme = colors) {
-        MediaListScreen(viewModel = viewModel)
+        when (screen) {
+            Screen.MEDIA -> MediaListScreen(
+                viewModel = viewModel,
+                onNavigateToSettings = { screen = Screen.SETTINGS }
+            )
+            Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
+        }
     }
 }
+
+/** 顶层屏幕路由。 */
+private enum class Screen { MEDIA, SETTINGS }
