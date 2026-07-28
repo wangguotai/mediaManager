@@ -89,6 +89,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 与图片预览互斥：视频项点击直接进播放器，不走 [ImagePreviewDialog]。
     var videoPlayerMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
+    // 图片编辑器状态：预览操作栏点「编辑」时填充，非空即渲染全屏 [ImageEditor]。
+    var editorMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+
     // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
@@ -135,6 +138,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
                 sourceLabel = sourceLabel,
                 onDismiss = { previewIndex = null },
+                onEdit = { media ->
+                    editorMedia = media
+                },
                 onDelete = { media ->
                     previewIndex = null
                     viewModel.deleteSingleMedia(media.id)
@@ -153,6 +159,15 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             media = media,
             initialDurationSeconds = viewModel.videoDurations[media.id],
             onDismiss = { videoPlayerMedia = null }
+        )
+    }
+
+    // 图片编辑器：预览操作栏点「编辑」进入，全屏编辑（裁剪/旋转/滤镜）后保存到相册。
+    editorMedia?.let { media ->
+        ImageEditor(
+            media = media,
+            useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+            onDismiss = { editorMedia = null }
         )
     }
 
