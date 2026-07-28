@@ -80,7 +80,7 @@ import org.jetbrains.compose.resources.painterResource
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
 @Composable
-fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit = {}) {
+fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit = {}, onNavigateToAlbums: () -> Unit = {}) {
     val snackbarHostState = remember { SnackbarHostState() }
     // 默认打开"网盘图片" Tab（index=2）：真机启动即对后端发 q=source=cloud 请求，
     // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
@@ -100,6 +100,13 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
+
+    // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
+    // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
+    var contextMenuMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+
+    // "加入相册"选择对话框：非空时弹出相册列表供用户选择目标相册。
+    var addToAlbumMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
     // 监听错误信息并显示 Snackbar
     LaunchedEffect(viewModel.errorMessage) {
@@ -176,6 +183,44 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         )
     }
 
+    // 长按上下文菜单：预览 / 加入相册
+    contextMenuMedia?.let { media ->
+        ContextMenuSheet(
+            media = media,
+            onPreview = {
+                contextMenuMedia = null
+                if (media.type == MediaType.VIDEO) {
+                    videoPlayerMedia = media
+                } else {
+                    previewIndex = viewModel.filteredList.indexOf(media)
+                }
+            },
+            onAddToAlbum = {
+                contextMenuMedia = null
+                addToAlbumMedia = media
+                viewModel.showAddToAlbumDialog(media.id)
+            },
+            onDismiss = { contextMenuMedia = null }
+        )
+    }
+
+    // "加入相册"相册选择对话框
+    addToAlbumMedia?.let { media ->
+        AddToAlbumDialog(
+            albums = viewModel.albumList,
+            isLoading = viewModel.isAlbumLoading,
+            onPick = { album ->
+                viewModel.addMediaToAlbum(album.id, media.id)
+                addToAlbumMedia = null
+                viewModel.dismissAddToAlbumDialog()
+            },
+            onDismiss = {
+                addToAlbumMedia = null
+                viewModel.dismissAddToAlbumDialog()
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             Column {
@@ -209,6 +254,13 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             Icon(
                                 painterResource(Res.drawable.ic_refresh),
                                 contentDescription = "刷新"
+                            )
+                        }
+                        // 相册入口：相册图标，点击进入相册管理
+                        IconButton(onClick = onNavigateToAlbums) {
+                            Icon(
+                                painterResource(Res.drawable.ic_photo),
+                                contentDescription = "相册"
                             )
                         }
                         // 设置入口：齿轮图标，点击切换到 SettingsScreen
@@ -434,10 +486,19 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             }
                         }
                         val onMediaLongClick: (MediaMetadata) -> Unit = { media ->
-                            if (media.type == MediaType.VIDEO) {
-                                videoPlayerMedia = media
+                            if (selectedTab == 2) {
+                                // 网盘 Tab（无选择模式）：长按弹上下文菜单
+                                contextMenuMedia = media
+                            } else if (viewModel.hasSelection) {
+                                // 已在选择模式：长按仍走选中/预览原逻辑
+                                if (media.type == MediaType.VIDEO) {
+                                    videoPlayerMedia = media
+                                } else {
+                                    previewIndex = filtered.indexOf(media)
+                                }
                             } else {
-                                previewIndex = filtered.indexOf(media)
+                                // 非选择模式下长按：弹上下文菜单
+                                contextMenuMedia = media
                             }
                         }
                         val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
@@ -1740,4 +1801,159 @@ fun UploadFab(
             )
         }
     }
+}
+
+/**
+ * 媒体长按上下文菜单（底部弹层风格）。
+ *
+ * 提供两个选项：预览、加入相册。
+ * 用 [AlertDialog] 实现，commonMain 全平台兼容。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ContextMenuSheet(
+    media: MediaMetadata,
+    onPreview: () -> Unit,
+    onAddToAlbum: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                media.filename,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
+        text = {
+            Column {
+                // 预览
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onPreview)
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        painterResource(Res.drawable.ic_image_placeholder),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Text("预览", style = MaterialTheme.typography.bodyLarge)
+                }
+                // 加入相册
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onAddToAlbum)
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        painterResource(Res.drawable.ic_photo),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Text("加入相册", style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+/**
+ * "加入相册"相册选择对话框。
+ *
+ * 弹出相册列表供用户选择目标相册，选中即触发加入操作。
+ * 列表为空时提示用户先创建相册。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun AddToAlbumDialog(
+    albums: List<com.wgt.feature.media.MediaService.Album>,
+    isLoading: Boolean,
+    onPick: (com.wgt.feature.media.MediaService.Album) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("加入相册", fontWeight = FontWeight.Bold) },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 300.dp)
+            ) {
+                when {
+                    isLoading -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(32.dp)
+                        )
+                    }
+                    albums.isEmpty() -> {
+                        Text(
+                            "暂无相册，请先创建",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    else -> {
+                        Column {
+                            albums.forEach { album ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onPick(album) }
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        painterResource(Res.drawable.ic_photo),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(modifier = Modifier.size(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            album.name,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            "${album.mediaCount} 项",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }

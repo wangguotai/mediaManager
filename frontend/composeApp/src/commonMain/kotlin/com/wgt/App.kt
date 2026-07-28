@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
 import com.wgt.feature.media.MediaService
+import com.wgt.media.AlbumScreen
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
 import com.wgt.media.SettingsScreen
@@ -76,9 +77,14 @@ fun App() {
                 when (screen) {
                     Screen.MEDIA -> MediaListScreen(
                         viewModel = viewModel,
-                        onNavigateToSettings = { screen = Screen.SETTINGS }
+                        onNavigateToSettings = { screen = Screen.SETTINGS },
+                        onNavigateToAlbums = { screen = Screen.ALBUM }
                     )
                     Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
+                    Screen.ALBUM -> AlbumScreen(
+                        viewModel = viewModel,
+                        onBack = { screen = Screen.MEDIA }
+                    )
                 }
             }
         }
@@ -86,4 +92,4 @@ fun App() {
 }
 
 /** 顶层屏幕路由。 */
-private enum class Screen { MEDIA, SETTINGS }
+private enum class Screen { MEDIA, SETTINGS, ALBUM }
