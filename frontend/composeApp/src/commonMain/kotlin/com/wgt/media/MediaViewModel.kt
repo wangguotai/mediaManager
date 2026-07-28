@@ -165,6 +165,11 @@ class MediaViewModel {
     var isUploading by mutableStateOf(false)
         private set
 
+    // 上传进度：已上传数 / 总数。上传期间非 null，结束时复位为 null。
+    // UI 据此显示进度对话框 "上传中 2/5..."。
+    var uploadProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+
     // 删除状态
     var isDeleting by mutableStateOf(false)
         private set
@@ -232,7 +237,8 @@ class MediaViewModel {
      * 切换媒体收藏状态。
      *
      * 1. 立即更新 [favoriteIds] 与本地持久化（UI 即时响应，不等网络）；
-     * 2. 异步调用后端 POST /api/media/favorite 同步服务端状态（失败静默，本地状态仍生效）。
+     * 2. 异步调用后端 POST /api/media/favorite 同步服务端状态（失败静默，本地状态仍生效）；
+     * 3. 通过 [snackbarMessage] 发送收藏切换提示（"已收藏"/"已取消收藏"）。
      *
      * @param mediaId 目标媒体 ID
      */
@@ -245,6 +251,8 @@ class MediaViewModel {
         }
         // 持久化到本地存储
         FavoriteStore.saveFavoriteIds(favoriteIds)
+        // Snackbar 反馈
+        errorMessage = if (newFav) "已收藏" else "已取消收藏"
         // 异步同步后端
         viewModelScope.launch {
             try {
@@ -387,18 +395,23 @@ class MediaViewModel {
 
     /**
      * 上传选中的本地媒体到服务器
+     *
+     * 上传期间通过 [uploadProgress] 暴露实时进度（已传/总数），
+     * UI 层据此显示进度对话框。完成后发送 Snackbar 结果消息。
      */
     fun uploadSelectedLocalMedia() {
         if (selectedMediaIds.isEmpty() || isUploading) return
 
         isUploading = true
+        val totalCount = selectedMediaIds.size
+        uploadProgress = 0 to totalCount
 
         viewModelScope.launch {
             try {
                 var successCount = 0
-                val totalCount = selectedMediaIds.size
 
-                for (mediaId in selectedMediaIds) {
+                selectedMediaIds.toList().forEachIndexed { index, mediaId ->
+                    uploadProgress = (index) to totalCount
                     val mediaData = galleryFeature.getMediaData(mediaId)
                     if (mediaData != null) {
                         val media = mediaList.find { it.id == mediaId }
@@ -413,6 +426,7 @@ class MediaViewModel {
                             }
                         }
                     }
+                    uploadProgress = (index + 1) to totalCount
                 }
 
                 if (successCount > 0) {
@@ -427,6 +441,7 @@ class MediaViewModel {
                 errorMessage = "上传本地媒体失败: ${e.message}"
             } finally {
                 isUploading = false
+                uploadProgress = null
             }
         }
     }
@@ -471,6 +486,8 @@ class MediaViewModel {
      * 当前实现：逐个分享（系统分享面板每次处理一个文件），
      * 多选时依次弹出。后续可扩展为多文件分享（Android 支持 ACTION_SEND_MULTIPLE）。
      *
+     * 分享开始时发送 "分享中..." 提示，全部完成后发送 "已分享" 提示。
+     *
      * @param onShareStart 每个文件开始分享时的回调（UI 可显示提示）
      * @param onComplete 全部处理完毕的回调
      */
@@ -480,6 +497,7 @@ class MediaViewModel {
     ) {
         if (selectedMediaIds.isEmpty()) return
 
+        errorMessage = "分享中..."
         viewModelScope.launch {
             for (mediaId in selectedMediaIds) {
                 val media = mediaList.find { it.id == mediaId } ?: continue
@@ -503,6 +521,7 @@ class MediaViewModel {
                     errorMessage = "分享失败: ${e.message}"
                 }
             }
+            errorMessage = "已分享"
             onComplete()
         }
     }
@@ -530,10 +549,13 @@ class MediaViewModel {
 
     /**
      * 批量删除选中的媒体
+     *
+     * 删除完成后发送 Snackbar 结果消息（"已删除 N 项"）。
      */
     fun deleteSelectedMedia() {
         if (selectedMediaIds.isEmpty() || isDeleting) return
 
+        val deleteCount = selectedMediaIds.size
         isDeleting = true
 
         viewModelScope.launch {
@@ -543,6 +565,7 @@ class MediaViewModel {
                     // 删除成功后更新列表
                     mediaList = mediaList.filter { it.id !in selectedMediaIds }
                     selectedMediaIds.clear()
+                    errorMessage = "已删除 $deleteCount 项"
                 }
             } catch (e: Exception) {
                 errorMessage = "删除媒体失败: ${e.message}"
