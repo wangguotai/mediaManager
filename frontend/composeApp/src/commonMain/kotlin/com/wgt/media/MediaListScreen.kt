@@ -448,31 +448,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     isUploading = viewModel.isUploading,
                     showUploadButton = selectedTab == 0
                 )
-            } else {
-                // 设置入口底栏：MIUI 真机 TopAppBar actions 第 4 个按钮点击不生效，
-                // 改用 bottomBar 持久展示设置入口，触摸目标充足。
-                Surface(
-                    tonalElevation = 3.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(onClick = onNavigateToSettings) {
-                            Icon(
-                                painterResource(Res.drawable.ic_settings),
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("设置")
-                        }
-                    }
-                }
             }
         },
         floatingActionButton = {
