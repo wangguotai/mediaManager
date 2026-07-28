@@ -302,51 +302,48 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     }
 
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        // 注意: nestedScroll + scrollBehavior 在 MIUI 上会拦截 TopAppBar actions 的触摸事件
         topBar = {
             Column {
-                TopAppBar(
-                    title = {
-                        Text(
-                            "图片管理",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp
-                        )
-                    },
-                    scrollBehavior = scrollBehavior,
-                   actions = {
-                        // 搜索图标：展开/收起搜索栏
-                        IconButton(onClick = { searchExpanded = !searchExpanded }) {
-                            Icon(
-                                painterResource(Res.drawable.ic_search),
-                                contentDescription = "搜索"
-                            )
+                // 自定义顶栏替代 TopAppBar — MIUI 上 TopAppBar actions 不传触摸
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "图片管理",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.clickable { searchExpanded = !searchExpanded }.padding(8.dp)) {
+                            Icon(painterResource(Res.drawable.ic_search), contentDescription = "搜索")
                         }
-                        // 刷新当前 Tab 数据源
-                        IconButton(
-                            onClick = {
+                        Box(
+                            modifier = Modifier.clickable {
                                 when (selectedTab) {
                                     0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
                                     1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
                                     else -> viewModel.loadCloudMediaList(forceRefresh = true)
                                 }
-                            },
-                            enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
+                            }.padding(8.dp)
                         ) {
-                            Icon(
-                                painterResource(Res.drawable.ic_refresh),
-                                contentDescription = "刷新"
-                            )
+                            Icon(painterResource(Res.drawable.ic_refresh), contentDescription = "刷新")
                         }
-                        // 相册入口：相册图标，点击进入相册管理
-                        IconButton(onClick = onNavigateToAlbums) {
-                            Icon(
-                                painterResource(Res.drawable.ic_photo),
-                                contentDescription = "相册"
-                            )
+                        Box(modifier = Modifier.clickable { onNavigateToAlbums() }.padding(8.dp)) {
+                            Icon(painterResource(Res.drawable.ic_photo), contentDescription = "相册")
+                        }
+                        Box(modifier = Modifier.clickable { onNavigateToSettings() }.padding(8.dp)) {
+                            Icon(painterResource(Res.drawable.ic_settings), contentDescription = "设置")
                         }
                     }
-                )
+                }
 
                 // 标签栏：自定义滑动指示器，spring 动画驱动 offset/width，切换更丝滑。
                 TabRow(
