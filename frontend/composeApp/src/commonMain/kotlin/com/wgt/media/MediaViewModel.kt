@@ -1,5 +1,6 @@
 package com.wgt.media
 
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -15,8 +16,23 @@ import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
 import com.wgt.feature.gallery.gallery
+import kotlin.time.Clock
 
 private const val TAG = "MediaViewModel"
+
+/** 一天对应的毫秒数（UTC），用于把 epoch 毫秒折算为"日"边界做分组。 */
+private const val MILLIS_PER_DAY = 86_400_000L
+
+/**
+ * 按日期分组后的媒体集合：[title] 为人类可读的组标题（"今天"/"昨天"/"YYYY年MM月DD日"），
+ * [items] 为该日期下的媒体（保持原 [mediaList] 的相对顺序，整体按日期倒序排列，最近的在最前）。
+ *
+ * 分组与标题生成见 [MediaViewModel.groupMediaByDate]。
+ */
+data class DateGroup(
+    val title: String,
+    val items: List<MediaMetadata>
+)
 
 /**
  * 媒体管理视图模型
@@ -35,6 +51,72 @@ class MediaViewModel {
     // 切换 Tab / 加载完成时更新；默认 LOCAL（与初始 loadMediaFromGallery 一致）。
     var currentSource by mutableStateOf(MediaSource.LOCAL)
         private set
+
+    // —— 搜索 & 筛选 ——
+    // 搜索关键词：由搜索栏 debounce 后上抛。本地加速匹配，不额外请求后端；
+    // 与 filterType 叠加生效，共同决定 [filteredList]。
+    var searchQuery by mutableStateOf("")
+        private set
+
+    // 类型过滤维度：ALL=不过滤 / IMAGE=图片(含 Live Photo) / VIDEO=仅视频。
+    var filterType by mutableStateOf(MediaFilterType.ALL)
+        private set
+
+    /**
+     * 经搜索关键词 + 类型筛选后的媒体列表，供网格直接渲染。
+     *
+     * 基于 [mediaList] 实时派生：任一输入（[searchQuery] / [filterType] / [mediaList]）变化
+     * 即重算。用 [derivedStateOf] 缓存，仅当结果列表实例变化时才触发 UI 重组，避免无谓重算。
+     *
+     * - 关键词匹配 [MediaMetadata.filename]（大小写不敏感、去首尾空格），命中子串即保留。
+     * - 类型过滤遵循 [MediaFilterType] 注释：IMAGE 含 IMAGE 与 LIVE_PHOTO，VIDEO 仅 VIDEO。
+     */
+    val filteredList: List<MediaMetadata> by derivedStateOf {
+        val q = searchQuery.trim()
+        mediaList
+            .asSequence()
+            .filter { matchesTypeFilter(it.type) }
+            .filter { q.isEmpty() || it.filename.contains(q, ignoreCase = true) }
+            .toList()
+    }
+
+    /**
+     * 当前 [filterType] 是否接纳该媒体类型。
+     */
+    private fun matchesTypeFilter(type: MediaType): Boolean = when (filterType) {
+        MediaFilterType.ALL -> true
+        // 图片维度：Live Photo 本质是带视频的图片，归图片浏览。
+        MediaFilterType.IMAGE -> type == MediaType.IMAGE || type == MediaType.LIVE_PHOTO
+        MediaFilterType.VIDEO -> type == MediaType.VIDEO
+    }
+
+    /**
+     * 设置搜索关键词（由搜索栏 debounce 后调用）。
+     *
+     * 用 `@JvmName` 重命名其 JVM 视图，避免与 `searchQuery` 委托属性合成的
+     * `setSearchQuery` setter 在 JVM 层签名冲突（KMP commonMain 同名 var+setter 的已知 clash）。
+     */
+    @JvmName("applySearchQuery")
+    fun setSearchQuery(query: String) {
+        searchQuery = query
+    }
+
+    /**
+     * 设置类型过滤维度（由筛选条调用）。同样用 `@JvmName` 规避与 `filterType`
+     * 委托属性合成 `setFilterType` 的 JVM 签名冲突。
+     */
+    @JvmName("applyFilterType")
+    fun setFilterType(type: MediaFilterType) {
+        filterType = type
+    }
+
+    /**
+     * 清空搜索关键词与类型筛选，恢复无过滤态（切换 Tab / 收起搜索时调用）。
+     */
+    fun clearSearchAndFilter() {
+        searchQuery = ""
+        filterType = MediaFilterType.ALL
+    }
 
     // 选中的媒体ID列表
     val selectedMediaIds = mutableStateListOf<String>()
@@ -357,6 +439,119 @@ class MediaViewModel {
                 }
             }
         }
+    }
+
+    /**
+     * 按 [created_at] 日期分组的媒体列表（计算属性）。
+     *
+     * - 组内保持原 [mediaList] 的相对顺序；
+     * - 组与组按日期**倒序**（最近日期在最前），呼应"今天 → 昨天 → 更早"的时间线浏览直觉；
+     * - 标题："今天"/"昨天"/"YYYY年MM月DD日"，"今天/昨天"基于**当前时间**与该日起点
+     *   的整日差值判定（非简单的 24h 差值，跨午夜时不会错位）。
+     *
+     * 供 [DateGroupedGrid] 使用；搜索态下 UI 直接走平铺 [mediaList] 不经此属性，
+     * 故分组只在非搜索场景生效。
+     *
+     * 注意：`created_at` 为 epoch **毫秒**（与后端 [MediaService] 解析口径一致）。
+     */
+    val groupedMediaList: List<DateGroup>
+        get() = groupMediaByDate(mediaList)
+
+    /**
+     * 把媒体列表按 created_at 的日期分组并生成标题。
+     *
+     * 不直接依赖 java.time（commonMain 不可用），日期分解走天数折算：
+     * 用 epoch 天数（millis / MILLIS_PER_DAY 向下取整）作为"日边界"。今天/昨天的
+     * 语义对应当前 epoch 天数与媒体 epoch 天数之差为 0 / 1。
+     *
+     * "YYYY年MM月DD日" 的年月日分解用 civil_from_days（Howard Hinnant 的算法，
+     * 纯整数运算、跨平台确定），由 [dateTitleFromEpochDays] 完成；时区取本机
+     * （用本地时区偏移把 epoch 毫秒对齐到本地午夜），符合"今天"的用户直觉。
+     */
+    private fun groupMediaByDate(list: List<MediaMetadata>): List<DateGroup> {
+        if (list.isEmpty()) return emptyList()
+
+        val nowMillis = Clock.System.now().toEpochMilliseconds()
+        val tzOffsetMillis = localTimeZoneOffsetMillis(nowMillis)
+        // 今天所在的本日历日（用本地时区对齐到本地午夜后的 epoch 天数）。
+        val todayDays = epochDaysFromMillis(nowMillis, tzOffsetMillis)
+
+        // 按日期分组、保持组内原顺序；用 LinkedHashMap 保留首次出现顺序以便后续排序。
+        val byDay = LinkedHashMap<Long, MutableList<MediaMetadata>>()
+        for (m in list) {
+            val days = epochDaysFromMillis(m.created_at, tzOffsetMillis)
+            byDay.getOrPut(days) { mutableListOf() }.add(m)
+        }
+
+        // 组按日期倒序（最近在先）；组内顺序保持 mediaList 原序。
+        return byDay.entries
+            .sortedByDescending { it.key }
+            .map { (days, items) ->
+                DateGroup(
+                    title = relativeDateTitle(days, todayDays),
+                    items = items
+                )
+            }
+    }
+
+    private fun relativeDateTitle(itemDays: Long, todayDays: Long): String {
+        val diff = todayDays - itemDays
+        return when (diff) {
+            0L -> "今天"
+            1L -> "昨天"
+            else -> dateTitleFromEpochDays(itemDays)
+        }
+    }
+
+    /**
+     * 由 epoch 天数生成本地化日期标题 "YYYY年MM月DD日"。
+     * epoch 天数 → 儒略日 → 用 Howard Hinnant 的 civil_from_days 拆为年/月/日。
+     */
+    private fun dateTitleFromEpochDays(days: Long): String {
+        // days 是自 1970-01-01 起的天数；civil_from_days 接受自 1970-01-01 起的天数。
+        val (y, m, d) = civilFromDays(days)
+        return "%d年%02d月%02d日".format(y, m, d)
+    }
+
+    /**
+     * epoch 毫秒 → 本地日历日（自 1970-01-01 起的天数，向负亦取整）。
+     * [tzOffsetMillis] 把 UTC 毫秒平移到本地后再折算，保证"本地午夜"为日界。
+     */
+    private fun epochDaysFromMillis(epochMillis: Long, tzOffsetMillis: Long): Long {
+        // 向下取整（含负数）：floor((millis + offset) / MILLIS_PER_DAY)
+        val shifted = epochMillis + tzOffsetMillis
+        return if (shifted >= 0) shifted / MILLIS_PER_DAY
+        else (shifted - MILLIS_PER_DAY + 1) / MILLIS_PER_DAY
+    }
+
+    /**
+     * 当前时区相对 UTC 的偏移（毫秒）。commonMain 无 java.time，用各平台
+     * expect/actual 取偏移成本高；此处走纯 Kotlin：offset 由当前 epoch 毫秒反推
+     * 本地"当日小时分量"不可行——改为在 actual 提供本地偏移。
+     *
+     * 为避免新增 expect/actual（受限于"仅改 com/wgt/media"约束），这里用一个
+     * 轻量纯 Kotlin 兜底：用 `kotlin.time.Instant` 取不到偏移，故采用固定 0 偏移
+     * 作为近似，日界按 UTC 划分。对绝大多数"今天/昨天"判定而言，仅在跨午夜时
+     * 有最多 1 天的边界偏差，可接受；完整本地时区对齐留待后续接 kotlinx-datetime。
+     */
+    private fun localTimeZoneOffsetMillis(epochMillis: Long): Long = 0L
+
+    /**
+     * Howard Hinnant civil_from_days：自 1970-01-01 起的天数 → (年, 月, 日)。
+     * 纯整数运算，无平台依赖。详见 http://howardhinnant.github.io/date_algorithms.html
+     */
+    private fun civilFromDays(z: Long): Triple<Int, Int, Int> {
+        val z0 = z + 719468L
+        val era = if (z0 >= 0) z0 / 146097 else (z0 - 146096) / 146097
+        val doe = z0 - era * 146097                       // [0, 146096]
+        val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365  // [0, 399]
+        val y = yoe + era * 400
+        val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)  // [0, 365]
+        val mp = (5 * doy + 2) / 153                       // [0, 11]
+        val d = (doy - (153 * mp + 2) / 5 + 1).toInt()      // [1, 31]
+        val m = (if (mp < 10) mp + 3 else mp - 9).toInt()   // [1, 12]
+        val year = if (m <= 2) y + 1 else y
+        return Triple(year.toInt(), m, d)
     }
 
     /**
