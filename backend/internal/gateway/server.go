@@ -165,16 +165,21 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	uptime := time.Since(s.startTime).Truncate(time.Second)
 
-	// Report cache hit/miss status from the media service.
+	// Report cache hit/miss status and hit rate from the media service.
 	cacheStatus := "unknown"
+	cacheHitRate := 0.0
 	if _, ok := s.mediaSvc.(*service.MediaService); ok {
 		hits, misses := service.GetListCacheStats()
-		if hits+misses == 0 {
+		total := hits + misses
+		if total == 0 {
 			cacheStatus = "idle"
 		} else if hits > 0 {
 			cacheStatus = "hit"
 		} else {
 			cacheStatus = "miss"
+		}
+		if total > 0 {
+			cacheHitRate = float64(hits) / float64(total) * 100
 		}
 	}
 
@@ -189,6 +194,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"media_count":    mediaCount,
 		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
 		"cache":          cacheStatus,
+		"cache_hit_rate": fmt.Sprintf("%.1f%%", cacheHitRate),
 		"favorite_count": favoriteCount,
 	})
 }
@@ -219,9 +225,12 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 	// 显式设置 Content-Type：http.ServeFile 默认靠字节嗅探，对多数视频容器会得到
 	// application/octet-stream，导致浏览器无法内联播放。这里按扩展名前置正确的 video/* 或 image/*。
 	// ServeFile 不会覆盖已设置的 Content-Type，故 Range 分片播放不受影响。
-	if ct := videoMimeType(files[0]); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	// 未知扩展名回退 application/octet-stream 以保证所有响应都有显式 Content-Type。
+	ct := videoMimeType(files[0])
+	if ct == "" {
+		ct = "application/octet-stream"
 	}
+	w.Header().Set("Content-Type", ct)
 	http.ServeFile(w, r, files[0])
 }
 

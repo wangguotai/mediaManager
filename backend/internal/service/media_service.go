@@ -224,12 +224,6 @@ func findExifSegment(data []byte) ([]byte, error) {
 	return nil, fmt.Errorf("no exif segment")
 }
 
-// 字节序枚举：tiffEndian.mark 字节序，tiffEndian.firstMagic 为对应字节序的 0x002A 校验。
-type tiffEndian struct {
-	mark        byte
-	uint16Order binary.ByteOrder
-}
-
 // parseTIFFExif 解析 TIFF 头与 IFD0/ExifIFD，抽取常用 EXIF 条目。
 func parseTIFFExif(tiff []byte) map[string]string {
 	if len(tiff) < 8 {
@@ -445,8 +439,15 @@ type MediaService struct {
 	videoMetaDir string
 
 	// listCache caches GetMediaList results to avoid repeated directory scans.
-	listCacheMu     sync.Mutex
-	listCache       *listCacheEntry
+	listCacheMu sync.Mutex
+	listCache   *listCacheEntry
+
+	// cloudCache caches the sorted result of GetCloudImages() to avoid
+	// re-scanning the cloud directory and re-sorting on every request.
+	cloudCacheMu    sync.Mutex
+	cloudCache      []*gen.MediaMetadata
+	cloudCacheAt    time.Time
+	cloudCacheMtime time.Time
 }
 
 // listCacheEntry holds a cached GetMediaList response and its expiry.
@@ -471,7 +472,7 @@ func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
 	return &MediaService{
 		uploadsDir:   uploadsDir,
 		thumbsDir:    thumbsDir,
-		thumbCache:   NewThumbCache(100, 512*1024),
+		thumbCache:   NewThumbCache(100, 16*1024*1024, 512*1024), // 100 items / 16 MiB total / 512 KiB per item
 		videoMetaDir: filepath.Join(filepath.Dir(uploadsDir), "video-meta"),
 	}
 }
@@ -851,13 +852,61 @@ func (s *MediaService) invalidateListCache() {
 	defer s.listCacheMu.Unlock()
 	s.listCache = nil
 }
+// cloudCacheTTL is the duration for which the sorted cloud image list is cached.
+const cloudCacheTTL = 30 * time.Second
+
+// getSortedCloudImages returns the cloud image list sorted by CreatedAt (newest
+// first), utilising an in-memory cache to avoid re-scanning and re-sorting on
+// every call. The cache is invalidated by directory mtime changes and TTL expiry.
+func (s *MediaService) getSortedCloudImages() ([]*gen.MediaMetadata, error) {
+	if s.cloudSource == nil {
+		return nil, fmt.Errorf("cloud source is not configured")
+	}
+
+	// Check cache validity: TTL + directory mtime.
+	root := s.cloudSource.(*LocalCloudSource).Root()
+	var dirMtime time.Time
+	if root != "" {
+		if info, err := os.Stat(root); err == nil {
+			dirMtime = info.ModTime()
+		}
+	}
+
+	s.cloudCacheMu.Lock()
+	cached := s.cloudCache
+	cachedAt := s.cloudCacheAt
+	cachedMtime := s.cloudCacheMtime
+	s.cloudCacheMu.Unlock()
+
+	if cached != nil && time.Since(cachedAt) < cloudCacheTTL && dirMtime.Equal(cachedMtime) {
+		return cached, nil
+	}
+
+	// Cache miss: fetch and sort.
+	images, err := s.cloudSource.GetCloudImages()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(images, func(i, j int) bool {
+		return images[i].CreatedAt > images[j].CreatedAt
+	})
+
+	s.cloudCacheMu.Lock()
+	s.cloudCache = images
+	s.cloudCacheAt = time.Now()
+	s.cloudCacheMtime = dirMtime
+	s.cloudCacheMu.Unlock()
+
+	return images, nil
+}
+
 // favOnly 为 true 时仅返回收藏的媒体。
 func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly bool) (*gen.GetMediaListResponse, error) {
 	if s.cloudSource == nil {
 		return nil, fmt.Errorf("cloud source is not configured")
 	}
 
-	allImages, err := s.cloudSource.GetCloudImages()
+	allImages, err := s.getSortedCloudImages()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch cloud images: %v", err)
 	}
@@ -885,10 +934,7 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly b
 		mediaList = append(mediaList, meta)
 	}
 
-	// Sort by creation time (newest first)
-	sort.Slice(mediaList, func(i, j int) bool {
-		return mediaList[i].CreatedAt > mediaList[j].CreatedAt
-	})
+	// allImages is already sorted by CreatedAt (newest first) via getSortedCloudImages.
 
 	startIndex := int(req.Page-1) * int(req.PageSize)
 	endIndex := startIndex + int(req.PageSize)

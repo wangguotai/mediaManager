@@ -6,12 +6,16 @@ import (
 )
 
 // ThumbCache is an in-memory LRU cache for thumbnail byte slices.
-// It caps the entry count at maxItems and rejects individual entries
-// larger than maxItemBytes. This avoids repeated disk reads for
-// frequently requested thumbnails.
+// It caps both the entry count (maxItems, safety valve) and the aggregate
+// memory footprint (maxBytes). Eviction is byte-driven: once totalBytes
+// exceeds maxBytes the least-recently-used entries are evicted until the
+// budget is satisfied. Individual entries larger than maxItemSize are
+// rejected to prevent a single thumbnail from evicting many small ones.
+// This avoids repeated disk reads for frequently requested thumbnails.
 type ThumbCache struct {
 	mu          sync.Mutex
 	maxItems    int
+	maxBytes    int
 	maxItemSize int
 	items       map[string]*list.Element
 	order       *list.List // front = most recently used
@@ -27,10 +31,14 @@ type thumbEntry struct {
 	data  []byte
 }
 
-// NewThumbCache creates a ThumbCache with the given item cap and per-item byte limit.
-func NewThumbCache(maxItems, maxItemSize int) *ThumbCache {
+// NewThumbCache creates a ThumbCache with the given item cap, total byte
+// budget, and per-item byte limit. maxBytes controls the primary eviction
+// trigger; maxItems is a safety valve to prevent unbounded key growth from
+// many tiny entries.
+func NewThumbCache(maxItems, maxBytes, maxItemSize int) *ThumbCache {
 	return &ThumbCache{
 		maxItems:    maxItems,
+		maxBytes:    maxBytes,
 		maxItemSize: maxItemSize,
 		items:       make(map[string]*list.Element),
 		order:       list.New(),
@@ -74,8 +82,10 @@ func (c *ThumbCache) Put(key, mime string, width, height int32, data []byte) {
 		return
 	}
 
-	// Evict least-recently-used entries until we have room.
-	for len(c.items) >= c.maxItems && c.order.Len() > 0 {
+	// Evict least-recently-used entries until we are within both the byte
+	// budget and the item cap. Byte budget is the primary trigger; the item
+	// cap is a safety valve for many tiny entries.
+	for (c.totalBytes+len(data) > c.maxBytes || len(c.items) >= c.maxItems) && c.order.Len() > 0 {
 		c.evictLRU()
 	}
 
