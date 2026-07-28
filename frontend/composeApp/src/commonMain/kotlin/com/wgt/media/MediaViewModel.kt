@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import media.MediaMetadata
+import media.MediaType
 import com.wgt.feature.gallery.gallery
 
 private const val TAG = "MediaViewModel"
@@ -78,6 +79,17 @@ class MediaViewModel {
     private var cachedLocalMedia: List<MediaMetadata>? = null
     private var cachedUploadedMedia: List<MediaMetadata>? = null
     private var cachedCloudMedia: List<MediaMetadata>? = null
+
+    /**
+     * 视频时长缓存：mediaId → 秒。`loadCloudMediaList` 加载视频列表后，后台逐个调用
+     * 后端 `/api/media/video-info/{id}` 预取时长，供网格时长标签与 [VideoPlayer] 初始
+     * 总时长复用，避免每次进入播放器都要等加载。失败项不入表，播放器再按实际播放获取。
+     *
+     * 用 mutableStateOf 包 Map 仅供 UI 观察刷新；内部换新实例触发重组（Kotlin Map 不可变，
+     * 每次产出新 Map）。
+     */
+    var videoDurations by mutableStateOf<Map<String, Double>>(emptyMap())
+        private set
 
 
     init {
@@ -146,10 +158,13 @@ class MediaViewModel {
         viewModelScope.launch {
             try {
                 // cloud=true → 后端附加 q=source=cloud，命中 LocalCloudSource（data/cloud-images）。
+                // 该源现同时收录图片与视频扩展名，故此 Tab 已天然包含 VIDEO 条目，无需额外请求。
                 // 出错时 MediaService 不再回退 mock，直接抛出，这里捕获后置 listLoadError。
                 val cloudMedia = MediaService.getMediaList(pageSize = 50, cloud = true)
                 cachedCloudMedia = cloudMedia
                 mediaList = cloudMedia
+                // 列表就绪后后台预取视频时长（仅 VIDEO 项），供网格时长标签与播放器复用。
+                prefetchVideoDurations(cloudMedia)
             } catch (e: Exception) {
                 // 列表加载失败：保留 listLoadError 持续占位，而非落入“暂无网盘图片”误导。
                 // mediaList 保持既有值（首次失败时为空），UI 由 listLoadError 驱动重试占位。
@@ -317,6 +332,31 @@ class MediaViewModel {
      */
     fun clearError() {
         errorMessage = null
+    }
+
+    /**
+     * 后台预取列表中视频项的时长。
+     *
+     * 仅对 `type == VIDEO` 且尚未在 [videoDurations] 中的项请求后端 video-info；
+     * 串行请求（避免突发打满后端，ffprobe 每项含 15s 超时）。每拿到一项即换新 Map
+     * 触发 UI 刷新，网格时长标签随到达逐步显现，播放器进入时也能拿到初始时长。
+     * 非视频 / 请求失败被静默跳过（播放器会按实际播放兜底取时长）。
+     */
+    private fun prefetchVideoDurations(list: List<MediaMetadata>) {
+        val toFetch = list.filter { it.type == MediaType.VIDEO && !videoDurations.containsKey(it.id) }
+        if (toFetch.isEmpty()) return
+        viewModelScope.launch {
+            for (media in toFetch) {
+                val info = try {
+                    loadVideoInfo(VIDEO_BACKEND_BASE_URL, media.id)
+                } catch (e: Exception) {
+                    null
+                }
+                if (info != null && info.durationSeconds > 0) {
+                    videoDurations = videoDurations + (media.id to info.durationSeconds)
+                }
+            }
+        }
     }
 
     /**
