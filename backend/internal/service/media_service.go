@@ -440,6 +440,7 @@ type MediaService struct {
 	thumbsDir   string
 	cloudSource CloudImageSource
 	favStore    *FavoriteStore
+	albumStore  *AlbumStore
 	thumbCache  *ThumbCache
 	videoMetaDir string
 
@@ -485,6 +486,11 @@ func (s *MediaService) SetFavoriteStore(fs *FavoriteStore) {
 	s.favStore = fs
 }
 
+// SetAlbumStore 注入相册存储；为 nil 表示相册功能禁用。
+func (s *MediaService) SetAlbumStore(as *AlbumStore) {
+	s.albumStore = as
+}
+
 // IsFavorite 返回 mediaId 是否被收藏。favStore 未配置时返回 false。
 func (s *MediaService) IsFavorite(mediaId string) bool {
 	if s.favStore == nil {
@@ -515,6 +521,54 @@ func (s *MediaService) RemoveFavorite(mediaId string) error {
 		return fmt.Errorf("favorite store is not configured")
 	}
 	return s.favStore.RemoveFavorite(mediaId)
+}
+
+// CreateAlbum 创建新相册。
+func (s *MediaService) CreateAlbum(name string) (*Album, error) {
+	if s.albumStore == nil {
+		return nil, fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.CreateAlbum(name)
+}
+
+// AddToAlbum 将媒体加入相册。
+func (s *MediaService) AddToAlbum(albumID, mediaID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.AddToAlbum(albumID, mediaID)
+}
+
+// RemoveFromAlbum 将媒体从相册中移除。
+func (s *MediaService) RemoveFromAlbum(albumID, mediaID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.RemoveFromAlbum(albumID, mediaID)
+}
+
+// ListAlbums 返回所有相册列表。
+func (s *MediaService) ListAlbums() []*Album {
+	if s.albumStore == nil {
+		return []*Album{}
+	}
+	return s.albumStore.ListAlbums()
+}
+
+// GetAlbum 返回指定相册详情。
+func (s *MediaService) GetAlbum(albumID string) *Album {
+	if s.albumStore == nil {
+		return nil
+	}
+	return s.albumStore.GetAlbum(albumID)
+}
+
+// DeleteAlbum 删除指定相册。
+func (s *MediaService) DeleteAlbum(albumID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.DeleteAlbum(albumID)
 }
 
 // favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。

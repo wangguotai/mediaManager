@@ -81,6 +81,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/favorites", s.handleMediaFavorites)
 	s.mux.HandleFunc("/api/media/favorite-batch", s.handleMediaFavoriteBatch)
 
+	// 相册：创建、列表、加入/移除媒体、删除。
+	s.mux.HandleFunc("/api/media/album", s.handleAlbumCreate)
+	s.mux.HandleFunc("/api/media/albums", s.handleAlbumList)
+	s.mux.HandleFunc("/api/media/album/add", s.handleAlbumAdd)
+	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
+	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
+
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
 
@@ -602,6 +609,165 @@ func (s *Server) handleMediaFavoriteBatch(w http.ResponseWriter, r *http.Request
 		"failed":    failed,
 		"favorite":  req.Favorite,
 	})
+}
+
+// AlbumStoreProvider 是 service.MediaService 的相册能力接口，
+// gateway 借此对 mediaSvc 做能力断言并按需调用相册方法。
+type albumStoreProvider interface {
+	CreateAlbum(name string) (*service.Album, error)
+	AddToAlbum(albumID, mediaID string) error
+	RemoveFromAlbum(albumID, mediaID string) error
+	ListAlbums() []*service.Album
+	GetAlbum(albumID string) *service.Album
+	DeleteAlbum(albumID string) error
+}
+
+// handleAlbumCreate 处理 POST /api/media/album，创建新相册。
+// 请求体: {"name":"xxx"}
+func (s *Server) handleAlbumCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name must not be empty"})
+		return
+	}
+
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported by the configured media service"})
+		return
+	}
+	album, err := provider.CreateAlbum(req.Name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, album)
+}
+
+// handleAlbumList 处理 GET /api/media/albums，返回所有相册列表。
+func (s *Server) handleAlbumList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported by the configured media service"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"albums": provider.ListAlbums()})
+}
+
+// handleAlbumAdd 处理 POST /api/media/album/add，将媒体加入相册。
+// 请求体: {"album_id":"x","media_id":"y"}
+func (s *Server) handleAlbumAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+		MediaID string `json:"media_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.AlbumID == "" || req.MediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_id are required"})
+		return
+	}
+	if strings.Contains(req.MediaID, "..") || strings.Contains(req.MediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported by the configured media service"})
+		return
+	}
+	if err := provider.AddToAlbum(req.AlbumID, req.MediaID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "media_id": req.MediaID})
+}
+
+// handleAlbumRemove 处理 POST /api/media/album/remove，将媒体从相册中移除。
+// 请求体: {"album_id":"x","media_id":"y"}
+func (s *Server) handleAlbumRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+		MediaID string `json:"media_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.AlbumID == "" || req.MediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_id are required"})
+		return
+	}
+
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported by the configured media service"})
+		return
+	}
+	if err := provider.RemoveFromAlbum(req.AlbumID, req.MediaID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "media_id": req.MediaID})
+}
+
+// handleAlbumResource 处理 /api/media/album/{id} 路径下的请求。
+// GET → 获取相册详情；DELETE → 删除相册。
+func (s *Server) handleAlbumResource(w http.ResponseWriter, r *http.Request) {
+	albumID := strings.TrimPrefix(r.URL.Path, "/api/media/album/")
+	if albumID == "" || strings.Contains(albumID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid album id"})
+		return
+	}
+
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported by the configured media service"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		album := provider.GetAlbum(albumID)
+		if album == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, album)
+	case http.MethodDelete:
+		if err := provider.DeleteAlbum(albumID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": albumID})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
 }
 
 // enrichMediaList 将 GetMediaListResponse 中每条媒体补充 favorite 字段，
