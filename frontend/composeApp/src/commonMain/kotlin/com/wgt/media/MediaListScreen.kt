@@ -80,6 +80,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 与图片预览互斥：视频项点击直接进播放器，不走 [ImagePreviewDialog]。
     var videoPlayerMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
+    // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
+    // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
+    var searchExpanded by remember { mutableStateOf(false) }
+
     // OpenClaw 桥梁对话框状态 + 视图模型（与媒体列表同生命周期，复用即可）
     var showOpenClawDialog by remember { mutableStateOf(false) }
     val openClawViewModel = remember { OpenClawViewModel() }
@@ -94,6 +98,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
 
     // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
     LaunchedEffect(selectedTab) {
+        // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
+        // 串到新 Tab 造成“列表为空/对不上”的困惑。
+        viewModel.clearSearchAndFilter()
+        searchExpanded = false
         if (selectedTab == 0 && viewModel.canAccessGallery) {
             viewModel.loadMediaFromGallery(forceRefresh = false)
         } else if (selectedTab == 1) {
@@ -103,9 +111,11 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         }
     }
 
-    // 图片预览对话框：基于当前 mediaList 的索引，支持预览内左右滑动切换。
+    // 图片预览对话框：基于当前 filteredList 的索引，支持预览内左右滑动切换。
+    // 用 filteredList（搜索/筛选后）而非 mediaList，使预览左右滑动只在当前可见结果集内切换，
+    // 避免滑到被过滤掉的项。
     previewIndex?.let { index ->
-        val list = viewModel.mediaList
+        val list = viewModel.filteredList
         if (index in list.indices) {
             ImagePreviewDialog(
                 mediaList = list,
@@ -114,7 +124,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 onDismiss = { previewIndex = null }
             )
         } else {
-            // 列表刷新后索引越界，直接关闭
+            // 列表刷新/过滤变化后索引越界，直接关闭
             previewIndex = null
         }
     }
@@ -217,6 +227,21 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                         }
                     )
                 }
+
+                // 搜索栏：搜索图标点击展开输入框，debounce 300ms 实时过滤；清除按钮即时清空。
+                // 去抖后的查询经 [MediaViewModel.setSearchQuery] 写入，[filteredList] 派生过滤结果。
+                SearchBar(
+                    expanded = searchExpanded,
+                    onExpandedChange = { searchExpanded = it },
+                    onDebouncedQueryChange = { query -> viewModel.setSearchQuery(query) },
+                    onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
+                )
+
+                // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效。
+                FilterChipsRow(
+                    selected = viewModel.filterType,
+                    onSelect = { type -> viewModel.setFilterType(type) }
+                )
             }
         },
         bottomBar = {
@@ -257,6 +282,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 else -> viewModel.isLoading
             }
             val mediaList = viewModel.mediaList
+            // 经过搜索关键词 + 类型筛选后的列表，网格直接渲染。
+            // 注意：空态判定要用 [mediaList]（数据源层面：是否真的没数据）区分 [filteredList]
+            // （可能是过滤后为空），二者提示文案与交互不同。
+            val filtered = viewModel.filteredList
             // 下拉刷新：网格为空时走全屏加载/空状态占位，无法也不必下拉；
             // 有内容后下拉即触发对应 Tab 的强制刷新（forceRefresh=true，绕过缓存真正请求后端）。
             // isRefreshing 直接复用各 Tab 的 loading 状态，刷新指示器会随请求开始/结束自动显隐。
@@ -327,8 +356,23 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                   }
               }
 
+                // 搜索/筛选后无结果：数据源有内容但 [filteredList] 为空，提示无匹配。
+                // 与"暂无 X"区分：此处可一键清除过滤条件回到完整列表。
+                filtered.isEmpty() -> {
+                    NoSearchResultView(
+                        searchQuery = viewModel.searchQuery,
+                        filterType = viewModel.filterType,
+                        onClear = {
+                            searchExpanded = false
+                            viewModel.clearSearchAndFilter()
+                        }
+                    )
+                }
+
                 else -> {
                     // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
+                    // 网格用 [filteredList]（搜索+筛选后），预览索引基于 filtered 计算，
+                    // 确保左右滑动只在当前可见结果集内切换。
                     // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
                     // 其余 Tab 保持原有交互：短按选中，长按预览。
                     PullToRefreshBox(
@@ -336,34 +380,54 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                         onRefresh = onRefresh,
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        MediaGrid(
-                            mediaList = mediaList,
-                            selectedMediaIds = viewModel.selectedMediaIds,
-                            onMediaClick = { media ->
-                                if (selectedTab == 2) {
-                                    // 网盘 Tab：视频项打开全屏播放器，图片项进预览（且不影响选择态）。
-                                    if (media.type == MediaType.VIDEO) {
-                                        videoPlayerMedia = media
-                                    } else {
-                                        previewIndex = mediaList.indexOf(media)
-                                    }
-                                } else {
-                                    viewModel.toggleMediaSelection(media.id)
-                                }
-                            },
-                            onMediaLongClick = { media ->
-                                // 长按预览：视频项同样进播放器，与网格点击一致。
+                        // 搜索/类型筛选激活时走平铺网格（不分组），便于在结果集中快速定位；
+                        // 默认浏览态按 created_at 日期分组（sticky header："今天"/"昨天"/"YYYY年MM月DD日"），
+                        // 呼应相册式时间线浏览直觉。两者共用同一套交互回调与预览索引口径。
+                        val isSearching = viewModel.searchQuery.isNotBlank() ||
+                            viewModel.filterType != MediaFilterType.ALL
+                        // 点击/长按回调：网盘 Tab 视频进播放器、图片进预览；其余 Tab 短按选中、长按预览。
+                        // 预览索引基于 [filtered]（与上方 filteredList 一致），左右滑动只在当前可见集内切换。
+                        val onMediaClick: (MediaMetadata) -> Unit = { media ->
+                            if (selectedTab == 2) {
                                 if (media.type == MediaType.VIDEO) {
                                     videoPlayerMedia = media
                                 } else {
-                                    previewIndex = mediaList.indexOf(media)
+                                    previewIndex = filtered.indexOf(media)
                                 }
-                            },
-                            useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
-                            videoDurations = viewModel.videoDurations,
-                           modifier = Modifier.fillMaxSize()
-                       )
-                   }
+                            } else {
+                                viewModel.toggleMediaSelection(media.id)
+                            }
+                        }
+                        val onMediaLongClick: (MediaMetadata) -> Unit = { media ->
+                            if (media.type == MediaType.VIDEO) {
+                                videoPlayerMedia = media
+                            } else {
+                                previewIndex = filtered.indexOf(media)
+                            }
+                        }
+                        val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
+                        if (isSearching) {
+                            MediaGrid(
+                                mediaList = filtered,
+                                selectedMediaIds = viewModel.selectedMediaIds,
+                                onMediaClick = onMediaClick,
+                                onMediaLongClick = onMediaLongClick,
+                                useBackendLoader = useBackend,
+                                videoDurations = viewModel.videoDurations,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            DateGroupedGrid(
+                                groups = viewModel.groupedMediaList,
+                                selectedMediaIds = viewModel.selectedMediaIds,
+                                onMediaClick = onMediaClick,
+                                onMediaLongClick = onMediaLongClick,
+                                useBackendLoader = useBackend,
+                                videoDurations = viewModel.videoDurations,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
                }
            }
             }
@@ -1013,6 +1077,66 @@ private fun ErrorStateView(
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text("重试")
+        }
+    }
+}
+
+/**
+ * 搜索 / 筛选无结果占位：数据源有内容但 [MediaViewModel.filteredList] 为空。
+ *
+ * 主文案固定"未找到匹配的媒体"，副文按当前过滤条件动态描述（仅关键词 / 仅类型 / 两者），
+ * 并附"清除筛选"按钮一键回到完整列表。与 [ErrorStateView]（加载失败）和"暂无 X"（真无数据）
+ * 三者互斥，由 [MediaListScreen] 的 when 优先级保证只显示其一。
+ *
+ * @param searchQuery 当前搜索关键词（空串表示未启用关键词）
+ * @param filterType 当前类型筛选维度（ALL 表示未启用类型筛选）
+ * @param onClear 清除所有过滤条件回调
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun NoSearchResultView(
+    searchQuery: String,
+    filterType: MediaFilterType,
+    onClear: () -> Unit
+) {
+    val hasQuery = searchQuery.isNotBlank()
+    val hasFilter = filterType != MediaFilterType.ALL
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            painter = painterResource(Res.drawable.ic_image_placeholder),
+            contentDescription = null,
+            modifier = Modifier.size(72.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "未找到匹配的媒体",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        // 副文按过滤来源组合描述：关键词 / 类型 / 二者皆有。
+        val hint = when {
+            hasQuery && hasFilter -> "关键词“$searchQuery”在“${filterType.label}”中无匹配"
+            hasQuery -> "没有名称包含“$searchQuery”的媒体"
+            hasFilter -> "“${filterType.label}”类型下暂无媒体"
+            else -> "尝试更换关键词或筛选条件"
+        }
+        Text(
+            hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        FilledTonalButton(onClick = onClear) {
+            Text("清除筛选")
         }
     }
 }

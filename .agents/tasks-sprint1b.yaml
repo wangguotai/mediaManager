@@ -1,0 +1,128 @@
+# Sprint 1B — Layer 1 + Layer 2 (Layer 0 已完成并 merge)
+
+tasks:
+  # ===== Layer 1 (并行) =====
+
+  - id: frontend-search-filter
+    product: claude
+    prompt: |
+      你是前端开发专家。在 /Users/wgt/projects/media-manager/frontend 做搜索和筛选功能。
+
+      现有代码: MediaListScreen.kt 有三个Tab+网格, MediaViewModel.kt 管理状态。
+      App.kt 已有 SplashScreen + 设置页导航。UI已美化过(动画/动态色调)。
+
+      任务:
+      1. 新建 SearchBar.kt (commonMain/com/wgt/media/): 可展开搜索栏, 搜索图标点击展开输入框, debounce 300ms 实时过滤, 清除按钮
+      2. 新建 FilterChips.kt: 全部/图片/视频 三个 FilterChip, Material3 风格
+      3. MediaViewModel.kt 扩展: 加 searchQuery 和 filterType 状态, filteredList 计算属性过滤 mediaList
+      4. MediaListScreen.kt: TabRow 下方加 SearchBar + FilterChips, 网格用 filteredList
+      5. 搜索无结果时显示"未找到匹配的媒体"
+
+      约束: 仅修改 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+      完成后: cd frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: search and filter — keyword search + type filter chips"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: []
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  - id: frontend-video-player
+    product: claude
+    prompt: |
+      你是移动端开发专家。在 /Users/wgt/projects/media-manager/frontend 做视频播放支持。
+
+      后端已支持视频: list返回视频文件(type=VIDEO), thumbnail用ffmpeg抽帧, stream支持Range请求。
+      proto已定义VIDEO类型。前端 BackendImageLoader.kt 从后端HTTP加载图片。
+
+      任务:
+      1. 新建 VideoPlayer.kt (commonMain): 全屏视频播放器
+         - expect/actual: Android用ExoPlayer(Media3)或VideoView, iOS用AVPlayer
+         - 播放/暂停/进度条/全屏按钮
+         - 从后端 /api/media/stream/{id} 加载视频
+      2. 修改 MediaListScreen.kt:
+         - 网格项 type==VIDEO 时显示播放图标+时长标签
+         - 点击视频项打开 VideoPlayer 而非图片预览
+      3. 修改 MediaViewModel.kt: loadCloudMediaList 同时加载视频
+
+      约束: 仅修改 frontend/composeApp/src/
+      注意: 如果 ExoPlayer 依赖加不了, 用 Android 原生 VideoView 先实现基础功能
+      完成后: cd frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: video support — player, thumbnails, grid integration"
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 900
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  - id: frontend-date-grouping
+    product: claude
+    prompt: |
+      你是前端开发专家。在 /Users/wgt/projects/media-manager/frontend 做按时间分组展示。
+
+      现有: MediaListScreen.kt 的 MediaGrid 用 LazyVerticalGrid 平铺展示。UI已美化。
+
+      任务:
+      1. 新建 DateGroupedGrid.kt (commonMain/com/wgt/media/):
+         - 按 created_at 日期分组媒体
+         - 每组有 sticky header: "今天"/"昨天"/"YYYY年MM月DD日"
+         - 组内仍是网格(GridCells.Adaptive)
+         - 用 LazyColumn + 每section内嵌网格实现
+      2. MediaViewModel.kt: 加 groupedMediaList 计算属性, 按日期分组
+      3. MediaListScreen.kt: 替换 MediaGrid 为 DateGroupedGrid(搜索时用平铺不分组)
+      4. Header 淡入动画
+
+      约束: 仅修改 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+      完成后: cd frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: date grouping — sticky headers and chronological sections"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: []
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  # ===== Layer 2 =====
+
+  - id: frontend-detail-panel
+    product: claude
+    prompt: |
+      你是前端开发专家。在 /Users/wgt/projects/media-manager/frontend 做图片详情面板。
+
+      已有: ImagePreviewDialog 全屏预览(在MediaListScreen.kt中)。搜索/视频/分组功能已完成。
+
+      任务:
+      1. 新建 DetailPanel.kt (commonMain/com/wgt/media/):
+         - 在全屏预览底部可上滑展开的详情面板(bottom sheet风格)
+         - 上滑手势展开, 下滑收起
+         - 显示: 文件名/大小/分辨率/拍摄日期/修改日期
+         - EXIF信息(如有): 相机型号/光圈/ISO/焦距
+         - 文件来源标签(本地/网盘/已上传)
+      2. 修改 ImagePreviewDialog (在MediaListScreen.kt中):
+         - 底部加DetailPanel入口
+         - 小指示器条(横线)表示可上滑
+         - 展开时半透明背景遮罩预览区
+
+      约束: 仅修改 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+      完成后: cd frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: detail panel — EXIF info, bottom sheet, swipe to expand"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [frontend-search-filter, frontend-video-player, frontend-date-grouping]
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
