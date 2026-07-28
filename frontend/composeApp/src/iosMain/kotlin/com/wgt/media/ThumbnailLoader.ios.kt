@@ -97,9 +97,8 @@ actual suspend fun loadFullImage(mediaId: String): ImageBitmap? {
                 val bytes = data?.let { nsData ->
                     // 检查是否为 HEIC 格式
                     val isHEIC = dataUTI?.let { uti ->
-                        val utiString = uti.toString()
-                        utiString.equals("public.heic", ignoreCase = true) ||
-                        utiString.equals("public.heif", ignoreCase = true)
+                        uti.equals("public.heic", ignoreCase = true) ||
+                        uti.equals("public.heif", ignoreCase = true)
                     } ?: false
                     if(isHEIC) {
                         try {
