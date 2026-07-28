@@ -325,42 +325,23 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 搜索图标：展开/收起搜索栏
-                    IconButton(onClick = { searchExpanded = !searchExpanded }) {
-                        Icon(
-                            painterResource(Res.drawable.ic_search),
-                            contentDescription = "搜索"
-                        )
+                    Box(modifier = Modifier.size(48.dp).clickable { searchExpanded = !searchExpanded }, contentAlignment = Alignment.Center) {
+                        Icon(painterResource(Res.drawable.ic_search), contentDescription = "搜索")
                     }
-                    // 刷新当前 Tab 数据源
-                    IconButton(
-                        onClick = {
-                            when (selectedTab) {
-                                0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                                1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
-                                else -> viewModel.loadCloudMediaList(forceRefresh = true)
-                            }
-                        },
-                        enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
-                    ) {
-                        Icon(
-                            painterResource(Res.drawable.ic_refresh),
-                            contentDescription = "刷新"
-                        )
+                    Box(modifier = Modifier.size(48.dp).clickable {
+                        when (selectedTab) {
+                            0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                            1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                            else -> viewModel.loadCloudMediaList(forceRefresh = true)
+                        }
+                    }, contentAlignment = Alignment.Center) {
+                        Icon(painterResource(Res.drawable.ic_refresh), contentDescription = "刷新")
                     }
-                    // 相册入口
-                    IconButton(onClick = onNavigateToAlbums) {
-                        Icon(
-                            painterResource(Res.drawable.ic_photo),
-                            contentDescription = "相册"
-                        )
+                    Box(modifier = Modifier.size(48.dp).clickable { onNavigateToAlbums() }, contentAlignment = Alignment.Center) {
+                        Icon(painterResource(Res.drawable.ic_photo), contentDescription = "相册")
                     }
-                    // 设置入口
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(
-                            painterResource(Res.drawable.ic_settings),
-                            contentDescription = "设置"
-                        )
+                    Box(modifier = Modifier.size(48.dp).clickable { onNavigateToSettings() }, contentAlignment = Alignment.Center) {
+                        Icon(painterResource(Res.drawable.ic_settings), contentDescription = "设置")
                     }
                 }
 
