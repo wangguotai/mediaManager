@@ -195,6 +195,60 @@ object MediaService {
     }
 
     /**
+     * 切换媒体收藏状态。
+     *
+     * 调用后端 POST /api/media/favorite，传递 media_id 与 favorite 布尔值。
+     * 后端负责持久化收藏状态；前端同时通过 [FavoriteStore] 做本地缓存，
+     * 以便离线时仍能显示收藏标记。
+     *
+     * @param mediaId 目标媒体 ID
+     * @param favorite true=收藏，false=取消收藏
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun toggleFavorite(mediaId: String, favorite: Boolean): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/favorite") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_id", mediaId)
+                    put("favorite", favorite)
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "toggleFavorite id=$mediaId fav=$favorite status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "toggleFavorite FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 获取收藏列表（从后端）。
+     *
+     * 调用 GET /api/media/favorites，返回后端记录的收藏媒体元数据列表。
+     * 用于在仅显示收藏项时从后端拉取完整收藏数据。
+     * 失败时返回空列表，调用方可回退到本地缓存的 favoriteIds 做客户端过滤。
+     */
+    suspend fun getFavorites(): List<MediaMetadata> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/favorites")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val parsed = parseMediaList(body)
+                logger.info("MediaService", "getFavorites status=${response.status} parsed=${parsed.size}")
+                parsed
+            } else {
+                logger.info("MediaService", "getFavorites status=${response.status} (non-OK)")
+                emptyList()
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getFavorites FAILED: ${e::class.simpleName} ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头

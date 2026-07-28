@@ -58,6 +58,8 @@ fun DateGroupedGrid(
     useBackendLoader: Boolean = false,
     videoDurations: Map<String, Double> = emptyMap(),
     searchQuery: String = "",
+    favoriteIds: Set<String> = emptySet(),
+    onFavoriteToggle: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
@@ -91,6 +93,8 @@ fun DateGroupedGrid(
                     useBackendLoader = useBackendLoader,
                     videoDurationSeconds = videoDurations[media.id],
                     searchQuery = searchQuery,
+                    isFavorite = favoriteIds.contains(media.id),
+                    onFavoriteToggle = { onFavoriteToggle(media.id) },
                     modifier = Modifier
                         .fillMaxWidth()
                 )

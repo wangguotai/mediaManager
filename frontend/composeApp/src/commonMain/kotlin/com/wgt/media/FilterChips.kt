@@ -15,14 +15,16 @@ import androidx.compose.ui.unit.dp
 /**
  * 媒体类型筛选维度。
  *
- * - [ALL]    全部：不按类型过滤。
- * - [IMAGE]  图片：含普通图片与 Live Photo（LIVE_PHOTO 本质是带视频的图片，归入图片类浏览）。
- * - [VIDEO]  视频：仅 [media.MediaType.VIDEO]。
+ * - [ALL]      全部：不按类型过滤。
+ * - [IMAGE]    图片：含普通图片与 Live Photo（LIVE_PHOTO 本质是带视频的图片，归入图片类浏览）。
+ * - [VIDEO]    视频：仅 [media.MediaType.VIDEO]。
+ * - [FAVORITE] 收藏：只显示被收藏的媒体，与前三个维度互斥。
  */
 enum class MediaFilterType(val label: String) {
     ALL("全部"),
     IMAGE("图片"),
-    VIDEO("视频")
+    VIDEO("视频"),
+    FAVORITE("⭐ 收藏")
 }
 
 /**

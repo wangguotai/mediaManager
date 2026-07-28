@@ -429,6 +429,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                 useBackendLoader = useBackend,
                                 videoDurations = viewModel.videoDurations,
                                 searchQuery = viewModel.searchQuery,
+                                favoriteIds = viewModel.favoriteIds,
+                                onFavoriteToggle = { viewModel.toggleFavorite(it) },
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
@@ -440,6 +442,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                 useBackendLoader = useBackend,
                                 videoDurations = viewModel.videoDurations,
                                 searchQuery = viewModel.searchQuery,
+                                favoriteIds = viewModel.favoriteIds,
+                                onFavoriteToggle = { viewModel.toggleFavorite(it) },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -799,6 +803,8 @@ fun MediaGrid(
     useBackendLoader: Boolean = false,
     videoDurations: Map<String, Double> = emptyMap(),
     searchQuery: String = "",
+    favoriteIds: Set<String> = emptySet(),
+    onFavoriteToggle: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
@@ -822,6 +828,8 @@ fun MediaGrid(
                useBackendLoader = useBackendLoader,
                videoDurationSeconds = videoDurations[media.id],
                searchQuery = searchQuery,
+               isFavorite = favoriteIds.contains(media.id),
+               onFavoriteToggle = { onFavoriteToggle(media.id) },
                 modifier = Modifier
                     .fillMaxWidth()
            )
@@ -842,6 +850,8 @@ fun MediaGridItem(
     useBackendLoader: Boolean = false,
     videoDurationSeconds: Double? = null,
     searchQuery: String = "",
+    isFavorite: Boolean = false,
+    onFavoriteToggle: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isVideo = media.type == MediaType.VIDEO
@@ -1021,6 +1031,28 @@ fun MediaGridItem(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+            }
+
+            // 收藏星标按钮：右上角，半透明背景圆形，点击切换收藏状态。
+            // 不受选中状态影响，始终可点；与左上角的选中勾选徽标互不干扰。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .size(28.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                    .clickable { onFavoriteToggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painter = painterResource(
+                        if (isFavorite) Res.drawable.ic_star_filled
+                        else Res.drawable.ic_star_outline
+                    ),
+                    contentDescription = if (isFavorite) "取消收藏" else "收藏",
+                    tint = if (isFavorite) Color(0xFFFFD700) else Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
             }
 
             // 媒体信息

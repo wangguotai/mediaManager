@@ -62,36 +62,57 @@ class MediaViewModel {
     var searchQuery by mutableStateOf("")
         private set
 
-    // 类型过滤维度：ALL=不过滤 / IMAGE=图片(含 Live Photo) / VIDEO=仅视频。
+    // 类型过滤维度：ALL=不过滤 / IMAGE=图片(含 Live Photo) / VIDEO=仅视频 / FAVORITE=仅收藏。
     var filterType by mutableStateOf(MediaFilterType.ALL)
+        private set
+
+    // —— 收藏 ——
+    // 收藏的 mediaId 集合：从 [FavoriteStore] 本地持久化加载，UI 通过此集合判断星标状态。
+    // toggleFavorite 时同步更新此集合 + 持久化 + 异步通知后端。
+    var favoriteIds by mutableStateOf<Set<String>>(emptySet())
         private set
 
     /**
      * 经搜索关键词 + 类型筛选后的媒体列表，供网格直接渲染。
      *
-     * 基于 [mediaList] 实时派生：任一输入（[searchQuery] / [filterType] / [mediaList]）变化
-     * 即重算。用 [derivedStateOf] 缓存，仅当结果列表实例变化时才触发 UI 重组，避免无谓重算。
+     * 基于 [mediaList] 实时派生：任一输入（[searchQuery] / [filterType] / [mediaList] / [favoriteIds]）
+     * 变化即重算。用 [derivedStateOf] 缓存，仅当结果列表实例变化时才触发 UI 重组，避免无谓重算。
      *
      * - 关键词匹配 [MediaMetadata.filename]（大小写不敏感、去首尾空格），命中子串即保留。
-     * - 类型过滤遵循 [MediaFilterType] 注释：IMAGE 含 IMAGE 与 LIVE_PHOTO，VIDEO 仅 VIDEO。
+     * - 类型过滤遵循 [MediaFilterType] 注释：IMAGE 含 IMAGE 与 LIVE_PHOTO，VIDEO 仅 VIDEO，
+     *   FAVORITE 只保留 id 在 [favoriteIds] 中的项。
      */
     val filteredList: List<MediaMetadata> by derivedStateOf {
         val q = searchQuery.trim()
         mediaList
             .asSequence()
-            .filter { matchesTypeFilter(it.type) }
+            .filter { matchesFilter(it) }
             .filter { q.isEmpty() || it.filename.contains(q, ignoreCase = true) }
             .toList()
     }
 
     /**
-     * 当前 [filterType] 是否接纳该媒体类型。
+     * 综合 [filterType] 判断该媒体是否应被保留。
+     *
+     * - ALL/IMAGE/VIDEO：按 [matchesTypeFilter] 做类型过滤。
+     * - FAVORITE：不看类型，仅保留 id 在 [favoriteIds] 中的项。
+     */
+    private fun matchesFilter(media: MediaMetadata): Boolean {
+        if (filterType == MediaFilterType.FAVORITE) {
+            return favoriteIds.contains(media.id)
+        }
+        return matchesTypeFilter(media.type)
+    }
+
+    /**
+     * 当前 [filterType] 是否接纳该媒体类型（不含 FAVORITE 维度，FAVORITE 由 [matchesFilter] 处理）。
      */
     private fun matchesTypeFilter(type: MediaType): Boolean = when (filterType) {
         MediaFilterType.ALL -> true
         // 图片维度：Live Photo 本质是带视频的图片，归图片浏览。
         MediaFilterType.IMAGE -> type == MediaType.IMAGE || type == MediaType.LIVE_PHOTO
         MediaFilterType.VIDEO -> type == MediaType.VIDEO
+        MediaFilterType.FAVORITE -> true // 不在此层过滤，由 matchesFilter 按 favoriteIds 过滤
     }
 
     /**
@@ -178,10 +199,44 @@ class MediaViewModel {
 
 
     init {
-        logger.info(TAG, "init")
+        // 从本地持久化加载收藏 id 集合，让星标状态在重启后保持。
+        favoriteIds = FavoriteStore.loadFavoriteIds()
+        logger.info(TAG, "init favoriteIds=${favoriteIds.size}")
 //        loadUploadedMediaList()
         loadMediaFromGallery()
     }
+
+    /**
+     * 切换媒体收藏状态。
+     *
+     * 1. 立即更新 [favoriteIds] 与本地持久化（UI 即时响应，不等网络）；
+     * 2. 异步调用后端 POST /api/media/favorite 同步服务端状态（失败静默，本地状态仍生效）。
+     *
+     * @param mediaId 目标媒体 ID
+     */
+    fun toggleFavorite(mediaId: String) {
+        val newFav = !favoriteIds.contains(mediaId)
+        favoriteIds = if (newFav) {
+            favoriteIds + mediaId
+        } else {
+            favoriteIds - mediaId
+        }
+        // 持久化到本地存储
+        FavoriteStore.saveFavoriteIds(favoriteIds)
+        // 异步同步后端
+        viewModelScope.launch {
+            try {
+                MediaService.toggleFavorite(mediaId, newFav)
+            } catch (e: Exception) {
+                logger.error(TAG, "toggleFavorite backend sync failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 判断指定媒体是否已收藏。
+     */
+    fun isFavorite(mediaId: String): Boolean = favoriteIds.contains(mediaId)
 
     /**
      * 从网络加载媒体列表
