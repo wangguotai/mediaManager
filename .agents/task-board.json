@@ -1,196 +1,174 @@
 {
-  "backend-video-api": {
-    "product": "codex",
-    "task": "在 backend/ 中实现视频文件支持。\n\n1. backend/internal/service/media_service.go:\n   - GetMed",
-    "status": "ready",
+  "feat-image-edit": {
+    "product": "claude",
+    "task": "你是前端开发专家。给 media-manager 加图片编辑功能。\n\n在 /Users/wgt/projects/media-manager/frontend/",
+    "status": "pending",
     "log": null,
     "worktree": null,
-    "branch": "agent/backend-video-api",
+    "branch": "agent/feat-image-edit",
     "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
+    "timeout": 900,
     "started_at": null,
     "completed_at": null,
     "exit_code": null,
     "commit": null,
     "retries": 0,
-    "max_retries": 2,
+    "max_retries": 3,
     "files": [
-      "backend/",
-      "shared/",
-      ".agents/interface-contract.md"
+      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
+    ],
+    "depends_on": [
+      "fix-frontend-stability"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    ],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "feat-share-and-batch": {
+    "product": "claude",
+    "task": "你是前端开发专家。给 media-manager 加分享和批量操作增强。\n\n在 /Users/wgt/projects/media-manager/fronte",
+    "status": "pending",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/feat-share-and-batch",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 900,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 3,
+    "files": [
+      "frontend/composeApp/src/"
+    ],
+    "depends_on": [
+      "fix-frontend-stability",
+      "feat-image-edit"
+    ],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    ],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "fix-backend-address": {
+    "product": "claude",
+    "task": "你是前端开发专家。修复 P0-1: 后端地址配置不生效。\n\n问题: MediaService.kt 硬编码 BASE_URL = \"http://localho",
+    "status": "ready",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/fix-backend-address",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 600,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 3,
+    "files": [
+      "frontend/"
+    ],
+    "depends_on": [],
+    "verify_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    ],
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    ],
+    "merge_strategy": "merge",
+    "shared_files": []
+  },
+  "fix-backend-exif-dimensions": {
+    "product": "claude",
+    "task": "你是后端开发专家。修复 P1-1: 后端不填充 width/height/exif_data。\n\n问题: media_service.go 和 cloud_so",
+    "status": "ready",
+    "log": null,
+    "worktree": null,
+    "branch": "agent/fix-backend-exif-dimensions",
+    "workdir": "/Users/wgt/projects/media-manager",
+    "timeout": 600,
+    "started_at": null,
+    "completed_at": null,
+    "exit_code": null,
+    "commit": null,
+    "retries": 0,
+    "max_retries": 3,
+    "files": [
+      "backend/"
     ],
     "depends_on": [],
     "verify_commands": [
       "cd /Users/wgt/projects/media-manager/backend && go build ./..."
     ],
-    "clean_commands": [],
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/backend && go clean"
+    ],
     "merge_strategy": "merge",
     "shared_files": []
   },
-  "frontend-date-grouping": {
-    "product": "codex",
-    "task": "实现按日期分组展示。\n\n1. 新建 commonMain/kotlin/com/wgt/media/DateGroupedGrid.kt:\n   - 按 cre",
-    "status": "pending",
-    "log": null,
-    "worktree": null,
-    "branch": "agent/frontend-date-grouping",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
-    "commit": null,
-    "retries": 0,
-    "max_retries": 2,
-    "files": [
-      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
-    ],
-    "depends_on": [
-      "frontend-ui-polish"
-    ],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
-    ],
-    "clean_commands": [],
-    "merge_strategy": "merge",
-    "shared_files": []
-  },
-  "frontend-detail-panel": {
-    "product": "codex",
-    "task": "实现图片详情面板。\n\n1. 新建 commonMain/kotlin/com/wgt/media/DetailPanel.kt:\n   - Bottom she",
-    "status": "pending",
-    "log": null,
-    "worktree": null,
-    "branch": "agent/frontend-detail-panel",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
-    "commit": null,
-    "retries": 0,
-    "max_retries": 2,
-    "files": [
-      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
-    ],
-    "depends_on": [
-      "frontend-search-filter",
-      "frontend-video-player",
-      "frontend-date-grouping"
-    ],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
-    ],
-    "clean_commands": [],
-    "merge_strategy": "merge",
-    "shared_files": []
-  },
-  "frontend-search-filter": {
-    "product": "codex",
-    "task": "实现搜索和筛选功能。\n\n1. 新建 commonMain/kotlin/com/wgt/media/SearchBar.kt:\n   - 可展开搜索栏，输入关键",
-    "status": "pending",
-    "log": null,
-    "worktree": null,
-    "branch": "agent/frontend-search-filter",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
-    "commit": null,
-    "retries": 0,
-    "max_retries": 2,
-    "files": [
-      "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
-    ],
-    "depends_on": [
-      "frontend-ui-polish"
-    ],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
-    ],
-    "clean_commands": [],
-    "merge_strategy": "merge",
-    "shared_files": []
-  },
-  "frontend-settings-page": {
-    "product": "codex",
-    "task": "创建设置页面。\n\n1. 新建 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/SettingsS",
+  "fix-frontend-stability": {
+    "product": "claude",
+    "task": "你是前端开发专家。修复 P1-3/P1-4/P1-5: ViewModel线程安全+缓存无上限+网格项remember缺key。\n\n问题:\n- P1-3: Me",
     "status": "ready",
     "log": null,
     "worktree": null,
-    "branch": "agent/frontend-settings-page",
+    "branch": "agent/fix-frontend-stability",
     "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
+    "timeout": 600,
     "started_at": null,
     "completed_at": null,
     "exit_code": null,
     "commit": null,
     "retries": 0,
-    "max_retries": 2,
+    "max_retries": 3,
     "files": [
       "frontend/composeApp/src/"
     ],
     "depends_on": [],
     "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
     ],
-    "clean_commands": [],
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    ],
     "merge_strategy": "merge",
     "shared_files": []
   },
-  "frontend-ui-polish": {
-    "product": "codex",
-    "task": "在 frontend/composeApp/src/ 中做 UI 精美化。\n\n1. 修改 commonMain/kotlin/com/wgt/App.kt:\n ",
+  "fix-timezone-grouping": {
+    "product": "claude",
+    "task": "你是前端开发专家。修复 P0-2: 日期分组按 UTC 划分，中国时区晚间错分。\n\n问题: MediaViewModel.kt 的 localTimeZoneO",
     "status": "ready",
     "log": null,
     "worktree": null,
-    "branch": "agent/frontend-ui-polish",
+    "branch": "agent/fix-timezone-grouping",
     "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
+    "timeout": 600,
     "started_at": null,
     "completed_at": null,
     "exit_code": null,
     "commit": null,
     "retries": 0,
-    "max_retries": 2,
+    "max_retries": 3,
     "files": [
-      "frontend/composeApp/src/"
+      "frontend/"
     ],
     "depends_on": [],
     "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
     ],
-    "clean_commands": [],
-    "merge_strategy": "merge",
-    "shared_files": []
-  },
-  "frontend-video-player": {
-    "product": "codex",
-    "task": "实现视频播放支持。\n\n1. 新建 commonMain/kotlin/com/wgt/media/VideoPlayer.kt:\n   - expect @Co",
-    "status": "pending",
-    "log": null,
-    "worktree": null,
-    "branch": "agent/frontend-video-player",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 1800,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
-    "commit": null,
-    "retries": 0,
-    "max_retries": 2,
-    "files": [
-      "frontend/composeApp/src/"
+    "clean_commands": [
+      "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
-    "depends_on": [
-      "backend-video-api",
-      "frontend-ui-polish"
-    ],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && ./gradlew :composeApp:assembleDebug 2>&1 | tail -5"
-    ],
-    "clean_commands": [],
     "merge_strategy": "merge",
     "shared_files": []
   }

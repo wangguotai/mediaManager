@@ -1,0 +1,281 @@
+# Sprint 2 — 从"功能完整"到"精美好用"
+# 6 个任务, 3 层 DAG。先还两项结构性技术债(地基),再做"组织态"功能。
+#
+# 排期依据（已代码调研确认）:
+#   - 后端: 元数据每次 os.ReadDir 实时推导、无持久化/无测试, 关进程即丢；删除不清缩略图、缓存无淘汰
+#   - 前端: MediaListScreen.kt 单文件 1256 行(并行冲突隐患)；BackendImageLoader 仅内存缓存无磁盘层；
+#     localTimeZoneOffsetMillis 硬编码 0L → UTC+8 晚间日期分组错位(真 P0)
+#   - 选择模式基础设施已成熟(selectedMediaIds + SelectionBottomBar)，但底栏硬编码动作，需改槽位化
+
+# 拓扑:
+#   Layer 0 (并行地基, 互不依赖):
+#     backend-persistence  ‖  frontend-refactor-cache
+#   Layer 1 (功能, 并行):
+#     frontend-batch-ops[←refactor]  ‖  favorite[←backend-persistence + frontend-refactor]
+#   Layer 2 (功能, 并行):
+#     share[←refactor + batch]  ‖  album[←backend-persistence + refactor + favorite]
+
+tasks:
+  # ===== Layer 0 — 地基 =====
+
+  - id: backend-persistence
+    product: claude
+    prompt: |
+      你是后端架构师。在 /Users/wgt/projects/media-manager/backend 补齐持久化层这一结构性技术债。
+      这是 Sprint 2 地基, 收藏/相册功能都依赖它。
+
+      现状(已调研确认):
+      - internal/service/media_service.go: 元数据每次请求用 os.ReadDir+os.Stat 实时推导, 无 DB/无索引, 关进程即丢
+      - created_at/updated_at 直接用文件 ModTime; MediaMetadata 预留的 exif_data/width/height 从未填充
+      - DeleteMedia 只删 uploads, 不清 thumbnails 缓存(孤儿); 缩略图缓存只增不删无淘汰
+      - cloud_source.go 构造 metadata 同样不填 width/height
+      - 零测试文件
+
+      任务:
+      1. 引入轻量持久化: 优先 index.json(data/index.json)落盘 uploads 媒体元数据与用户态结构;
+         若评估 SQLite 更适合后续相册/收藏演进, 可用 modernc.org/sqlite(纯 Go 免 CGO)。
+         方案选择在代码注释里说明理由。上传/删除时正确读写持久化, 进程重启后能恢复。
+      2. 上传成功后写持久化记录; created_at 用上传时刻, updated_at 跟随修改; 不再完全依赖 ModTime。
+      3. 填充 width/height: 图片用 image.DecodeConfig(buffered) 读尺寸, 视频用 ffprobe。
+         exif 尽力提取(可用 dsoprea/go-exif, 取不到不报错)。
+      4. media_service.go 与 cloud_source.go 两处构造 MediaMetadata 都填 width/height(图片+视频路径)。
+      5. DeleteMedia 级联: glob thumbnails/{id}_*.jpg 一并 os.Remove, 消除孤儿。
+      6. 缩略图缓存淘汰: 加 LRU 或按 data/thumbnails 总容量上限(如 200MB)清理最旧条目。
+      7. 补单测 internal/service/media_service_test.go: 列表分页过滤、上传落盘恢复、删除级联清缩略图、
+         缩略图命中与缺失、width/height 填充, 用 table-driven 风格各至少一例。
+
+      约束: 仅修改 backend/; 不破坏现有 REST/gRPC 端点契约(.agents/interface-contract.md)。
+      完成后: cd /Users/wgt/projects/media-manager/backend && go build ./... && go vet ./... && go test ./internal/service/...
+      然后: git add -A && git commit -m "feat: backend persistence — index store, metadata fields, thumb eviction, tests"
+    files: [backend/internal/service/, backend/cmd/server/]
+    depends_on: []
+    timeout: 900
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+      - "cd /Users/wgt/projects/media-manager/backend && go vet ./..."
+      - "cd /Users/wgt/projects/media-manager/backend && go test ./internal/service/..."
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go clean -testcache"
+    merge_strategy: merge
+
+  - id: frontend-refactor-cache
+    product: claude
+    prompt: |
+      你是前端架构师。在 /Users/wgt/projects/media-manager/frontend 做两件地基工作 + 顺手修真 P0。
+      这是 Sprint 2 地基, 批量/分享/收藏/相册都依赖它(避免在 1256 行单文件里并行冲突)。
+
+      现状(已调研确认):
+      - MediaListScreen.kt 单文件约 1256 行(Tab+网格+预览+搜索+筛选+选择栏+空错加载态), 并行修改必冲突
+      - SelectionBottomBar 硬编码上传/删除按钮; 后续分享/收藏/加入相册都要进这个底栏
+      - BackendImageLoader.kt 仅内存 Map 缓存(thumbnailCache/fullImageCache), 无磁盘层, 二次滚动重请求
+      - Coil 3(3.1.0) 已在 libs.versions.toml 声明, 但 composeApp/build.gradle.kts 里三行依赖被注释
+      - MediaViewModel.localTimeZoneOffsetMillis 硬编码 0L → 日期分组按 UTC 划分, UTC+8 晚间照片错分到"昨天"
+
+      任务:
+      1. 拆分 MediaListScreen.kt 为独立组件(commonMain/kotlin/com/wgt/media/):
+         - MediaGridItem.kt(缩略图+选中态+视频角标+时长; remember 加 media.id key 防滚动错位)
+         - SelectionBottomBar.kt(**改为可配置动作槽位**: 接收 List<SelectionAction>(icon/label/onClick/enabled);
+           本任务先把现有的"上传到云端""删除"迁移为两个内置透传 action, 不再硬编码)
+         - ImagePreviewDialog.kt(HorizontalPager + ZoomableImage + DetailPanel)
+         - MediaEmptyState.kt(Loading/Error/NoResult 三态占位)
+         MediaListScreen.kt 仅保留页面编排, 目标 < 400 行。
+      2. 启用 Coil 3: 取消注释 composeApp/build.gradle.kts commonMain 的 coil 依赖;
+         将 BackendImageLoader 内部迁移到 Coil ImageLoader(自带磁盘缓存+生命周期+解码);
+         保持对外的 loadThumbnail(mediaId)/loadFullImage(mediaId) 签名不变, 减少调用点改动;
+         配置磁盘缓存目录与上限(如 100MB)。
+      3. 修时区 P0: 引入 kotlinx-datetime 或 expect/actual:
+         - commonMain: expect fun systemTimeZoneOffsetMillis(): Long
+         - androidMain: actual 用 java.util.TimeZone.getDefault().rawOffset.toLong()
+         - iosMain: actual 用 NSTimeZone.defaultTimeZone.secondsFromGMT * 1000
+         MediaViewModel.localTimeZoneOffsetMillis 调用之; DetailPanel 时间显示同理用本地时区。
+      4. 回归保证: 选择模式/预览/搜索/分组/视频入口不回归; 三源缩略图正常显示; 网盘 Tab 二次滚动命中磁盘缓存。
+
+      约束: 仅修改 frontend/composeApp/src/ 与相关 build.gradle.kts/libs.versions.toml; 不改后端。
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "refactor: split media screen + coil disk cache + timezone fix"
+    files:
+      - frontend/composeApp/src/
+      - frontend/composeApp/build.gradle.kts
+      - frontend/gradle/libs.versions.toml
+    depends_on: []
+    timeout: 900
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  # ===== Layer 1 — 功能 =====
+
+  - id: frontend-batch-ops
+    product: codex
+    prompt: |
+      你是前端开发。在 /Users/wgt/projects/media-manager/frontend 增强批量操作。
+      依赖前置: frontend-refactor-cache 已把 SelectionBottomBar 改为动作槽位并拆分了组件。
+
+      现状: ViewModel 有 selectedMediaIds/toggleMediaSelection/批量上传/批量删除;
+      SelectionBottomBar 在 selectedTab != 2 时不显示(网盘 Tab 无选择模式)。
+
+      任务:
+      1. 选择模式补 全选/反选 按钮(底栏或 TopAppBar), 选择计数加数字滚动动画。
+      2. SelectionBottomBar 用 Action 槽位注册(非硬编码):
+         - "上传到云端"(已有逻辑)、"删除"(已有逻辑)
+         - "分享": 注入 onShare 回调位, 实际由 share 任务提供, 未注入时 disabled 隐藏
+         - "加入相册": 注入 onAddToAlbum 回调位, 同上
+      3. 批量上传/删除加进度反馈: 进度条或 "N/M" 计数, 失败项单独提示可重试, 操作中禁用重复点击。
+      4. 放宽网盘 Tab 选择限制: selectedTab==2 也可进选择模式,
+         提供合理动作(分享/加入相册); 删除对网盘源禁用因后端不支持删 cloud 源。
+      5. 三态处理: 空选择提示、批量失败、网络中断。
+
+      约束: 仅修改 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/。
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: batch ops — select all, progress, action slots, cloud tab select"
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [frontend-refactor-cache]
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  - id: favorite
+    product: claude
+    prompt: |
+      你是全栈开发(前后端联动)。在 /Users/wgt/projects/media-manager 实现收藏功能。
+      依赖前置: backend-persistence(收藏态落盘) + frontend-refactor-cache(组件已拆分)。
+
+      ===== 后端 =====
+      1. 持久化收藏: 用户对 media_id 的收藏关系存入 backend-persistence 引入的存储(按 media_id 标记, 不限源)。
+      2. REST 端点(backend/internal/gateway/server.go 注册):
+         - POST /api/favorite/toggle  body { "media_id": "xxx" }  返回 { "status":"success", "favorite": bool }
+         - GET /api/favorite/list?page=&page_size=  返回 { media_list, total_count, page, page_size }(同 list 结构)
+         - GET /api/media/list 加可选参数 favorite=true(仅返回已收藏)
+      3. 补单测 internal/service: toggle 幂等(重复 toggle 还原)、list 过滤、收藏列表分页。
+      4. 更新 .agents/interface-contract.md 追加收藏端点约定。
+
+      ===== 前端 =====
+      5. feature-media 的 MediaService 加 toggleFavorite/getFavoriteList(走 ktor 复用现有网络层)。
+      6. MediaViewModel 加 favoriteIds 集合 + toggleFavorite(mediaId) action, 乐观更新本地状态, 失败回滚并提示。
+      7. UI(composeApp commonMain):
+         - 媒体项收藏角标(网格项右上角星标, 点击 toggle; 对网盘/已上传源生效;
+           本地源 disabled 或提示"仅支持云端媒体")
+         - 图片预览 DetailPanel 内收藏按钮(与网格角标状态联动)
+         - FilterChips 或概览加"收藏"入口展示收藏列表(复用 DateGroupedGrid/MediaGrid)
+      8. 三态: 无收藏空态、失败重试、弱网下已缓存收藏列表可展示。
+
+      约束: 修改 backend/、.agents/interface-contract.md、frontend/feature-media/、frontend/composeApp/src/。
+      完成后(后端): cd /Users/wgt/projects/media-manager/backend && go build ./... && go test ./internal/service/...
+      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: favorite — backend endpoints + frontend star toggle and view"
+    files:
+      - backend/internal/service/
+      - backend/internal/gateway/
+      - .agents/interface-contract.md
+      - frontend/feature-media/
+      - frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+    depends_on: [backend-persistence, frontend-refactor-cache]
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+      - "cd /Users/wgt/projects/media-manager/backend && go test ./internal/service/..."
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go clean -testcache"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  # ===== Layer 2 — 功能 =====
+
+  - id: share
+    product: codex
+    prompt: |
+      你是移动端开发。在 /Users/wgt/projects/media-manager/frontend 实现系统分享。
+      依赖前置: frontend-refactor-cache(组件拆分) + frontend-batch-ops(SelectionBottomBar 已留 onShare 槽位)。
+
+      任务:
+      1. expect/actual ShareService:
+         - commonMain: expect fun shareMedia(bytes: ByteArray, filename: String, mimeType: String)
+         - androidMain: Intent.ACTION_SEND + FileProvider(在 AndroidManifest 配 FileProvider + res/xml/provider_paths),
+           content:// uri 供系统分享; 多张用 ACTION_SEND_MULTIPLE
+         - iosMain: UIActivityViewController, 写临时文件后以 NSURL 分享; 多 item 用 activityItems 数组
+      2. 接入调用点:
+         - 单张: 图片预览 DetailPanel + 网格项长按菜单加"分享"
+         - 批量: 把 frontend-batch-ops 留的 SelectionBottomBar onShare 槽位注入实际回调(单张/多张)
+      3. 分享原图二进制: 优先复用 Coil 磁盘缓存命中字节; 未缓存时拉后端原图流再分享。
+         本地媒体分享走本机路径不经网络。
+      4. 边缘: 文件未缓存/下载失败降级提示不崩溃; Android/iOS 均可拉起系统分享面板, 行为一致。
+
+      约束: 修改 frontend/composeApp/src/(含 commonMain/androidMain/iosMain 及 androidMain AndroidManifest/res)。
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: share — system share sheet, single & batch, cross-platform"
+    files:
+      - frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+      - frontend/composeApp/src/androidMain/
+      - frontend/composeApp/src/iosMain/
+    depends_on: [frontend-refactor-cache, frontend-batch-ops]
+    timeout: 600
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
+
+  - id: album
+    product: claude
+    prompt: |
+      你是全栈开发(前后端联动)。在 /Users/wgt/projects/media-manager 实现自定义相册。
+      依赖前置: backend-persistence(相册实体落盘) + frontend-refactor-cache(SelectionBottomBar 槽位) + favorite(复用 list/预览模式)。
+
+      ===== 后端 =====
+      1. 持久化相册实体: album(id, name, cover_media_id, created_at) 与 album_member(album_id, media_id)。
+         复用 backend-persistence 引入的存储; schema 变更在代码注释说明。
+      2. REST 端点(backend/internal/gateway/server.go 注册):
+         - POST /api/album  body { "name":"xxx" }  返回 { "album": {...} }
+         - GET /api/album/list  返回 { "albums": [ {id,name,cover,count} ] }
+         - POST /api/album/delete  body { "album_id":"xxx" }
+         - POST /api/album/members/add  body { "album_id":"", "media_ids":["",""] }
+         - POST /api/album/members/remove  body 同上
+         - GET /api/album/{album_id}/media?page=&page_size=  返回 list 同结构
+      3. 级联: 删媒体时从所有相册成员移除该 media_id(不留悬空); 相册封面失效降级空封面。
+      4. 补单测 internal/service: 创建/删除相册、加减成员、查相册内媒体分页、删媒体级联清成员。
+      5. 更新 .agents/interface-contract.md 追加相册端点约定。
+
+      ===== 前端 =====
+      6. feature-media MediaService 加相册相关方法(复用 ktor 网络层)。
+      7. 相册管理入口(设置页或主界面 Tab/抽屉):
+         - 相册列表: 封面网格(无封面取首张成员或占位图)
+         - 创建/重命名/删除相册(删除 Dialog 二级确认)
+      8. 相册视图: 进相册看成员媒体(复用 DateGroupedGrid/MediaGrid + ImagePreviewDialog)。
+      9. 加入/移出相册(复用 SelectionBottomBar onAddToAlbum 槽位):
+         - 单张: 预览 DetailPanel / 长按菜单"加入相册"
+         - 批量: onAddToAlbum 注入实际回调, 弹相册选择器
+      10. 边缘: 空相册占位、删除二级确认、失败重试、乐观加入失败回滚;
+          与收藏/分享动作在 SelectionBottomBar 并存(多 action 注册不冲突)。
+
+      约束: 修改 backend/、.agents/interface-contract.md、frontend/feature-media/、frontend/composeApp/src/。
+      完成后(后端): cd /Users/wgt/projects/media-manager/backend && go build ./... && go test ./internal/service/...
+      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      然后: git add -A && git commit -m "feat: album — backend CRUD + frontend management UI, reuse selection slots"
+    files:
+      - backend/internal/service/
+      - backend/internal/gateway/
+      - .agents/interface-contract.md
+      - frontend/feature-media/
+      - frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
+    depends_on: [backend-persistence, frontend-refactor-cache, favorite]
+    timeout: 900
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+      - "cd /Users/wgt/projects/media-manager/backend && go test ./internal/service/..."
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+    clean_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go clean -testcache"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
+    merge_strategy: merge
