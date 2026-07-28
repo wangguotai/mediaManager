@@ -77,7 +77,7 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 			continue
 		}
 
-		list = append(list, &gen.MediaMetadata{
+		meta := &gen.MediaMetadata{
 			Id:        strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
 			Filename:  entry.Name(),
 			Type:      cloudMediaType(ext),
@@ -85,7 +85,11 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 			CreatedAt: info.ModTime().Unix(),
 			UpdatedAt: info.ModTime().Unix(),
 			MimeType:  cloudImageMimeType(ext),
-		})
+		}
+		// P1-1: 填充 width/height/exif。图片走 image.DecodeConfig 读头，视频走 ffprobe；
+		// JPEG 顺带解析 EXIF。best-effort，失败置零不阻断扫描。
+		fillDimensions(meta, filepath.Join(s.root, entry.Name()))
+		list = append(list, meta)
 	}
 
 	if list == nil {
