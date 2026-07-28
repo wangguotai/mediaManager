@@ -100,7 +100,22 @@ func (s *Server) OpenClawBaseURL() string { return s.openClaw.BaseURL }
 
 // ListenAndServe blocks.
 func (s *Server) ListenAndServe() error {
-	return http.ListenAndServe(s.addr, s.mux)
+	return http.ListenAndServe(s.addr, s.corsMiddleware(s.mux))
+}
+
+// corsMiddleware adds permissive CORS headers for future web frontend support.
+// Preflight OPTIONS requests are short-circuited with 204.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ============ Media REST endpoints ============
@@ -191,6 +206,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":         "ok",
+		"version":        "v0.3.0",
 		"media_count":    mediaCount,
 		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
 		"cache":          cacheStatus,
@@ -328,6 +344,10 @@ func (s *Server) handleMediaThumbnail(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp.Data)
 }
 
+// maxRequestBodyBytes limits JSON body reads to 10 MB to prevent malicious
+// oversized requests from exhausting server memory.
+const maxRequestBodyBytes = 10 << 20
+
 func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -336,7 +356,7 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MediaIds []string `json:"media_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
 		return
 	}
@@ -354,6 +374,7 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Direct file write (bypasses gRPC streaming for REST)
+	// Upload cap is 100 MB (larger than the 10 MB JSON body limit, since uploads are raw file bytes).
 	body, err := io.ReadAll(io.LimitReader(r.Body, 100<<20)) // 100MB cap
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read body"})
@@ -430,7 +451,7 @@ func (s *Server) handleOpenClawCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req openclawCommandRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body: " + err.Error()})
 		return
 	}
@@ -517,7 +538,7 @@ func (s *Server) handleMediaFavorite(w http.ResponseWriter, r *http.Request) {
 		MediaId  string `json:"media_id"`
 		Favorite bool   `json:"favorite"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
 		return
 	}
@@ -570,7 +591,7 @@ func (s *Server) handleMediaFavoriteBatch(w http.ResponseWriter, r *http.Request
 		MediaIds []string `json:"media_ids"`
 		Favorite bool     `json:"favorite"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
 		return
 	}
@@ -641,7 +662,7 @@ func (s *Server) handleAlbumCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
 		return
 	}
@@ -688,7 +709,7 @@ func (s *Server) handleAlbumAdd(w http.ResponseWriter, r *http.Request) {
 		AlbumID string `json:"album_id"`
 		MediaID string `json:"media_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
 		return
 	}
@@ -724,7 +745,7 @@ func (s *Server) handleAlbumRemove(w http.ResponseWriter, r *http.Request) {
 		AlbumID string `json:"album_id"`
 		MediaID string `json:"media_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
 		return
 	}

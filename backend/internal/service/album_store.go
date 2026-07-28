@@ -82,6 +82,9 @@ func (as *AlbumStore) save() error {
 	return os.WriteFile(as.filePath, data, 0644)
 }
 
+// maxAlbums limits the number of albums to prevent unbounded creation.
+const maxAlbums = 100
+
 // CreateAlbum 创建一个新相册，返回创建的 Album。
 func (as *AlbumStore) CreateAlbum(name string) (*Album, error) {
 	if name == "" {
@@ -89,6 +92,9 @@ func (as *AlbumStore) CreateAlbum(name string) (*Album, error) {
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if len(as.albums) >= maxAlbums {
+		return nil, fmt.Errorf("album limit reached (%d); delete an album before creating a new one", maxAlbums)
+	}
 	album := &Album{
 		ID:        uuid.New().String(),
 		Name:      name,

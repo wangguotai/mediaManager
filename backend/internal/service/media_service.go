@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/gif" // register decoder
 	"image/jpeg"
 	"image/png"
@@ -1304,7 +1305,20 @@ func (s *MediaService) getVideoThumbnail(ctx context.Context, mediaID, srcPath s
 		thumbPath,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("ffmpeg thumbnail failed: %v: %s", err, strings.TrimSpace(string(out)))
+		// Fallback: ffmpeg failed (e.g. video too short, corrupted file).
+		// Generate a solid-color placeholder thumbnail instead of returning an error.
+		placeholder := generatePlaceholderThumbnail(longEdge)
+		if werr := os.WriteFile(thumbPath, placeholder, 0644); werr != nil {
+			return nil, fmt.Errorf("ffmpeg thumbnail failed: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		w, h := longEdge, longEdge
+		s.thumbCache.Put(cacheKey, "image/jpeg", int32(w), int32(h), placeholder)
+		return &gen.GetThumbnailResponse{
+			Data:     placeholder,
+			MimeType: "image/jpeg",
+			Width:    int32(w),
+			Height:   int32(h),
+		}, nil
 	}
 
 	// 读取 ffmpeg 产物并返回；imageDimensions 仅对图片生效，这里给视频缩略图用同样路径。
@@ -1462,6 +1476,22 @@ func (s *MediaService) saveVideoMeta(mediaID string, resp *VideoInfoResponse) er
 // gen.MediaServiceServer 不包含该方法（未进 proto），gateway 通过类型断言按需调用。
 type VideoInfoProvider interface {
 	GetVideoInfo(ctx context.Context, req *VideoInfoRequest) (*VideoInfoResponse, error)
+}
+
+// generatePlaceholderThumbnail creates a solid-color JPEG of the given size.
+// Used as a fallback when ffmpeg cannot extract a frame (e.g. very short or corrupted video).
+func generatePlaceholderThumbnail(size int) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	// Fill with a muted dark-gray (#2D2D2D) to visually distinguish from real thumbnails.
+	gray := color.RGBA{R: 0x2D, G: 0x2D, B: 0x2D, A: 0xFF}
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			img.SetRGBA(x, y, gray)
+		}
+	}
+	var buf bytes.Buffer
+	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 70})
+	return buf.Bytes()
 }
 
 // resizeLongEdge scales img so its longest side is <= longEdge, preserving aspect ratio.
