@@ -264,7 +264,7 @@ private fun formatFileSizeForDetail(size: Long): String {
     return when {
         size < 1024 -> "$size B"
         size < 1024 * 1024 -> "${size / 1024} KB"
-        else -> "%.1f MB".format(size / (1024.0 * 1024.0))
+        else -> "${(size / (1024.0 * 1024.0)).formatOneDecimal()} MB"
     }
 }
 
@@ -284,7 +284,7 @@ private fun formatEpochMillis(epochMillis: Long): String {
     val millisOfDay = localMillis - days * MILLIS_PER_DAY
     val hour = (millisOfDay / MILLIS_PER_HOUR).toInt()
     val minute = ((millisOfDay % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE).toInt()
-    return "%d年%02d月%02d日 %02d:%02d".format(y, m, d, hour, minute)
+    return "${y}年${m.pad2()}月${d.pad2()}日 ${hour.pad2()}:${minute.pad2()}"
 }
 
 /**
@@ -304,4 +304,22 @@ private fun civilFromDays(z: Long): Triple<Int, Int, Int> {
     val m = (if (mp < 10) mp + 3 else mp - 9).toInt()   // [1, 12]
     val year = if (m <= 2) y + 1 else y
     return Triple(year.toInt(), m, d)
+}
+
+/**
+ * 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。
+ */
+private fun Int.pad2(): String = if (this < 10) "0$this" else this.toString()
+
+/**
+ * 保留一位小数的十进制格式化（3.1416 → "3.1"）。commonMain 无 `String.format`，
+ * 纯 Kotlin 实现：乘 10 四舍五入取整，再手动拼小数点。
+ */
+private fun Double.formatOneDecimal(): String {
+    val rounded = (this * 10).let { r ->
+        if (r >= 0) (r + 0.5).toLong() else (r - 0.5).toLong()
+    }
+    val intPart = rounded / 10
+    val fracPart = kotlin.math.abs(rounded % 10)
+    return "$intPart.$fracPart"
 }

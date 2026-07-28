@@ -5,7 +5,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.suspendCancellableCoroutine
 import platform.Foundation.NSData
 import platform.Foundation.NSHTTPURLResponse
-import platform.Foundation.NSJSONReadingOptions
+import platform.Foundation.NSJSONReadingAllowFragments
 import platform.Foundation.NSJSONSerialization
 import platform.Foundation.NSMutableURLRequest
 import platform.Foundation.NSURL
@@ -13,6 +13,7 @@ import platform.Foundation.NSURLSession
 import platform.Foundation.NSURLSessionConfiguration
 import platform.Foundation.NSURLSessionDataTask
 import platform.Foundation.dataTaskWithRequest
+import platform.Foundation.setHTTPMethod
 import kotlin.coroutines.resume
 
 private const val TAG = "VideoInfoLoader"
@@ -35,7 +36,7 @@ internal actual suspend fun loadVideoInfo(backendUrl: String, mediaId: String): 
     return try {
         suspendCancellableCoroutine<VideoInfo?> { cont ->
             val request = NSMutableURLRequest.requestWithURL(url).apply {
-                HTTPMethod = "GET"
+                setHTTPMethod("GET")
             }
             val task: NSURLSessionDataTask = session.dataTaskWithRequest(request) { data, response, error ->
                 if (cont.isCompleted) return@dataTaskWithRequest
@@ -67,7 +68,7 @@ private fun parseVideoInfo(data: NSData?): VideoInfo? {
     return try {
         val obj = NSJSONSerialization.JSONObjectWithData(
             data,
-            NSJSONReadingOptions(0L),
+            NSJSONReadingAllowFragments,
             null
         ) as? Map<*, *> ?: return null
         val dur = (obj["duration_seconds"] as? Number)?.toDouble() ?: 0.0

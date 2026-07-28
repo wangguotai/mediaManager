@@ -97,20 +97,19 @@ class MediaViewModel {
     /**
      * 设置搜索关键词（由搜索栏 debounce 后调用）。
      *
-     * 用 `@JvmName` 重命名其 JVM 视图，避免与 `searchQuery` 委托属性合成的
-     * `setSearchQuery` setter 在 JVM 层签名冲突（KMP commonMain 同名 var+setter 的已知 clash）。
+     * 命名为 `applySearchQuery` 而非 `setSearchQuery`：后者会与 `searchQuery` 委托属性
+     * 在 JVM 层合成的同名 setter 签名冲突（KMP commonMain 同名 var+setter 的已知 clash），
+     * 故直接避开同名。`@JvmName` 为 JVM 注解，commonMain 不可用，故以改名解决。
      */
-    @JvmName("applySearchQuery")
-    fun setSearchQuery(query: String) {
+    fun applySearchQuery(query: String) {
         searchQuery = query
     }
 
     /**
-     * 设置类型过滤维度（由筛选条调用）。同样用 `@JvmName` 规避与 `filterType`
-     * 委托属性合成 `setFilterType` 的 JVM 签名冲突。
+     * 设置类型过滤维度（由筛选条调用）。同样以 `applyFilterType` 避名，规避与
+     * `filterType` 委托属性合成 `setFilterType` 的 JVM 签名冲突。
      */
-    @JvmName("applyFilterType")
-    fun setFilterType(type: MediaFilterType) {
+    fun applyFilterType(type: MediaFilterType) {
         filterType = type
     }
 
@@ -515,7 +514,7 @@ class MediaViewModel {
     private fun dateTitleFromEpochDays(days: Long): String {
         // days 是自 1970-01-01 起的天数；civil_from_days 接受自 1970-01-01 起的天数。
         val (y, m, d) = civilFromDays(days)
-        return "%d年%02d月%02d日".format(y, m, d)
+        return "${y}年${m.pad2()}月${d.pad2()}日"
     }
 
     /**
@@ -546,6 +545,9 @@ class MediaViewModel {
         val year = if (m <= 2) y + 1 else y
         return Triple(year.toInt(), m, d)
     }
+
+    /** 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。 */
+    private fun Int.pad2(): String = if (this < 10) "0$this" else this.toString()
 
     /**
      * 获取选中的媒体数量

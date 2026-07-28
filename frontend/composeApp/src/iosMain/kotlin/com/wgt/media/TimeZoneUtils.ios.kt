@@ -1,6 +1,8 @@
 package com.wgt.media
 
 import platform.Foundation.NSTimeZone
+import platform.Foundation.defaultTimeZone
+import platform.Foundation.secondsFromGMT
 
 /**
  * iOS 端：本机默认时区相对 GMT 的偏移（毫秒）。

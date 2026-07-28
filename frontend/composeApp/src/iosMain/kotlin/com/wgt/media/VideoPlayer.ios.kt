@@ -32,17 +32,23 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.CValue
+import kotlinx.cinterop.useContents
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import platform.AVFoundation.AVPlayer
 import platform.AVFoundation.AVPlayerLayer
 import platform.AVFoundation.AVPlayerStatus
+import platform.AVFoundation.AVPlayerStatusReadyToPlay
 import platform.AVFoundation.currentTime
+import platform.AVFoundation.currentItem
+import platform.AVFoundation.duration
 import platform.AVFoundation.pause
 import platform.AVFoundation.play
 import platform.AVFoundation.seekToTime
 import platform.AVFoundation.status
 import platform.CoreGraphics.CGRect
+import platform.CoreGraphics.CGRectMake
 import platform.CoreMedia.CMTimeMakeWithSeconds
 import platform.Foundation.NSURL
 import platform.UIKit.UIView
@@ -89,12 +95,14 @@ internal actual fun VideoPlayer(
     // 进度轮询 + 就绪态探测：用协程 delay 循环，避免 NSTimer block 签名不确定。
     LaunchedEffect(media.id) {
         while (isActive) {
-            val durCm = player.duration()
-            val dur = cmToSeconds(durCm)
+            // AVPlayer 自身无 duration（该属性属 AVPlayerItem），经 currentItem 取；
+            // 就绪前 currentItem 可能为 null 或 duration 为 indefinite，cmToSeconds 会兜底 0。
+            val durCm = player.currentItem()?.duration
+            val dur = if (durCm != null) cmToSeconds(durCm) else 0.0
             if (dur > 0 && !dur.isNaN() && !dur.isInfinite() && durationSec <= 0f) {
                 durationSec = dur.toFloat()
             }
-            if (!isReady && player.status() == AVPlayerStatus.AVPlayerStatusReadyToPlay) {
+            if (!isReady && player.status() == AVPlayerStatusReadyToPlay) {
                 isReady = true
             }
             if (!seeking) {
@@ -118,7 +126,7 @@ internal actual fun VideoPlayer(
     ) {
         UIKitView(
             factory = {
-                UIView(frame = CGRect.ZERO).apply {
+                UIView(frame = CGRectMake(0.0, 0.0, 0.0, 0.0)).apply {
                     backgroundColor = UIColor.blackColor()
                     layer.addSublayer(playerLayer)
                 }
@@ -218,14 +226,13 @@ internal actual fun VideoPlayer(
 }
 
 /**
- * CMTime → 秒。CMTime 在 K/N 为值类型，value/timescale 经成员访问；对 indefinite/NaN
- * 返回 0，避免污染进度条。
+ * CMTime → 秒。CMTime 在 K/N 为值类型（CValue<CMTime>），value/timescale 经
+ * [useContents] 在块内访问；对 indefinite/NaN 返回 0，避免污染进度条。
  */
 @OptIn(ExperimentalForeignApi::class)
-private fun cmToSeconds(cm: platform.CoreMedia.CMTime): Double {
-    val ts = cm.timescale.toDouble()
+private fun cmToSeconds(cm: CValue<platform.CoreMedia.CMTime>): Double {
+    val (ts, v) = cm.useContents { timescale.toDouble() to value.toDouble() }
     if (ts <= 0.0) return 0.0
-    val v = cm.value.toDouble()
     val sec = v / ts
     return if (sec.isNaN() || sec.isInfinite()) 0.0 else sec
 }

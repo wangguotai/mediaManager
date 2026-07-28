@@ -237,18 +237,18 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 }
 
                 // 搜索栏：搜索图标点击展开输入框，debounce 300ms 实时过滤；清除按钮即时清空。
-                // 去抖后的查询经 [MediaViewModel.setSearchQuery] 写入，[filteredList] 派生过滤结果。
+                // 去抖后的查询经 [MediaViewModel.applySearchQuery] 写入，[filteredList] 派生过滤结果。
                 SearchBar(
                     expanded = searchExpanded,
                     onExpandedChange = { searchExpanded = it },
-                    onDebouncedQueryChange = { query -> viewModel.setSearchQuery(query) },
+                    onDebouncedQueryChange = { query -> viewModel.applySearchQuery(query) },
                     onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
                 )
 
                 // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效。
                 FilterChipsRow(
                     selected = viewModel.filterType,
-                    onSelect = { type -> viewModel.setFilterType(type) }
+                    onSelect = { type -> viewModel.applyFilterType(type) }
                 )
             }
         },

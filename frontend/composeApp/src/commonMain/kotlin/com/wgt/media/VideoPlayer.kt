@@ -75,8 +75,11 @@ internal fun formatDuration(seconds: Double): String {
     val h = total / 3600
     val m = (total % 3600) / 60
     val s = total % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+    return if (h > 0) "$h:${m.pad2()}:${s.pad2()}" else "$m:${s.pad2()}"
 }
+
+/** 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。 */
+private fun Long.pad2(): String = if (this < 10) "0$this" else this.toString()
 
 /**
  * 全屏视频播放器 Composable（expect/actual 跨平台入口）。
