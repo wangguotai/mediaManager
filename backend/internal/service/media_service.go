@@ -606,6 +606,9 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 		}
 	}
 
+	// Invalidate list cache so the newly uploaded file appears immediately.
+	s.invalidateListCache()
+
 	return stream.SendAndClose(&gen.UploadMediaResponse{
 		MediaId: currentMediaID,
 		Status:  "success",
@@ -1304,6 +1307,9 @@ func parseFFProbeJSON(raw []byte) (*VideoInfoResponse, error) {
 // loadVideoMeta reads cached ffprobe results from data/video-meta/{id}.json.
 // Returns an error if the file doesn't exist or can't be parsed.
 func (s *MediaService) loadVideoMeta(mediaID string) (*VideoInfoResponse, error) {
+	if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		return nil, fmt.Errorf("invalid mediaID")
+	}
 	metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -1319,6 +1325,9 @@ func (s *MediaService) loadVideoMeta(mediaID string) (*VideoInfoResponse, error)
 // saveVideoMeta persists ffprobe results to data/video-meta/{id}.json.
 // Best-effort: directory creation failures are ignored.
 func (s *MediaService) saveVideoMeta(mediaID string, resp *VideoInfoResponse) error {
+	if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		return fmt.Errorf("invalid mediaID")
+	}
 	if err := os.MkdirAll(s.videoMetaDir, 0755); err != nil {
 		return err
 	}

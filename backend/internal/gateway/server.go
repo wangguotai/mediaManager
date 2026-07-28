@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"media-manager/backend/gen"
@@ -38,8 +37,6 @@ type Server struct {
 	uploadsDir string
 	cloudDir   string // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
 	startTime  time.Time
-	// healthzCache tracks whether the last GetMediaList served from cache.
-	lastCacheHit atomic.Bool
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
