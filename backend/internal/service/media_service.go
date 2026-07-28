@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -23,7 +24,364 @@ import (
 	"github.com/google/uuid"
 )
 
+// exifEntryCap 限制单张图片解析出的 EXIF 条目上限，避免异常文件拖垮列表接口。
+const exifEntryCap = 64
+
 const streamChunkSize = 64 * 1024
+
+// imageProbeExts 是 probeMediaDimensions 走"图片头解析"路径的扩展名集合（小写含点）。
+// 与 detectMediaType 的图片集合保持一致；视频扩展名交给 ffprobe。
+var imageProbeExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
+	".bmp": true, ".webp": true,
+}
+
+// probeMediaDimensions 读取磁盘文件 width/height/EXIF，按媒体类型选择策略：
+//   - 图片：image.DecodeConfig 读宽高（仅读文件头，开销小），并尝试纯标准库
+//     解析 JPEG 的 EXIF APP1 段抽取常用字段。
+//   - 视频：ffprobe 解析首个视频流的宽高；视频无 EXIF，返回空 map。
+//
+// 任何解析失败都不报错，仅置零/留空，保证列表接口不被单个坏文件拖垮。
+func probeMediaDimensions(path string) (width, height int32, exif map[string]string) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if imageProbeExts[ext] {
+		w, h, ex := imageProbe(path)
+		width, height, exif = int32(w), int32(h), ex
+		return
+	}
+	// 视频走 ffprobe（含 15s 超时，与 GetVideoInfo 一致）。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if w, h, ok := probeVideoDimensions(ctx, path); ok {
+		return int32(w), int32(h), nil
+	}
+	return 0, 0, nil
+}
+
+// imageProbe 用 image.DecodeConfig 读宽高，并尝试抽取 JPEG EXIF。
+// DecodeConfig 对 JPEG/PNG/GIF/WebP 等格式均可（前提是注册了对应 decoder；
+// stdlib 已注册 gif/jpeg/png/bmp，webp 在当前构建下若未注册则宽高为 0，但不报错）。
+func imageProbe(path string) (width, height int, exif map[string]string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, nil
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err == nil {
+		width, height = cfg.Width, cfg.Height
+	}
+	// EXIF 仅 JPEG 有；其余格式无此结构，直接返回空 map（仍非 nil，便于上层无条件赋值）。
+	if ex := extractJPEGExif(path); len(ex) > 0 {
+		exif = ex
+	}
+	return
+}
+
+// probeVideoDimensions 用 ffprobe 取首个视频流的宽高，成功返回 (w,h,true)。
+// 复用与 GetVideoInfo 一致的 ffprobe 调用约定；失败返回零值 false。
+func probeVideoDimensions(ctx context.Context, path string) (width, height int, ok bool) {
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_streams",
+		"-select_streams", "v:0",
+		path,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, 0, false
+	}
+	var probe ffProbeOutput
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return 0, 0, false
+	}
+	for _, st := range probe.Streams {
+		if strings.EqualFold(st.CodecType, "video") && st.Width > 0 && st.Height > 0 {
+			return st.Width, st.Height, true
+		}
+	}
+	return 0, 0, false
+}
+
+// fillDimensions 用 probeMediaDimensions 探查文件并在 metadata 上回填
+// Width/Height/ExifData。探查失败时保持零值/nil，不影响其余字段。
+// 所有构造 MediaMetadata 的入口（列表/单条/流首消息/网盘扫描）统一经此填充，
+// 确保宽度与 EXIF 不再缺省。
+func fillDimensions(meta *gen.MediaMetadata, path string) {
+	if meta == nil || path == "" {
+		return
+	}
+	w, h, exif := probeMediaDimensions(path)
+	meta.Width = w
+	meta.Height = h
+	if len(exif) > 0 {
+		meta.ExifData = exif
+	}
+}
+
+// extractJPEGExif 用纯标准库解析 JPEG 中 APP1 EXIF 段，抽取最常用的几个字段：
+// Make / Model / DateTimeOriginal / ExifImageWidth / ExifImageHeight / Orientation。
+// 解析失败或非 JPEG 返回空 map（失败细粒度：仅丢弃该条目，不影响其余）。
+// 故意不引入第三方 EXIF 库，规避 go.mod/sum 变更与外部依赖；GPS 等有理数字段暂不解析。
+func extractJPEGExif(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 4 {
+		return nil
+	}
+	// 仅处理 JPEG（SOI FFD8）。
+	if data[0] != 0xFF || data[1] != 0xD8 {
+		return nil
+	}
+	exifBytes, err := findExifSegment(data)
+	if err != nil || len(exifBytes) < 8 {
+		return nil
+	}
+	return parseTIFFExif(exifBytes)
+}
+
+// findExifSegment 在 JPEG 各段中定位 APP1 "Exif\0\0" 段，返回其后的原始 TIFF 字节。
+func findExifSegment(data []byte) ([]byte, error) {
+	// 从 SOI 之后开始扫描段标记。
+	idx := 2
+	for idx+3 < len(data) {
+		if data[idx] != 0xFF {
+			// 不是段标记；JPEG 流式容错：步进到下一个 0xFF。
+			idx++
+			continue
+		}
+		marker := data[idx+1]
+		// SOS 之后是压缩图像数据，不再有元数据段，提前结束。
+		if marker == 0xDA {
+			break
+		}
+		// 标记可含连续 0xFF 填充，跳过填充字节。
+		if marker == 0xFF || marker == 0x00 {
+			idx++
+			continue
+		}
+		// 段长度为 2 字节大端，含长度自身不含标记。
+		if idx+3 >= len(data) {
+			break
+		}
+		segLen := int(binary.BigEndian.Uint16(data[idx+2 : idx+4]))
+		if segLen < 2 || idx+2+segLen > len(data) {
+			break
+		}
+		segStart := idx + 4
+		segEnd := idx + 2 + segLen
+		// APP1 = 0xFFE1，且紧随 "Exif\0\0"。
+		if marker == 0xE1 && segEnd-segStart >= 6 && bytes.Equal(data[segStart:segStart+6], []byte("Exif\x00\x00")) {
+			return data[segStart+6 : segEnd], nil
+		}
+		idx = segEnd
+	}
+	return nil, fmt.Errorf("no exif segment")
+}
+
+// 字节序枚举：tiffEndian.mark 字节序，tiffEndian.firstMagic 为对应字节序的 0x002A 校验。
+type tiffEndian struct {
+	mark        byte
+	uint16Order binary.ByteOrder
+}
+
+// parseTIFFExif 解析 TIFF 头与 IFD0/ExifIFD，抽取常用 EXIF 条目。
+func parseTIFFExif(tiff []byte) map[string]string {
+	if len(tiff) < 8 {
+		return nil
+	}
+	var order binary.ByteOrder
+	switch tiff[0] {
+	case 'I':
+		order = binary.LittleEndian
+	case 'M':
+		order = binary.BigEndian
+	default:
+		return nil
+	}
+	if order.Uint16(tiff[2:4]) != 0x002A {
+		return nil
+	}
+	ifd0Offset := int(order.Uint32(tiff[4:8]))
+	out := make(map[string]string)
+
+	// 解析 IFD0：含 Make/Model/Orientation/DateTime 等。
+	exifIFDOffset := parseIFD(tiff, ifd0Offset, order, ifd0TagTable, out)
+	// 解析 ExifIFD：含 DateTimeOriginal/ExifImageWidth/Height 等。
+	if exifIFDOffset > 0 {
+		parseIFD(tiff, exifIFDOffset, order, exifTagTable, out)
+	}
+	// 裁剪到上限，避免异常值爆炸。
+	if len(out) > exifEntryCap {
+		for k := range out {
+			if len(out) <= exifEntryCap {
+				break
+			}
+			delete(out, k)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// tagSpec 描述一个待抽取的 EXIF 条目：tag 编号、值类型处理方式、输出键名。
+type tagSpec struct {
+	tag  uint16
+	kind tagKind
+	key  string
+}
+
+type tagKind int
+
+const (
+	tagASCII tagKind = iota // ASCII 字符串（含可能以空字节结尾）
+	tagShort                // 16 位无符号数值（如 Orientation）
+	tagLong                 // 32 位无符号数值（如 ExifImageWidth）
+)
+
+// ifd0TagTable 列出从 IFD0 抽取的字段。
+var ifd0TagTable = []tagSpec{
+	{0x010F, tagASCII, "Make"},
+	{0x0110, tagASCII, "Model"},
+	{0x0112, tagShort, "Orientation"},
+	{0x0132, tagASCII, "DateTime"},
+}
+
+// exifTagTable 列出从 ExifIFD 抽取的字段。
+var exifTagTable = []tagSpec{
+	{0x9003, tagASCII, "DateTimeOriginal"},
+	{0xA002, tagLong, "ExifImageWidth"},
+	{0xA003, tagLong, "ExifImageHeight"},
+}
+
+// parseIFD 解析指定偏移处的 IFD，按 table 抽取已知字段写入 out。
+// 返回 ExifIFD 的偏移（tag 0x8769），若无则返回 0。
+func parseIFD(tiff []byte, ifdOffset int, order binary.ByteOrder, table []tagSpec, out map[string]string) int {
+	if ifdOffset < 0 || ifdOffset+2 > len(tiff) {
+		return 0
+	}
+	count := int(order.Uint16(tiff[ifdOffset : ifdOffset+2]))
+	// 每个 entry 12 字节，guard 防越界。
+	if ifdOffset+2+count*12 > len(tiff) {
+		return 0
+	}
+	exifIFDOffset := 0
+	// 预置 tag->spec 查找表。
+	specs := make(map[uint16]tagSpec, len(table))
+	for _, s := range table {
+		specs[s.tag] = s
+	}
+	for i := 0; i < count; i++ {
+		entry := ifdOffset + 2 + i*12
+		tag := order.Uint16(tiff[entry : entry+2])
+		typ := order.Uint16(tiff[entry+2 : entry+4])
+		valueCount := int(order.Uint32(tiff[entry+4 : entry+8]))
+		valueOffset := int(order.Uint32(tiff[entry+8 : entry+12]))
+
+		// tag 0x8769（ExifIFD 指针）记录偏移供后续解析。
+		if tag == 0x8769 {
+			if valueOffset > 0 && valueOffset < len(tiff) {
+				exifIFDOffset = valueOffset
+			}
+			continue
+		}
+		spec, known := specs[tag]
+		if !known {
+			continue
+		}
+		if v, ok := readTagValue(tiff, order, spec.kind, typ, valueCount, valueOffset, entry+8); ok && v != "" {
+			out[spec.key] = v
+		}
+	}
+	return exifIFDOffset
+}
+
+// readTagValue 解析单个 EXIF 条目的值。
+// dataOffset 指向 entry 内的"值或偏移"4 字节区（TIFF 规范：值<=4字节内联，否则为偏移）。
+func readTagValue(tiff []byte, order binary.ByteOrder, kind tagKind, typ uint16, count, value int, dataOffset int) (string, bool) {
+	switch kind {
+	case tagASCII:
+		// ASCII 类型在 EXIF 中为 typ=2。
+		if typ != 2 || count <= 0 {
+			return "", false
+		}
+		raw := inlineOrOffsetBytes(tiff, order, typ, count, value, dataOffset)
+		if raw == nil {
+			return "", false
+		}
+		// 去除尾部 NUL，截断首个 NUL 之后内容（EXIF 字符串可含多段）。
+		if n := bytes.IndexByte(raw, 0); n >= 0 {
+			raw = raw[:n]
+		}
+		s := strings.TrimSpace(string(raw))
+		if s == "" {
+			return "", false
+		}
+		return s, true
+	case tagShort:
+		if count < 1 {
+			return "", false
+		}
+		// short(type=3) 单值内联在偏移字段前两字节。
+		v := order.Uint16(tiff[dataOffset : dataOffset+2])
+		return strconv.Itoa(int(v)), true
+	case tagLong:
+		if count < 1 {
+			return "", false
+		}
+		// long(type=4) 内联在偏移字段本身。
+		if value > 0 {
+			return strconv.Itoa(value), true
+		}
+		// 兼容 short 存 width 的情况（部分厂商以 short 记录）。
+		if typ == 3 {
+			v := order.Uint16(tiff[dataOffset : dataOffset+2])
+			return strconv.Itoa(int(v)), true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// inlineOrOffsetBytes 取 ASCII 条目的原始字节：值总长<=4 内联于 dataOffset，
+// 否则 value 是相对 TIFF 起点的偏移。
+func inlineOrOffsetBytes(tiff []byte, order binary.ByteOrder, typ uint16, count, value, dataOffset int) []byte {
+	_ = order // order 仅在偏移路径下不直接用（偏移已在调用方按 order 解出）
+	unit := tagUnitSize(typ)
+	if unit <= 0 {
+		return nil
+	}
+	totalLen := count * unit
+	if totalLen <= 4 {
+		if dataOffset+totalLen > len(tiff) {
+			return nil
+		}
+		return tiff[dataOffset : dataOffset+totalLen]
+	}
+	// value 是 TIFF 偏移。
+	if value <= 0 || value+totalLen > len(tiff) {
+		return nil
+	}
+	return tiff[value : value+totalLen]
+}
+
+// tagUnitSize 返回 EXIF 数据类型对应的单值字节数。
+func tagUnitSize(typ uint16) int {
+	switch typ {
+	case 1, 2, 7: // BYTE / ASCII / UNDEFINED
+		return 1
+	case 3: // SHORT
+		return 2
+	case 4, 9: // LONG / SLONG
+		return 4
+	case 5, 10: // RATIONAL / SRATIONAL
+		return 8
+	default:
+		return 0
+	}
+}
 
 var thumbnailLongEdge = map[gen.ThumbnailSize]int{
 	gen.ThumbnailSize_THUMBNAIL_SMALL:  128,
@@ -182,6 +540,9 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 			MimeType:  s.getMimeType(file.Name()),
 		}
 
+		// P1-1: 填充 width/height/exif。读文件头或 ffprobe；失败置零不阻断列表。
+		fillDimensions(metadata, filepath.Join(s.uploadsDir, file.Name()))
+
 		// Apply filters
 		if req.FilterType != gen.MediaType_IMAGE && req.FilterType != mediaType {
 			continue
@@ -328,6 +689,9 @@ func (s *MediaService) GetMediaMetadata(ctx context.Context, req *gen.GetMediaMe
 		MimeType:  s.getMimeType(files[0]),
 	}
 
+	// P1-1: 填充 width/height/exif。
+	fillDimensions(metadata, files[0])
+
 	return &gen.GetMediaMetadataResponse{
 		Metadata: metadata,
 	}, nil
@@ -370,6 +734,8 @@ func (s *MediaService) GetMediaStream(req *gen.GetMediaStreamRequest, stream gen
 		UpdatedAt: fileInfo.ModTime().Unix(),
 		MimeType:  s.getMimeType(path),
 	}
+	// P1-1: 填充 width/height/exif。
+	fillDimensions(metadata, path)
 	if err := stream.Send(&gen.GetMediaStreamResponse{
 		Data: &gen.GetMediaStreamResponse_Metadata{Metadata: metadata},
 	}); err != nil {
