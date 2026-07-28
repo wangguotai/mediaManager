@@ -41,4 +41,4 @@ object SettingsKeys {
  * 主题模式。序列化方式：直接用 [name]（SYSTEM/LIGHT/DARK），
  * 反序列化在 [SettingsState] 中用 [valueOf] 容错处理。
  */
-enum class ThemeMode { SYSTEM, LIGHT, DARK }
+enum class ThemeMode { SYSTEM, LIGHT, DARK, AMOLED }

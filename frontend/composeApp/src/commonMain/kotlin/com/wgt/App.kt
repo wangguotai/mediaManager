@@ -23,6 +23,7 @@ import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
 import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
+import com.wgt.applyAmoledOverride
 
 private val viewModel = MediaViewModel()
 
@@ -48,8 +49,15 @@ fun App() {
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
+        ThemeMode.AMOLED -> true
     }
-    val colors = resolveColorScheme(isDark)
+    // AMOLED 模式：在深色色板基础上覆盖 background/surface 为纯黑，省 OLED 功耗。
+    // 动态取色设备仍保留系统 accent，仅替换底色。
+    val colors = if (SettingsState.themeMode == ThemeMode.AMOLED) {
+        applyAmoledOverride(resolveColorScheme(dark = true))
+    } else {
+        resolveColorScheme(isDark)
+    }
 
     // 状态栏图标外观跟随主题：浅色主题用深色图标，暗色用浅色图标。
     // Android 通过 WindowCompat 设置，iOS 为 no-op。
