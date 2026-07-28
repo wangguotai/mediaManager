@@ -23,7 +23,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
@@ -107,6 +106,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
 
     // "加入相册"选择对话框：非空时弹出相册列表供用户选择目标相册。
     var addToAlbumMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+
+    // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     // 监听错误信息并显示 Snackbar
     LaunchedEffect(viewModel.errorMessage) {
@@ -218,6 +220,40 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 addToAlbumMedia = null
                 viewModel.dismissAddToAlbumDialog()
             }
+        )
+    }
+
+    // 批量删除确认对话框："确定删除 N 项吗？" + 确认/取消
+    if (showDeleteConfirm) {
+        val count = viewModel.selectedCount
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("确认删除", fontWeight = FontWeight.Bold) },
+            text = { Text("确定删除 $count 项吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        viewModel.deleteSelectedMedia()
+                    }
+                ) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 上传进度对话框：显示 "上传中 2/5..." + 进度条
+    viewModel.uploadProgress?.let { (uploaded, total) ->
+        UploadProgressDialog(
+            uploaded = uploaded,
+            total = total,
+            onDismiss = { /* 上传中不可取消，等完成后自动消失 */ }
         )
     }
 
@@ -364,7 +400,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
                     totalCount = viewModel.filteredList.size,
-                    onDelete = { viewModel.deleteSelectedMedia() },
+                    onDelete = { showDeleteConfirm = true },
                     onUpload = { if (selectedTab == 0) viewModel.uploadSelectedLocalMedia() },
                     onShare = { viewModel.shareSelectedMedia() },
                     onSelectAll = { viewModel.selectAll() },
@@ -981,6 +1017,18 @@ fun MediaGridItem(
         ),
         label = "selectionScale"
     )
+    // 点击按压反馈：按下时缩到 0.95，松开 spring 回弹到 1.0，
+    // 与选中态缩放叠加（pressScale × selectionScale）共同作用于 graphicsLayer。
+    var isPressed by remember { mutableStateOf(false) }
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.95f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "pressScale"
+    )
+    val combinedScale = selectionScale * pressScale
     // 加载完成入场动画：spring 驱动缩放+透明度，缩略图出现时更丝滑。
     // isLoading=true 时 alpha=0、scale=0.92；加载完成 spring 到 alpha=1、scale=1。
     val loadAlpha by animateFloatAsState(
@@ -1003,21 +1051,32 @@ fun MediaGridItem(
        modifier = modifier
            .aspectRatio(aspectRatio)
             .graphicsLayer(
-                scaleX = selectionScale,
-                scaleY = selectionScale
+                scaleX = combinedScale,
+                scaleY = combinedScale
             )
            .shadow(
                elevation = if (isSelected) 4.dp else 2.dp,
                shape = RoundedCornerShape(16.dp),
                clip = false
            )
-           .combinedClickable(
-               onClick = onClick,
-               onLongClick = {
-                   hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                   onLongClick()
-               }
-           ),
+           .pointerInput(Unit) {
+               detectTapGestures(
+                   onTap = {
+                       isPressed = false
+                       onClick()
+                   },
+                   onPress = {
+                       isPressed = true
+                       tryAwaitRelease()
+                       isPressed = false
+                   },
+                   onLongPress = {
+                       isPressed = false
+                       hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                       onLongClick()
+                   }
+               )
+           },
        shape = RoundedCornerShape(16.dp),
        colors = CardDefaults.cardColors(
            containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -1955,5 +2014,53 @@ private fun AddToAlbumDialog(
                 Text("取消")
             }
         }
+    )
+}
+
+/**
+ * 上传进度对话框。
+ *
+ * 上传期间模态展示当前进度 "上传中 2/5..." + 线性进度条。
+ * 上传中不可取消（onDismiss 为空实现），完成后 ViewModel 将 uploadProgress 置 null，对话框自动消失。
+ *
+ * @param uploaded 已上传文件数
+ * @param total 总文件数
+ * @param onDismiss 关闭回调（上传中无效）
+ */
+@Composable
+private fun UploadProgressDialog(
+    uploaded: Int,
+    total: Int,
+    onDismiss: () -> Unit
+) {
+    val progress = if (total > 0) uploaded.toFloat() / total.toFloat() else 0f
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("上传中", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "$uploaded / $total",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "上传中 $uploaded/$total...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {}
     )
 }
