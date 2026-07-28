@@ -12,4 +12,4 @@ import platform.Foundation.secondsFromGMT
  * 日期分组与详情面板把 epoch 毫秒对齐到本地。
  */
 actual fun systemTimeZoneOffsetMillis(): Long =
-    NSTimeZone.defaultTimeZone().secondsFromGMT().toLong() * 1000L
+    NSTimeZone.defaultTimeZone().secondsFromGMT() * 1000L
