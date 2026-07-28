@@ -12,6 +12,7 @@ import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.delay
 import com.wgt.platform.logger.logger
+import kotlin.concurrent.Volatile
 import kotlin.time.Clock
 
 /**
@@ -40,18 +41,6 @@ private fun backendBaseUrl(): String {
     return trimmed.ifEmpty { DEFAULT_BACKEND_URL }
 }
 
-/**
- * 由上层注入运行时后端地址（来自用户设置）。feature-media 不依赖 composeApp，
- * 故采用推模型：composeApp 在启动及 [SettingsState.backendUrl] 变更后调用本方法。
- * 标记 `@Volatile` 保证跨线程可见性（请求协程与设置页 UI 线程并发读写）。
- */
-fun setBackendUrl(url: String) {
-    val normalized = url.trim().trimEnd('/')
-    if (normalized == backendUrl) return
-    backendUrl = normalized
-    logger.info("MediaService", "backend url updated: $normalized")
-}
-
 private val jsonClient = HttpClient {
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; isLenient = true })
@@ -64,6 +53,21 @@ private val jsonClient = HttpClient {
 object MediaService {
 
     private var mediaCache: List<MediaMetadata>? = null
+
+    /**
+     * 由上层注入运行时后端地址（来自用户设置）。feature-media 不依赖 composeApp，
+     * 故采用推模型：composeApp 在启动及 [SettingsState.backendUrl] 变更后调用本方法。
+     * 标记 `@Volatile` 保证跨线程可见性（请求协程与设置页 UI 线程并发读写）。
+     *
+     * 本方法作为 [MediaService] 的成员声明（而非顶层函数），以便上层以
+     * `MediaService.setBackendUrl(...)` 调用——与 [App] 的注入点口径一致。
+     */
+    fun setBackendUrl(url: String) {
+        val normalized = url.trim().trimEnd('/')
+        if (normalized == backendUrl) return
+        backendUrl = normalized
+        logger.info("MediaService", "backend url updated: $normalized")
+    }
 
     /**
      * 媒体来源 —— 用于前端区分缩略图/原图该走本地相册还是后端 HTTP。

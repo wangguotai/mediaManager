@@ -92,7 +92,7 @@ tasks:
       4. 回归保证: 选择模式/预览/搜索/分组/视频入口不回归; 三源缩略图正常显示; 网盘 Tab 二次滚动命中磁盘缓存。
 
       约束: 仅修改 frontend/composeApp/src/ 与相关 build.gradle.kts/libs.versions.toml; 不改后端。
-      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10
       然后: git add -A && git commit -m "refactor: split media screen + coil disk cache + timezone fix"
     files:
       - frontend/composeApp/src/
@@ -102,7 +102,7 @@ tasks:
     timeout: 900
     max_retries: 3
     verify_commands:
-      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10"
     clean_commands:
       - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     merge_strategy: merge
@@ -130,14 +130,14 @@ tasks:
       5. 三态处理: 空选择提示、批量失败、网络中断。
 
       约束: 仅修改 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/。
-      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10
       然后: git add -A && git commit -m "feat: batch ops — select all, progress, action slots, cloud tab select"
     files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
     depends_on: [frontend-refactor-cache]
     timeout: 600
     max_retries: 3
     verify_commands:
-      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10"
     clean_commands:
       - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     merge_strategy: merge
@@ -169,7 +169,7 @@ tasks:
 
       约束: 修改 backend/、.agents/interface-contract.md、frontend/feature-media/、frontend/composeApp/src/。
       完成后(后端): cd /Users/wgt/projects/media-manager/backend && go build ./... && go test ./internal/service/...
-      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10
       然后: git add -A && git commit -m "feat: favorite — backend endpoints + frontend star toggle and view"
     files:
       - backend/internal/service/
@@ -183,7 +183,7 @@ tasks:
     verify_commands:
       - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
       - "cd /Users/wgt/projects/media-manager/backend && go test ./internal/service/..."
-      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10"
     clean_commands:
       - "cd /Users/wgt/projects/media-manager/backend && go clean -testcache"
       - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
@@ -211,7 +211,7 @@ tasks:
       4. 边缘: 文件未缓存/下载失败降级提示不崩溃; Android/iOS 均可拉起系统分享面板, 行为一致。
 
       约束: 修改 frontend/composeApp/src/(含 commonMain/androidMain/iosMain 及 androidMain AndroidManifest/res)。
-      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      完成后: cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10
       然后: git add -A && git commit -m "feat: share — system share sheet, single & batch, cross-platform"
     files:
       - frontend/composeApp/src/commonMain/kotlin/com/wgt/media/
@@ -221,7 +221,7 @@ tasks:
     timeout: 600
     max_retries: 3
     verify_commands:
-      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10"
     clean_commands:
       - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     merge_strategy: merge
@@ -260,7 +260,7 @@ tasks:
 
       约束: 修改 backend/、.agents/interface-contract.md、frontend/feature-media/、frontend/composeApp/src/。
       完成后(后端): cd /Users/wgt/projects/media-manager/backend && go build ./... && go test ./internal/service/...
-      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5
+      完成后(前端): cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10
       然后: git add -A && git commit -m "feat: album — backend CRUD + frontend management UI, reuse selection slots"
     files:
       - backend/internal/service/
@@ -274,7 +274,7 @@ tasks:
     verify_commands:
       - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
       - "cd /Users/wgt/projects/media-manager/backend && go test ./internal/service/..."
-      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug 2>&1 | tail -5"
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -10"
     clean_commands:
       - "cd /Users/wgt/projects/media-manager/backend && go clean -testcache"
       - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"

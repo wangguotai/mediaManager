@@ -2,17 +2,17 @@
   "feat-image-edit": {
     "product": "claude",
     "task": "你是前端开发专家。给 media-manager 加图片编辑功能。\n\n在 /Users/wgt/projects/media-manager/frontend/",
-    "status": "pending",
-    "log": null,
-    "worktree": null,
+    "status": "failed",
+    "log": "/tmp/agent-feat-image-edit.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/feat-image-edit",
     "branch": "agent/feat-image-edit",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 900,
-    "started_at": null,
-    "completed_at": null,
-    "exit_code": null,
+    "started_at": "2026-07-28T09:26:36.030Z",
+    "completed_at": "2026-07-28T09:41:36.865Z",
+    "exit_code": 124,
     "commit": null,
-    "retries": 0,
+    "retries": 3,
     "max_retries": 3,
     "files": [
       "frontend/composeApp/src/commonMain/kotlin/com/wgt/media/"
@@ -27,12 +27,14 @@
       "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "base_ref": "b953511a565f9cd588c370bebc8fdfd68298f19d",
+    "failure": "max_retries_exceeded"
   },
   "feat-share-and-batch": {
     "product": "claude",
     "task": "你是前端开发专家。给 media-manager 加分享和批量操作增强。\n\n在 /Users/wgt/projects/media-manager/fronte",
-    "status": "pending",
+    "status": "skipped",
     "log": null,
     "worktree": null,
     "branch": "agent/feat-share-and-batch",
@@ -58,7 +60,8 @@
       "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:clean"
     ],
     "merge_strategy": "merge",
-    "shared_files": []
+    "shared_files": [],
+    "skip_reason": "dependency_not_merged"
   },
   "fix-backend-address": {
     "product": "claude",
