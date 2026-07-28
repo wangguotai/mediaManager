@@ -23,9 +23,11 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -1054,6 +1056,11 @@ fun MediaGridItem(
     }
     // 长按触感反馈：长按选中/预览时震动，提升交互确认感（cross-platform HapticFeedback）。
     val hapticFeedback = LocalHapticFeedback.current
+    // InteractionSource tracks press state for the Card via combinedClickable,
+    // replacing the old detectTapGestures onPress callback. This coexists properly
+    // with child .clickable modifiers (e.g. favorite button) on Android real devices.
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
     // 缩略图状态：remember 以 media.id 为 key，确保 LazyGrid 复用 slot 渲染不同媒体时
     // 状态随 media 切换而重置，避免滚动时把上一项的 thumbnailBitmap/isLoading 串到新项
     // 造成错位（与上方 ZoomableImage 的 remember(media.id) 同口径）。
@@ -1092,7 +1099,7 @@ fun MediaGridItem(
     )
     // 点击按压反馈：按下时缩到 0.95，松开 spring 回弹到 1.0，
     // 与选中态缩放叠加（pressScale × selectionScale）共同作用于 graphicsLayer。
-    var isPressed by remember { mutableStateOf(false) }
+    // isPressed 由 interactionSource.collectIsPressedAsState() 驱动（见上方）。
     val pressScale by animateFloatAsState(
         targetValue = if (isPressed) 0.95f else 1f,
         animationSpec = spring(
@@ -1132,24 +1139,15 @@ fun MediaGridItem(
                shape = RoundedCornerShape(16.dp),
                clip = false
            )
-           .pointerInput(Unit) {
-               detectTapGestures(
-                   onTap = {
-                       isPressed = false
-                       onClick()
-                   },
-                   onPress = {
-                       isPressed = true
-                       tryAwaitRelease()
-                       isPressed = false
-                   },
-                   onLongPress = {
-                       isPressed = false
-                       hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                       onLongClick()
-                   }
-               )
-           },
+           .combinedClickable(
+               interactionSource = interactionSource,
+               indication = ripple(),
+               onClick = { onClick() },
+               onLongClick = {
+                   hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                   onLongClick()
+               }
+           ),
        shape = RoundedCornerShape(16.dp),
        colors = CardDefaults.cardColors(
            containerColor = MaterialTheme.colorScheme.surfaceVariant
