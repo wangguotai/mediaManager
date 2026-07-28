@@ -1,10 +1,21 @@
 package com.wgt.media
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -211,6 +222,13 @@ fun MediaListScreen(viewModel: MediaViewModel) {
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues)) {
+            // Tab 切换整体淡入淡出：Crossfade 以 selectedTab 为 key，切换瞬间旧内容淡出、新内容淡入。
+            // lambda 参数故意取同名 selectedTab 借以遮蔽外层变量，使淡出阶段的旧内容按上一次 tab 渲染。
+            Crossfade(
+                targetState = selectedTab,
+                animationSpec = tween(280),
+                label = "tabSwitch"
+            ) { selectedTab ->
             val isLoading = when (selectedTab) {
                 0 -> viewModel.isGalleryLoading
                 2 -> viewModel.isCloudLoading
@@ -255,25 +273,37 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                             modifier = Modifier.fillMaxSize(),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                when (selectedTab) {
-                                    0 -> "暂无本地图片"
-                                    2 -> "暂无网盘图片"
-                                    else -> "暂无已上传图片"
-                                },
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                "下拉刷新",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                            )
-                        }
-                    }
-                }
+                     ) {
+                          Text(
+                              when (selectedTab) {
+                                  0 -> "相册里还没有本地图片"
+                                  2 -> "网盘里还没有图片"
+                                  else -> "还没有上传过图片"
+                              },
+                              style = MaterialTheme.typography.titleMedium,
+                              fontWeight = FontWeight.Medium,
+                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                          )
+                          Spacer(modifier = Modifier.height(8.dp))
+                          Text(
+                              when (selectedTab) {
+                                  0 -> "授权访问相册后，本地图片会出现在这里"
+                                  2 -> "把图片放进 media/data/cloud-images 目录即可"
+                                  else -> "选中本地图片后点上传，文件会出现在这里"
+                              },
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                              textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                          )
+                          Spacer(modifier = Modifier.height(16.dp))
+                          Text(
+                              "下拉刷新",
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                          )
+                      }
+                  }
+              }
 
                 else -> {
                     // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
@@ -296,10 +326,11 @@ fun MediaListScreen(viewModel: MediaViewModel) {
                             },
                             onMediaLongClick = { media -> previewIndex = mediaList.indexOf(media) },
                             useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
+                           modifier = Modifier.fillMaxSize()
+                       )
+                   }
+               }
+           }
             }
         }
     }
@@ -329,17 +360,37 @@ fun ImagePreviewDialog(
     val currentIndex by remember { derivedStateOf { pagerState.currentPage } }
     val currentMedia = mediaList[currentIndex]
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false
-        )
+    // 进入/退出动画：进入时整体淡入 + 轻微放大；退出时先淡出再真正回调关闭，
+    // 让 Dialog 消失更自然而非瞬切。visible 初始 false，首帧后翻 true 触发 enter；
+    // 关闭走 animateOutThenDismiss：先翻 false 播 exit，等动画时长结束后 onDismiss。
+   var visible by remember { mutableStateOf(false) }
+   LaunchedEffect(Unit) { visible = true }
+    val scope = rememberCoroutineScope()
+    // 关闭走 animateOutThenDismiss：先翻 visible=false 播 exit，等动画时长结束后再真正 onDismiss，
+    // 让 Dialog 消失走淡出而非瞬切。
+    val animateOutThenDismiss: () -> Unit = {
+        visible = false
+        // 与 exit 动画时长(300ms)匹配，播完再真正关闭。
+        scope.launch { kotlinx.coroutines.delay(320); onDismiss() }
+    }
+
+   Dialog(
+     onDismissRequest = animateOutThenDismiss,
+     properties = DialogProperties(
+         usePlatformDefaultWidth = false
+     )
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
+        // 动画包裹层：进入 fadeIn+scaleIn，退出 fadeOut。背景黑色始终在，避免白闪。
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(tween(300)) + scaleIn(initialScale = 0.92f, animationSpec = tween(300)),
+            exit = fadeOut(tween(300))
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
             // 可滑动切换的图片页
             HorizontalPager(
                 state = pagerState,
@@ -348,13 +399,13 @@ fun ImagePreviewDialog(
                 ZoomableImage(
                     media = mediaList[page],
                     useBackendLoader = useBackendLoader,
-                    onTapClose = onDismiss
+                    onTapClose = animateOutThenDismiss
                 )
             }
 
             // 关闭按钮
             IconButton(
-                onClick = onDismiss,
+                onClick = animateOutThenDismiss,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(16.dp)
@@ -403,8 +454,9 @@ fun ImagePreviewDialog(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp)
-            )
-        }
+           )
+           } // AnimatedVisibility inner Box
+       }
     }
 }
 
@@ -567,16 +619,20 @@ fun MediaGrid(
             items = mediaList,
             key = { it.id },
             contentType = { "media_item" }
-        ) { media ->
-            MediaGridItem(
-                media = media,
-                isSelected = selectedMediaIds.contains(media.id),
-                onClick = { onMediaClick(media) },
-                onLongClick = { onMediaLongClick(media) },
-                useBackendLoader = useBackendLoader,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+       ) { media ->
+           MediaGridItem(
+               media = media,
+               isSelected = selectedMediaIds.contains(media.id),
+               onClick = { onMediaClick(media) },
+               onLongClick = { onMediaLongClick(media) },
+               useBackendLoader = useBackendLoader,
+                // animateItem：新增/删除/重排项时平滑滑动到目标位（取代旧 animateItemPlacement），
+                // 配合 key={it.id} 让网格变更时已有项不闪烁、新项从插值位置滑入。
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateItem()
+           )
+       }
     }
 }
 
@@ -618,23 +674,36 @@ fun MediaGridItem(
 
     // 选中时加 primary 色细边框，强化点击反馈。
     val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+    // 选中缩放反馈：选中态轻微放大(1.04f)，用 spring 过渡而非瞬切，呼应"已选中"视觉强调。
+    val selectionScale by animateFloatAsState(
+        targetValue = if (isSelected) 1.04f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "selectionScale"
+    )
     Card(
-        modifier = modifier
-            .aspectRatio(1f)
-            .shadow(
-                elevation = if (isSelected) 6.dp else 3.dp,
-                shape = RoundedCornerShape(12.dp),
-                clip = false
+       modifier = modifier
+           .aspectRatio(1f)
+            .graphicsLayer(
+                scaleX = selectionScale,
+                scaleY = selectionScale
             )
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            ),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
+           .shadow(
+               elevation = if (isSelected) 6.dp else 3.dp,
+               shape = RoundedCornerShape(12.dp),
+               clip = false
+           )
+           .combinedClickable(
+               onClick = onClick,
+               onLongClick = onLongClick
+           ),
+       shape = RoundedCornerShape(12.dp),
+       colors = CardDefaults.cardColors(
+           containerColor = MaterialTheme.colorScheme.surfaceVariant
+       )
+   ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
