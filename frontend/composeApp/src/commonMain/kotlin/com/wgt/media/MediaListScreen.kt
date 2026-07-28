@@ -775,9 +775,11 @@ fun MediaGridItem(
     modifier: Modifier = Modifier
 ) {
     val isVideo = media.type == MediaType.VIDEO
-    // 缩略图状态
-    var thumbnailBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    // 缩略图状态：remember 以 media.id 为 key，确保 LazyGrid 复用 slot 渲染不同媒体时
+    // 状态随 media 切换而重置，避免滚动时把上一项的 thumbnailBitmap/isLoading 串到新项
+    // 造成错位（与上方 ZoomableImage 的 remember(media.id) 同口径）。
+    var thumbnailBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(media.id) { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
     // 异步加载缩略图：本地相册走平台 MediaStore/PHAsset；后端图片走 BackendImageLoader（HTTP）。

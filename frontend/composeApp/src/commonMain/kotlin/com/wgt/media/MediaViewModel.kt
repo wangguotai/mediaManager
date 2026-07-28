@@ -38,7 +38,11 @@ data class DateGroup(
  * 媒体管理视图模型
  */
 class MediaViewModel {
-    private val viewModelScope = CoroutineScope(Dispatchers.Default)
+    // 状态写回走主线程：launch 块内直接赋值 mediaList / isLoading 等 Compose 状态，
+    // 必须在 Dispatchers.Main 上执行，避免从 Default 线程写 snapshot state 造成重组丢失
+    // 或跨线程快照竞争。挂起点（MediaService / galleryFeature 等 suspend 调用）会自行
+    // 切到 IO/网络线程，挂起期间 Main 释放，不阻塞 UI。
+    private val viewModelScope = CoroutineScope(Dispatchers.Main)
     private val galleryFeature: com.wgt.feature.gallery.GalleryFeature by lazy {
         manager.feature.gallery
     }
