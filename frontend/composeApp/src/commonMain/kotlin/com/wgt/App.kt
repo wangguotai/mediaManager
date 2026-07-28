@@ -9,6 +9,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,10 @@ fun App() {
         ThemeMode.DARK -> true
     }
     val colors = resolveColorScheme(isDark)
+
+    // 状态栏图标外观跟随主题：浅色主题用深色图标，暗色用浅色图标。
+    // Android 通过 WindowCompat 设置，iOS 为 no-op。
+    applyStatusBarIconColor(isDark)
 
     // 把用户设置的后端地址注入 MediaService（feature-media 不反向依赖 composeApp，
     // 故用推模型）。直接读 SettingsState.backendUrl —— 它本身是 mutableStateOf 委托属性，

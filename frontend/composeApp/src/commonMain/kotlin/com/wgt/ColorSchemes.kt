@@ -25,6 +25,15 @@ val FallbackLightColors = lightColorScheme(
     primaryContainer = Color(0xFFA8DDBC),
     onPrimaryContainer = Color(0xFF002111),
     secondary = Color(0xFF4E6353),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFCFE6D2),
+    onSecondaryContainer = Color(0xFF0A1F13),
+    tertiary = Color(0xFF38656A),
+    onTertiary = Color.White,
+    error = Color(0xFFBA1A1A),
+    onError = Color.White,
+    background = Color(0xFFFBFCFB),
+    onBackground = Color(0xFF1B1C1A),
     surface = Color(0xFFFBFCFB),
     onSurface = Color(0xFF1B1C1A),
     surfaceVariant = Color(0xFFDCE5DB),
@@ -39,12 +48,22 @@ val FallbackDarkColors = darkColorScheme(
     primaryContainer = Color(0xFF0B4F32),
     onPrimaryContainer = Color(0xFFA8DDBC),
     secondary = Color(0xFFB6CCB8),
+    onSecondary = Color(0xFF222A23),
+    secondaryContainer = Color(0xFF384538),
+    onSecondaryContainer = Color(0xFFD2E8D4),
+    tertiary = Color(0xFFA0CFD3),
+    onTertiary = Color(0xFF003739),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    background = Color(0xFF121412),
+    onBackground = Color(0xFFE2E3E0),
     surface = Color(0xFF121412),
     onSurface = Color(0xFFE2E3E0),
     surfaceVariant = Color(0xFF404940),
     onSurfaceVariant = Color(0xFFC0C9BF),
     outline = Color(0xFF8A9389),
-    outlineVariant = Color(0xFF404940)
+    // outlineVariant 与 surfaceVariant 区分开：用于细分隔线，略亮于 surface 但不明显。
+    outlineVariant = Color(0xFF2A2E2A)
 )
 
 /** 平台不支持动态取色时使用的回退色板选择。 */
