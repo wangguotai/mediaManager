@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,10 +69,16 @@ func (fs *FavoriteStore) save() error {
 	return os.WriteFile(fs.filePath, data, 0644)
 }
 
+// maxFavorites limits the number of favorites to prevent unbounded growth.
+const maxFavorites = 10000
+
 // AddFavorite 将 mediaId 标记为收藏并持久化。
 func (fs *FavoriteStore) AddFavorite(mediaId string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+	if !fs.favorites[mediaId] && len(fs.favorites) >= maxFavorites {
+		return fmt.Errorf("favorite limit reached (%d); remove a favorite before adding a new one", maxFavorites)
+	}
 	fs.favorites[mediaId] = true
 	return fs.save()
 }
