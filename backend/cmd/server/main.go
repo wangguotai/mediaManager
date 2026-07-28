@@ -48,9 +48,16 @@ func main() {
 		log.Fatalf("Failed to initialize favorite store: %v", err)
 	}
 
+	albumsPath := filepath.Join(dataDir, "albums.json")
+	albumStore, err := service.NewAlbumStore(albumsPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize album store: %v", err)
+	}
+
 	mediaService := service.NewMediaService(uploadsDir, thumbsDir)
 	mediaService.SetCloudSource(service.NewLocalCloudSource(cloudImagesDir))
 	mediaService.SetFavoriteStore(favStore)
+	mediaService.SetAlbumStore(albumStore)
 
 	// Start gRPC server
 	lis, err := net.Listen("tcp", grpcPort)
