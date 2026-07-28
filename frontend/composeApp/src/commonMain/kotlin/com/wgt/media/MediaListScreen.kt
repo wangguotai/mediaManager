@@ -345,25 +345,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                 contentDescription = "相册"
                             )
                         }
-                        // 设置入口：齿轮图标，点击切换到 SettingsScreen
-                        // 真机 IconButton 在 actions 中并排 4 个时点击区域不足，
-                        // 用 Box + explicit 48dp clickable 确保最小触摸目标
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = ripple(),
-                                    role = Role.Button,
-                                    onClick = onNavigateToSettings
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                painterResource(Res.drawable.ic_settings),
-                                contentDescription = "设置"
-                            )
-                        }
                     }
                 )
 
@@ -467,6 +448,31 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     isUploading = viewModel.isUploading,
                     showUploadButton = selectedTab == 0
                 )
+            } else {
+                // 设置入口底栏：MIUI 真机 TopAppBar actions 第 4 个按钮点击不生效，
+                // 改用 bottomBar 持久展示设置入口，触摸目标充足。
+                Surface(
+                    tonalElevation = 3.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = onNavigateToSettings) {
+                            Icon(
+                                painterResource(Res.drawable.ic_settings),
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("设置")
+                        }
+                    }
+                }
             }
         },
         floatingActionButton = {
