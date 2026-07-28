@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"media-manager/backend/gen"
@@ -26,6 +28,24 @@ import (
 
 // exifEntryCap 限制单张图片解析出的 EXIF 条目上限，避免异常文件拖垮列表接口。
 const exifEntryCap = 64
+
+// ListCacheStats reports cache hit/miss statistics for observability.
+type ListCacheStats struct {
+	Hits   int64 `json:"hits"`
+	Misses int64 `json:"misses"`
+}
+
+// listCacheStats tracks hit/miss counters for GetMediaList cache.
+var (
+	listCacheHits   int64
+	listCacheMisses int64
+)
+
+// GetListCacheStats returns the current list cache hit/miss counters.
+// Thread-safe via atomic reads.
+func GetListCacheStats() (hits, misses int64) {
+	return listCacheHits, listCacheMisses
+}
 
 const streamChunkSize = 64 * 1024
 
@@ -395,12 +415,38 @@ type MediaService struct {
 	thumbsDir   string
 	cloudSource CloudImageSource
 	favStore    *FavoriteStore
+	thumbCache  *ThumbCache
+	videoMetaDir string
+
+	// listCache caches GetMediaList results to avoid repeated directory scans.
+	listCacheMu     sync.Mutex
+	listCache       *listCacheEntry
 }
+
+// listCacheEntry holds a cached GetMediaList response and its expiry.
+type listCacheEntry struct {
+	response  *gen.GetMediaListResponse
+	expiresAt time.Time
+	// dirMtime is the uploads directory mtime captured at cache time;
+	// if the directory mtime changes (file added/removed), the cache is invalidated.
+	dirMtime time.Time
+	// cacheKey captures the request parameters that produced this cached response.
+	page       int32
+	pageSize   int32
+	filterType gen.MediaType
+	searchQuery string
+	favOnly    bool
+}
+
+// listCacheTTL is the duration for which GetMediaList results are cached.
+const listCacheTTL = 30 * time.Second
 
 func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
 	return &MediaService{
-		uploadsDir: uploadsDir,
-		thumbsDir:  thumbsDir,
+		uploadsDir:   uploadsDir,
+		thumbsDir:    thumbsDir,
+		thumbCache:   NewThumbCache(100, 512*1024),
+		videoMetaDir: filepath.Join(filepath.Dir(uploadsDir), "video-meta"),
 	}
 }
 
@@ -552,10 +598,22 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 		return s.getCloudMediaList(req, favOnly)
 	}
 
+	// Check cache: if we have a valid cached entry for the same request params
+	// and the uploads directory mtime hasn't changed, return cached result.
+	if cached, hit := s.tryGetListCache(req, query, favOnly); hit {
+		return cached, nil
+	}
+
 	// Scan uploads directory for media files
 	files, err := os.ReadDir(s.uploadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read uploads directory: %v", err)
+	}
+
+	// Capture directory mtime for caching.
+	var dirMtime time.Time
+	if info, err := os.Stat(s.uploadsDir); err == nil {
+		dirMtime = info.ModTime()
 	}
 
 	var mediaList []*gen.MediaMetadata
@@ -615,27 +673,88 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 	startIndex := int(req.Page-1) * int(req.PageSize)
 	endIndex := startIndex + int(req.PageSize)
 	if startIndex >= len(mediaList) {
-		return &gen.GetMediaListResponse{
+		resp := &gen.GetMediaListResponse{
 			MediaList:  []*gen.MediaMetadata{},
 			TotalCount: int32(len(mediaList)),
 			Page:       req.Page,
 			PageSize:   req.PageSize,
-		}, nil
+		}
+		s.storeListCache(resp, req, query, favOnly, dirMtime)
+		return resp, nil
 	}
 
 	if endIndex > len(mediaList) {
 		endIndex = len(mediaList)
 	}
 
-	return &gen.GetMediaListResponse{
+	resp := &gen.GetMediaListResponse{
 		MediaList:  mediaList[startIndex:endIndex],
 		TotalCount: int32(len(mediaList)),
 		Page:       req.Page,
 		PageSize:   req.PageSize,
-	}, nil
+	}
+	s.storeListCache(resp, req, query, favOnly, dirMtime)
+	return resp, nil
 }
 
-// getCloudMediaList 通过注入的 CloudImageSource 获取网盘图片，支持附加的关键字过滤与分页。
+// tryGetListCache checks whether a valid cached GetMediaList result exists
+// for the given request parameters. Returns (cached_response, true) on cache hit,
+// (nil, false) on miss or invalidation.
+func (s *MediaService) tryGetListCache(req *gen.GetMediaListRequest, query string, favOnly bool) (*gen.GetMediaListResponse, bool) {
+	s.listCacheMu.Lock()
+	entry := s.listCache
+	s.listCacheMu.Unlock()
+
+	if entry == nil {
+		atomic.AddInt64(&listCacheMisses, 1)
+		return nil, false
+	}
+	// Check TTL expiry.
+	if time.Now().After(entry.expiresAt) {
+		atomic.AddInt64(&listCacheMisses, 1)
+		return nil, false
+	}
+	// Check request parameters match.
+	if entry.page != req.Page || entry.pageSize != req.PageSize ||
+		entry.filterType != req.FilterType || entry.searchQuery != query ||
+		entry.favOnly != favOnly {
+		atomic.AddInt64(&listCacheMisses, 1)
+		return nil, false
+	}
+	// Check directory mtime: if files were added/removed, mtime changes → invalidate.
+	if info, err := os.Stat(s.uploadsDir); err == nil {
+		if !info.ModTime().Equal(entry.dirMtime) {
+			atomic.AddInt64(&listCacheMisses, 1)
+			return nil, false
+		}
+	}
+	atomic.AddInt64(&listCacheHits, 1)
+	return entry.response, true
+}
+
+// storeListCache caches a GetMediaList response keyed by request parameters.
+func (s *MediaService) storeListCache(resp *gen.GetMediaListResponse, req *gen.GetMediaListRequest, query string, favOnly bool, dirMtime time.Time) {
+	s.listCacheMu.Lock()
+	defer s.listCacheMu.Unlock()
+	s.listCache = &listCacheEntry{
+		response:    resp,
+		expiresAt:   time.Now().Add(listCacheTTL),
+		dirMtime:    dirMtime,
+		page:        req.Page,
+		pageSize:    req.PageSize,
+		filterType:  req.FilterType,
+		searchQuery: query,
+		favOnly:     favOnly,
+	}
+}
+
+// invalidateListCache clears the cached GetMediaList result.
+// Called after file additions or deletions to ensure fresh results.
+func (s *MediaService) invalidateListCache() {
+	s.listCacheMu.Lock()
+	defer s.listCacheMu.Unlock()
+	s.listCache = nil
+}
 // favOnly 为 true 时仅返回收藏的媒体。
 func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly bool) (*gen.GetMediaListResponse, error) {
 	if s.cloudSource == nil {
@@ -739,6 +858,16 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 		if s.favStore != nil {
 			_ = s.favStore.RemoveFavorite(mediaID)
 		}
+	}
+	// File deletions change directory contents — invalidate caches.
+	if deletedCount > 0 {
+		s.invalidateListCache()
+	}
+
+	// Best-effort: remove cached video metadata files for deleted media.
+	for _, mediaID := range req.MediaIds {
+		metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+		_ = os.Remove(metaPath)
 	}
 
 	return &gen.DeleteMediaResponse{
@@ -899,14 +1028,26 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 	ext := strings.ToLower(filepath.Ext(path))
 	thumbName := fmt.Sprintf("%s_%d%s", req.MediaId, longEdge, ext)
 	thumbPath := filepath.Join(s.thumbsDir, thumbName)
+	cacheKey := thumbName
 
-	// Cache hit: serve the pre-rendered thumbnail.
+	// In-memory LRU cache hit: skip disk entirely.
+	if data, mime, w, h, ok := s.thumbCache.Get(cacheKey); ok {
+		return &gen.GetThumbnailResponse{
+			Data:     data,
+			MimeType: mime,
+			Width:    w,
+			Height:   h,
+		}, nil
+	}
+
+	// Disk cache hit: serve the pre-rendered thumbnail.
 	if info, err := os.Stat(thumbPath); err == nil && info.Size() > 0 {
 		data, err := os.ReadFile(thumbPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read cached thumbnail: %v", err)
 		}
 		w, h := imageDimensions(thumbPath)
+		s.thumbCache.Put(cacheKey, s.getMimeType(thumbPath), int32(w), int32(h), data)
 		return &gen.GetThumbnailResponse{
 			Data:     data,
 			MimeType: s.getMimeType(thumbPath),
@@ -933,11 +1074,16 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 	// Best-effort persist; failure here shouldn't block serving the bytes.
 	_ = os.WriteFile(thumbPath, encoded, 0644)
 
+	// Store in memory LRU for subsequent requests.
+	w := int32(thumb.Bounds().Dx())
+	h := int32(thumb.Bounds().Dy())
+	s.thumbCache.Put(cacheKey, mimeType, w, h, encoded)
+
 	return &gen.GetThumbnailResponse{
 		Data:     encoded,
 		MimeType: mimeType,
-		Width:    int32(thumb.Bounds().Dx()),
-		Height:   int32(thumb.Bounds().Dy()),
+		Width:    w,
+		Height:   h,
 	}, nil
 }
 
@@ -954,14 +1100,26 @@ func (s *MediaService) getVideoThumbnail(ctx context.Context, mediaID, srcPath s
 	}
 
 	thumbPath := filepath.Join(s.thumbsDir, fmt.Sprintf("%s_%d.jpg", mediaID, longEdge))
+	cacheKey := fmt.Sprintf("%s_%d.jpg", mediaID, longEdge)
 
-	// Cache hit: 直接返回已渲染的视频缩略图。
+	// In-memory LRU cache hit.
+	if data, mime, w, h, ok := s.thumbCache.Get(cacheKey); ok {
+		return &gen.GetThumbnailResponse{
+			Data:     data,
+			MimeType: mime,
+			Width:    w,
+			Height:   h,
+		}, nil
+	}
+
+	// Disk cache hit: 直接返回已渲染的视频缩略图。
 	if info, err := os.Stat(thumbPath); err == nil && info.Size() > 0 {
 		data, err := os.ReadFile(thumbPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read cached video thumbnail: %v", err)
 		}
 		w, h := imageDimensions(thumbPath)
+		s.thumbCache.Put(cacheKey, "image/jpeg", int32(w), int32(h), data)
 		return &gen.GetThumbnailResponse{
 			Data:     data,
 			MimeType: "image/jpeg",
@@ -994,6 +1152,10 @@ func (s *MediaService) getVideoThumbnail(ctx context.Context, mediaID, srcPath s
 		return nil, fmt.Errorf("failed to read generated video thumbnail: %v", err)
 	}
 	w, h := imageDimensions(thumbPath)
+
+	// Store in memory LRU.
+	s.thumbCache.Put(cacheKey, "image/jpeg", int32(w), int32(h), data)
+
 	return &gen.GetThumbnailResponse{
 		Data:     data,
 		MimeType: "image/jpeg",
@@ -1032,6 +1194,11 @@ func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) 
 		return nil, fmt.Errorf("media %s is not a video", req.MediaId)
 	}
 
+	// Try cached metadata first.
+	if cached, err := s.loadVideoMeta(req.MediaId); err == nil {
+		return cached, nil
+	}
+
 	// ffprobe 以 JSON 输出 streams/format，便于结构化解析且无需逐字段流式处理。
 	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
@@ -1044,7 +1211,13 @@ func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return parseFFProbeJSON(out)
+	resp, err := parseFFProbeJSON(out)
+	if err != nil {
+		return nil, err
+	}
+	// Persist to metadata file for future requests.
+	_ = s.saveVideoMeta(req.MediaId, resp)
+	return resp, nil
 }
 
 // ffProbeOutput 是 ffprobe -show_format -show_streams JSON 输出的最小结构。
@@ -1087,6 +1260,35 @@ func parseFFProbeJSON(raw []byte) (*VideoInfoResponse, error) {
 		}
 	}
 	return resp, nil
+}
+
+// loadVideoMeta reads cached ffprobe results from data/video-meta/{id}.json.
+// Returns an error if the file doesn't exist or can't be parsed.
+func (s *MediaService) loadVideoMeta(mediaID string) (*VideoInfoResponse, error) {
+	metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return nil, err
+	}
+	var resp VideoInfoResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// saveVideoMeta persists ffprobe results to data/video-meta/{id}.json.
+// Best-effort: directory creation failures are ignored.
+func (s *MediaService) saveVideoMeta(mediaID string, resp *VideoInfoResponse) error {
+	if err := os.MkdirAll(s.videoMetaDir, 0755); err != nil {
+		return err
+	}
+	metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(metaPath, data, 0644)
 }
 
 // VideoInfoProvider 是 REST gateway 用于探测具体 service 是否实现 GetVideoInfo 的能力接口。

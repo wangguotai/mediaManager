@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"media-manager/backend/gen"
@@ -36,6 +37,9 @@ type Server struct {
 	mediaSvc   gen.MediaServiceServer
 	uploadsDir string
 	cloudDir   string // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
+	startTime  time.Time
+	// healthzCache tracks whether the last GetMediaList served from cache.
+	lastCacheHit atomic.Bool
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -54,6 +58,7 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 		mux:        http.NewServeMux(),
 		mediaSvc:   mediaSvc,
 		uploadsDir: uploadsDir,
+		startTime:  time.Now(),
 	}
 	s.registerRoutes()
 	return s
@@ -82,10 +87,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
 
 	// Health
-	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	s.mux.HandleFunc("/healthz", s.handleHealthz)
 }
 
 // OpenClawBaseURL exposes the configured upstream URL for log/startup lines.
@@ -143,6 +145,40 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	// Count media files in uploads directory.
+	mediaCount := 0
+	if entries, err := os.ReadDir(s.uploadsDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.Contains(e.Name(), ".") {
+				mediaCount++
+		}
+		}
+	}
+
+	uptime := time.Since(s.startTime).Truncate(time.Second)
+
+	// Report cache hit/miss status from the media service.
+	cacheStatus := "unknown"
+	if _, ok := s.mediaSvc.(*service.MediaService); ok {
+		hits, misses := service.GetListCacheStats()
+		if hits+misses == 0 {
+			cacheStatus = "idle"
+		} else if hits > 0 {
+			cacheStatus = "hit"
+		} else {
+			cacheStatus = "miss"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"media_count": mediaCount,
+		"uptime":      fmt.Sprintf("%ds", int(uptime.Seconds())),
+		"cache":       cacheStatus,
+	})
 }
 
 func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
