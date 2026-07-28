@@ -859,8 +859,12 @@ private fun ZoomableImage(
     onTapClose: () -> Unit,
     onZoomChanged: (Boolean) -> Unit = {}
 ) {
+    // 先加载缩略图立即显示，再异步加载原图（降采样）替换。
+    // 避免“点击大图 → 白屏等待 → 内存暴涨”的体验。
+    var thumbnailBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var fullImageBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember(media.id) { mutableStateOf(true) }
+    var isLoadingFull by remember(media.id) { mutableStateOf(true) }
+    var loadFailed by remember(media.id) { mutableStateOf(false) }
     var scale by remember(media.id) { mutableStateOf(1f) }
     var offsetX by remember(media.id) { mutableStateOf(0f) }
     var offsetY by remember(media.id) { mutableStateOf(0f) }
@@ -874,7 +878,23 @@ private fun ZoomableImage(
         onZoomChanged(scale > 1f)
     }
 
-    // 加载完整图片
+    // 阶段 1：立即加载缩略图（通常已在网格加载时缓存，几乎瞬出）
+    LaunchedEffect(media.id, useBackendLoader) {
+        scope.launch(dispatchers.io) {
+            try {
+                val thumb = if (useBackendLoader) {
+                    BackendImageLoader.loadThumbnail(media.id)
+                } else {
+                    loadThumbnail(media.id)
+                }
+                thumbnailBitmap = thumb
+            } catch (_: Exception) {
+                // 缩略图失败不影响后续原图加载
+            }
+        }
+    }
+
+    // 阶段 2：异步加载原图（降采样，长边 ≤ 2048px）
     LaunchedEffect(media.id, useBackendLoader) {
         scope.launch(dispatchers.io) {
             try {
@@ -884,10 +904,13 @@ private fun ZoomableImage(
                     loadFullImage(media.id)
                 }
                 fullImageBitmap = image
+                if (image == null) {
+                    loadFailed = true
+                }
             } catch (e: Exception) {
-                // 加载失败
+                loadFailed = true
             } finally {
-                isLoading = false
+                isLoadingFull = false
             }
         }
     }
@@ -943,7 +966,8 @@ private fun ZoomableImage(
         contentAlignment = Alignment.Center
     ) {
         when {
-            isLoading -> {
+            // 原图加载中且无缩略图：显示 loading
+            isLoadingFull && fullImageBitmap == null && thumbnailBitmap == null -> {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -958,6 +982,7 @@ private fun ZoomableImage(
                 }
             }
 
+            // 原图已加载：显示原图（降采样后的）
             fullImageBitmap != null -> {
                 Image(
                     bitmap = fullImageBitmap!!,
@@ -967,7 +992,18 @@ private fun ZoomableImage(
                 )
             }
 
-            else -> {
+            // 原图尚未加载但有缩略图：先显示缩略图（占位，避免白屏）
+            thumbnailBitmap != null && isLoadingFull -> {
+                Image(
+                    bitmap = thumbnailBitmap!!,
+                    contentDescription = media.filename,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            }
+
+            // 加载失败
+            loadFailed -> {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         painter = painterResource(Res.drawable.ic_image_placeholder),
@@ -977,6 +1013,13 @@ private fun ZoomableImage(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("图片加载失败", color = Color.Gray)
+                }
+            }
+
+            // 兜底空状态
+            else -> {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
                 }
             }
         }

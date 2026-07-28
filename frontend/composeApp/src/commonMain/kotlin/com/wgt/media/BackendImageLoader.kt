@@ -8,8 +8,14 @@ import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "BackendImageLoader"
 
-/** 每个缓存（缩略图 / 原图）最多保留的条目数，超出按 LRU 淘汰最久未使用项。 */
-private const val MAX_CACHE_ENTRIES = 30
+/** 缩略图缓存上限 —— 缩略图体积小，保留 30 项不影响内存。 */
+private const val MAX_THUMBNAIL_CACHE_ENTRIES = 30
+
+/** 原图缓存上限 —— 降采样后仍占内存，严格限制 15 项防止内存压力。 */
+private const val MAX_FULL_IMAGE_CACHE_ENTRIES = 15
+
+/** 原图降采样长边像素上限 —— 超过此尺寸的图片解码时按比例缩小，避免 OOM。 */
+private const val FULL_IMAGE_MAX_DIMENSION = 2048
 
 /**
  * 从后端 REST 端点加载并解码图片 —— 供"网盘图片" / "已上传" Tab 使用。
@@ -23,7 +29,7 @@ private const val MAX_CACHE_ENTRIES = 30
  *
  * 内置按 mediaId 的 [ImageBitmap] 内存缓存，命中即返回，避免预览左右滑动回滑、
  * 网格上下滚动回滑时重复走 HTTP + 解码。缓存为 **LRU**（最近最少使用淘汰），
- * 缩略图与原图各自上限 [MAX_CACHE_ENTRIES] 项（30），防止媒体量增大后内存无界增长。
+ * 缩略图与原图各自独立上限（30 / 15），防止媒体量增大后内存无界增长。
  *
  * 并发安全：网格滚动会同时发起多个加载请求，缓存读写由 [cacheLock]（[Mutex]）
  * 串行化，避免 Kotlin common [LinkedHashMap] 在并发修改下抛
@@ -49,12 +55,12 @@ object BackendImageLoader {
     }
 
     /**
-     * 插入条目并在超出 [MAX_CACHE_ENTRIES] 时淘汰头部（最久未使用）。
+     * 插入条目并在超出指定上限时淘汰头部（最久未使用）。
      * 调用方需在 [cacheLock] 内调用。
      */
-    private fun <K, V> LinkedHashMap<K, V>.putBounded(key: K, value: V) {
+    private fun <K, V> LinkedHashMap<K, V>.putBounded(key: K, value: V, maxEntries: Int) {
         put(key, value)
-        if (size > MAX_CACHE_ENTRIES) {
+        if (size > maxEntries) {
             val eldest = keys.first()
             remove(eldest)
         }
@@ -73,7 +79,7 @@ object BackendImageLoader {
         return try {
             val bytes = MediaService.getThumbnail(mediaId, size = "medium")
             val decoded = decodeImageBitmap(bytes)
-            if (decoded != null) cacheLock.withLock { thumbnailCache.putBounded(mediaId, decoded) }
+            if (decoded != null) cacheLock.withLock { thumbnailCache.putBounded(mediaId, decoded, MAX_THUMBNAIL_CACHE_ENTRIES) }
             decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadThumbnail failed for $mediaId: ${e.message}")
@@ -84,16 +90,20 @@ object BackendImageLoader {
     /**
      * 加载原图。走 `GET /api/media/stream/{id}`（后端直接以文件字节返回）。
      *
+     * 解码时使用 [decodeImageBitmapDownsampled] 将长边限制在 [FULL_IMAGE_MAX_DIMENSION]（2048px），
+     * 避免全尺寸解码大图（如 4000×3000）导致内存暴涨被系统 OOM kill。
+     * 降采样后的 ImageBitmap 缓存在 [fullImageCache]（LRU 上限 [MAX_FULL_IMAGE_CACHE_ENTRIES] = 15 项）。
+     *
      * @param mediaId 后端媒体 id
-     * @return 解码后的 [ImageBitmap]；失败返回 null
+     * @return 降采样后的 [ImageBitmap]；失败返回 null
      */
     suspend fun loadFullImage(mediaId: String): ImageBitmap? {
         val cached = cacheLock.withLock { fullImageCache.access(mediaId) }
         if (cached != null) return cached
         return try {
             val bytes = MediaService.getMediaStream(mediaId)
-            val decoded = decodeImageBitmap(bytes)
-            if (decoded != null) cacheLock.withLock { fullImageCache.putBounded(mediaId, decoded) }
+            val decoded = decodeImageBitmapDownsampled(bytes, FULL_IMAGE_MAX_DIMENSION)
+            if (decoded != null) cacheLock.withLock { fullImageCache.putBounded(mediaId, decoded, MAX_FULL_IMAGE_CACHE_ENTRIES) }
             decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadFullImage failed for $mediaId: ${e.message}")
