@@ -117,10 +117,18 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     previewIndex?.let { index ->
         val list = viewModel.filteredList
         if (index in list.indices) {
+            // 文件来源标签：依当前 Tab 语义——本地相册 / 已上传 / 网盘图片，
+            // 与加载源（LOCAL vs BACKEND）一致，供详情面板展示。
+            val sourceLabel = when (selectedTab) {
+                0 -> "本地相册"
+                1 -> "已上传"
+                else -> "网盘图片"
+            }
             ImagePreviewDialog(
                 mediaList = list,
                 initialIndex = index,
                 useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                sourceLabel = sourceLabel,
                 onDismiss = { previewIndex = null }
             )
         } else {
@@ -451,7 +459,8 @@ fun ImagePreviewDialog(
     mediaList: List<MediaMetadata>,
     initialIndex: Int,
     onDismiss: () -> Unit,
-    useBackendLoader: Boolean = false
+    useBackendLoader: Boolean = false,
+    sourceLabel: String = ""
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -545,15 +554,29 @@ fun ImagePreviewDialog(
                 }
             }
 
-            // 操作提示
-            Text(
-                "左右滑动切换 • 双击重置 • 捏合缩放",
-                color = Color.White.copy(alpha = 0.5f),
-                style = MaterialTheme.typography.bodySmall,
+            // 底部信息区：操作提示 + 详情面板（bottom sheet）上下排列，
+            // 整体贴屏底对齐；详情面板上滑展开时变高，把操作提示自然顶上去，
+            // 避免与面板内容重叠。DetailPanel 收起态露指示器条 + 简要信息，
+            // 展开时半透明遮罩自动加深覆盖底部图片，显示 EXIF / 尺寸 / 日期 / 来源等。
+            // sourceLabel 由调用方依当前来源（本地相册/已上传/网盘图片）传入。
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(16.dp)
-           )
+                    .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                Text(
+                    "左右滑动切换 • 双击重置 • 捏合缩放",
+                    color = Color.White.copy(alpha = 0.5f),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                DetailPanel(
+                    media = currentMedia,
+                    sourceLabel = sourceLabel
+                )
+            }
            } // AnimatedVisibility inner Box
        }
     }
