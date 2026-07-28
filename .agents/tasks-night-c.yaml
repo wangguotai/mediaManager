@@ -1,0 +1,42 @@
+# Night Sprint C — QA修复 + 体验打磨
+# 基于 QA 报告修复 + 新增体验功能
+
+tasks:
+  # Layer 0 (并行)
+  - id: nc-01-ux-polish
+    product: openclaw
+    prompt: |
+      UX 打磨：
+      1. 预览操作栏按钮加 tooltip/长按提示
+      2. 网格项加载完成的渐入动画更丝滑（spring 替代 tween）
+      3. Tab 切换加滑动指示器动画
+      4. 搜索栏展开/收起加宽度动画
+      5. 设置页加版本号和 build 信息
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 600
+
+  - id: nc-02-backend-rest-favorite
+    product: openclaw
+    prompt: |
+      后端 REST 上传补写元数据 + 收藏 API 完善：
+      1. handleMediaUpload 上传后写元数据到 data/metadata/{id}.json
+      2. GetMediaList 读取 metadata 文件补充 created_at（用原始拍摄时间）
+      3. /healthz 返回 cache_hit_rate
+      4. 收藏 API 加批量操作: POST /api/media/favorite-batch
+    files: [backend/]
+    depends_on: []
+    timeout: 600
+
+  - id: nc-03-ios-polish
+    product: openclaw
+    prompt: |
+      iOS 端完善：
+      1. 检查 ShareUtils.ios.kt 是否有编译问题并修复
+      2. iOS 端 VideoPlayer 确认能播放后端视频流
+      3. iOS 端 SettingsStorage 确认 NSUserDefaults 正确读写
+      4. 检查所有 iosMain 文件是否有 API 不兼容
+      5. 确保 compileKotlinIosArm64 零错误零警告（expect/actual Beta 警告除外）
+    files: [frontend/composeApp/src/iosMain/, frontend/composeApp/build.gradle.kts]
+    depends_on: []
+    timeout: 600

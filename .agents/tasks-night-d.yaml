@@ -1,0 +1,33 @@
+# Night Sprint D — P1修复 + 新功能
+tasks:
+  - id: nd-01-p1-fixes
+    product: openclaw
+    prompt: |
+      修复 QA 报告 P1 问题:
+      1. loadVideoMeta/saveVideoMeta 加路径穿越校验（拒绝含 .. 或 / 的 mediaID）
+      2. UploadMedia 调用 invalidateListCache（上传后立即刷新缓存）
+      3. 移除 server.lastCacheHit 死代码
+    files: [backend/]
+    depends_on: []
+    timeout: 300
+  - id: nd-02-album-feature
+    product: openclaw
+    prompt: |
+      相册功能：用户可创建相册，把媒体加入相册。
+      1. 后端: data/albums.json 存相册列表, POST /api/media/album 创建, POST /api/media/album/add 加入
+      2. 前端: 新建 AlbumScreen.kt, 设置页或底栏入口
+      3. 前端: 网格项长按菜单加"加入相册"选项
+    files: [backend/, frontend/composeApp/src/]
+    depends_on: []
+    timeout: 600
+  - id: nd-03-empty-state-ui
+    product: openclaw
+    prompt: |
+      空状态和错误页美化:
+      1. 每个Tab空状态用不同的插画和文案
+      2. 网络错误页加重试按钮+错误详情
+      3. 搜索无结果页加"清除筛选"按钮
+      4. 加载中页用动画logo替代简单圆圈
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: []
+    timeout: 600

@@ -1,0 +1,48 @@
+# Night Sprint B — 剩余功能（worktree 隔离模式）
+# 已完成: 瀑布流/分享/搜索高亮/后端收藏API/iOS修复/错误处理/后端地址
+# 剩余: 图片编辑增强 + 收藏前端 + 后端性能 + QA
+
+tasks:
+  # Layer 0 (并行)
+  - id: ns-image-editor-v2
+    product: openclaw
+    prompt: |
+      完善 ImageEditor.kt：加滤镜模式（原图/黑白/暖色/冷色/复古），用 Compose ColorFilter.colorMatrix。加裁剪比例(4:3/1:1/16:9/自由)。保存到相册。从预览操作栏编辑按钮进入。
+      worktree: 由 run-layer.mjs 创建
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: []
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  - id: ns-favorite-frontend
+    product: openclaw
+    prompt: |
+      前端收藏功能：网格项右上角星标按钮，点击切换收藏。收藏持久化用 SettingsStorage。FilterChip 加收藏筛选。后端已有 /api/media/favorite 和 /api/media/favorites 端点。
+      worktree: 由 run-layer.mjs 创建
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  - id: ns-backend-perf
+    product: openclaw
+    prompt: |
+      后端性能优化：GetMediaList 缓存30s避免全扫描。/healthz 返回 media_count/uptime。缩略图内存 LRU。视频时长缓存。
+      worktree: 由 run-layer.mjs 创建
+    files: [backend/]
+    depends_on: []
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  # Layer 1 (QA)
+  - id: ns-qa-final
+    product: openclaw
+    prompt: |
+      全量 QA 验收。双端编译。逐功能对照 PRD-v2。输出报告到 docs/NS-QA-REPORT.md。
+    files: [docs/]
+    depends_on: [ns-image-editor-v2, ns-favorite-frontend, ns-backend-perf]
+    timeout: 600
+    verify_commands: []
