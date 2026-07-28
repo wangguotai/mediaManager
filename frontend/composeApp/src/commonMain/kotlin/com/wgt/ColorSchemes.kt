@@ -62,8 +62,56 @@ val FallbackDarkColors = darkColorScheme(
     surfaceVariant = Color(0xFF404940),
     onSurfaceVariant = Color(0xFFC0C9BF),
     outline = Color(0xFF8A9389),
-    // outlineVariant 与 surfaceVariant 区分开：用于细分隔线，略亮于 surface 但不明显。
+    // outlineVariant 提升对比度：原 0xFF2A2E2A 与 surface(0xFF121412) 差异仅 ~1.2:1，
+    // 细分隔线几乎不可见。提升到 0xFF343934 后约 2:1，作为非文本装饰元素符合 M3 规范。
+    outlineVariant = Color(0xFF343934)
+)
+
+/**
+ * AMOLED 纯黑主题色板：在深色基础上将背景/表面改为纯黑 (#000000)，
+ * 省 OLED 面板功耗（像素关闭）。surfaceVariant 保留极深灰用于卡片层级区分。
+ * 强调色（primary/secondary/tertiary）沿用深色色板，保持品牌一致性。
+ *
+ * 使用方式：[App] 在 ThemeMode.AMOLED 时调用 [applyAmoledOverride] 覆盖任意
+ * 深色 ColorScheme 的背景/表面字段，兼容动态取色（Android 12+ 的 accent 保留）。
+ */
+val FallbackAmoledColors = darkColorScheme(
+    primary = Color(0xFF8CC3A1),
+    onPrimary = Color(0xFF00391F),
+    primaryContainer = Color(0xFF0B4F32),
+    onPrimaryContainer = Color(0xFFA8DDBC),
+    secondary = Color(0xFFB6CCB8),
+    onSecondary = Color(0xFF222A23),
+    secondaryContainer = Color(0xFF2A352A),
+    onSecondaryContainer = Color(0xFFD2E8D4),
+    tertiary = Color(0xFFA0CFD3),
+    onTertiary = Color(0xFF003739),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    background = Color(0xFF000000),
+    onBackground = Color(0xFFE2E3E0),
+    surface = Color(0xFF000000),
+    onSurface = Color(0xFFE2E3E0),
+    surfaceVariant = Color(0xFF1A1E1A),
+    onSurfaceVariant = Color(0xFFC0C9BF),
+    outline = Color(0xFF8A9389),
     outlineVariant = Color(0xFF2A2E2A)
+)
+
+/**
+ * 将任意深色 [ColorScheme] 的背景/表面字段覆盖为 AMOLED 纯黑配置。
+ *
+ * 用于 Android 12+ 动态取色：保留系统壁纸衍生的 accent 色，
+ * 仅把 background/surface 改为 #000000、surfaceVariant 改为极深灰，
+ * 兼顾省电与动态色调。
+ *
+ * @param base 已解析的深色 ColorScheme（动态或回退）
+ * @return 覆盖后的 ColorScheme
+ */
+fun applyAmoledOverride(base: ColorScheme): ColorScheme = base.copy(
+    background = Color(0xFF000000),
+    surface = Color(0xFF000000),
+    surfaceVariant = Color(0xFF1A1E1A)
 )
 
 /** 平台不支持动态取色时使用的回退色板选择。 */

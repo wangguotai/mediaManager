@@ -222,7 +222,7 @@ private fun DetailSection(media: MediaMetadata, sourceLabel: String) {
         Spacer(Modifier.height(8.dp))
         Text(
             text = "无 EXIF 信息",
-            color = Color.White.copy(alpha = 0.45f),
+            color = Color.White.copy(alpha = 0.5f),
             style = MaterialTheme.typography.labelSmall
         )
     }
@@ -242,7 +242,7 @@ private fun InfoRow(label: String, value: String) {
         ) {
             Text(
                 text = label,
-                color = Color.White.copy(alpha = 0.55f),
+                color = Color.White.copy(alpha = 0.6f),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.width(88.dp)
             )
@@ -253,7 +253,7 @@ private fun InfoRow(label: String, value: String) {
                 modifier = Modifier.weight(1f)
             )
         }
-        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.16f))
     }
 }
 
