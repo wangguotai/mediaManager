@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -36,7 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -57,10 +60,49 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 
 /**
+ * 编辑模式：裁剪 / 旋转 / 滤镜。底部 FilterChip 切换。
+ */
+private enum class EditMode(val label: String) {
+    CROP("裁剪"),
+    ROTATE("旋转"),
+    FILTER("滤镜")
+}
+
+/**
+ * 滤镜选项。每个附带一个 20 元素的 ColorMatrix（row-major 4×5），null = 原图。
+ */
+private data class FilterOption(val label: String, val matrix: FloatArray?)
+
+private val FILTER_OPTIONS = listOf(
+    FilterOption("原图", null),
+    FilterOption("黑白", floatArrayOf(
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0.299f, 0.587f, 0.114f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    )),
+    FilterOption("暖色", floatArrayOf(
+        1.5f, 0f, 0f, 0f, 0f,
+        0f, 1.2f, 0f, 0f, 0f,
+        0f, 0f, 0.8f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    )),
+    FilterOption("冷色", floatArrayOf(
+        0.8f, 0f, 0f, 0f, 0f,
+        0f, 1.0f, 0f, 0f, 0f,
+        0f, 0f, 1.5f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    )),
+    FilterOption("复古", floatArrayOf(
+        0.9f, 0.5f, 0.1f, 0f, 0f,
+        0.3f, 0.8f, 0.1f, 0f, 0f,
+        0.2f, 0.3f, 0.5f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    ))
+)
+
+/**
  * 宽高比选项。`null` = 自由裁剪；其余为 w/h。
- *
- * 切换比例时若当前裁剪框已存在，则以其中心 + 当前尺寸重置为符合新比例的最大内接框，
- * 保持用户已选定的构图中心，只调长宽比。
  */
 private data class AspectOption(val label: String, val ratio: Float?)
 
@@ -74,16 +116,12 @@ private val ASPECT_OPTIONS = listOf(
 )
 
 /**
- * 图片编辑器全屏对话框：裁剪（宽高比 + 拖拽裁剪框）+ 旋转（90°）+ 保存到本地相册。
+ * 图片编辑器全屏对话框：裁剪（宽高比 + 拖拽裁剪框）+ 旋转（90°）+ 滤镜 + 保存到本地相册。
  *
- * 显示模型：图片按 [ContentScale.Fit] 在显示区内渲染；旋转用 [graphicsLayer] 的
- * `rotationZ` 应用到图片本身，旋转 90/270 时显示区有效宽高比按 `源高/源宽` 重新 Fit，
- * 使旋转后图像仍完整可见且裁剪框（套在可视矩形上）不被旋转、保持正向。裁剪框为显示
- * 像素坐标，保存前由 [mapDisplayRectToSource] 按当前旋转换算回源图像素坐标，连同旋转角
- * 一并交给 [cropAndRotateImageBitmap] 先裁后旋，再 [saveImageBitmapToGallery] 落盘。
- *
- * 编辑器内部按 [useBackendLoader] 自行加载原图（与 [ImagePreviewDialog] 的加载链一致），
- * 不依赖预览已加载的 bitmap，解耦更干净、避免预览缩放态串入编辑器。
+ * 底部用 FilterChip 切换 裁剪/旋转/滤镜 三个模式：
+ * - 裁剪：宽高比选择条 + 拖拽裁剪框
+ * - 旋转：90° 旋转按钮（点触即转）
+ * - 滤镜：原图/黑白/暖色/冷色/复古 5 种，用 ColorFilter.colorMatrix 实现
  *
  * @param media 被编辑的媒体（取 filename 作保存名、id 作加载键）
  * @param useBackendLoader true 走 [BackendImageLoader]（后端 HTTP），false 走平台相册加载器
@@ -105,12 +143,18 @@ fun ImageEditor(
     var aspectIndex by remember { mutableIntStateOf(0) }
     val aspect by remember { derivedStateOf { ASPECT_OPTIONS[aspectIndex].ratio } }
 
+    // 当前编辑模式。
+    var editMode by remember { mutableStateOf(EditMode.CROP) }
+    // 当前滤镜索引。
+    var filterIndex by remember { mutableIntStateOf(0) }
+    val filterMatrix by remember { derivedStateOf { FILTER_OPTIONS[filterIndex].matrix } }
+
     // 显示区像素尺寸：由 BoxWithConstraints 测得，用于裁剪框初始化与几何换算。
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    // 裁剪框（显示像素坐标）。nullable 表示尚未初始化（首次拿到源图与视口时按比例居中建框）。
+    // 裁剪框（显示像素坐标）。nullable 表示尚未初始化。
     var cropRect by remember(media.id) { mutableStateOf<Rect?>(null) }
 
-    // 原图加载状态：复用预览/网格的同一条加载链，编辑器独立持有一份 bitmap。
+    // 原图加载状态：编辑器独立持有一份 bitmap。
     var sourceBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(media.id) { mutableStateOf(true) }
     LaunchedEffect(media.id, useBackendLoader) {
@@ -136,7 +180,6 @@ fun ImageEditor(
             val src = sourceBitmap
             val srcW = src?.width ?: 0
             val srcH = src?.height ?: 0
-            // 旋转 90/270 时"可视宽高比"取源图高宽比；0/180 取源图宽高比。
             val viewAspect by remember(srcW, srcH, rotation) {
                 derivedStateOf {
                     if (srcW == 0 || srcH == 0) 1f
@@ -144,7 +187,7 @@ fun ImageEditor(
                 }
             }
 
-            // 顶部工具栏：返回 / 旋转 / 保存（图未加载时禁用旋转/保存）。
+            // 顶部工具栏：返回 / 旋转 / 保存。
             TopToolbar(
                 onBack = onDismiss,
                 onRotate = { if (src != null) rotation = (rotation + 90) % 360 },
@@ -153,11 +196,12 @@ fun ImageEditor(
                     val src2 = src
                     if (src2 == null) return@TopToolbar
                     scope.launch(dispatchers.io) {
-                        // 把显示像素裁剪框换算回源图未旋转坐标系，交给落地函数先裁后旋。
                         val sourceRect = displayRect?.let {
                             mapDisplayRectToSource(it, viewport, src2.width, src2.height, rotation)
                         }
-                        val processed = cropAndRotateImageBitmap(src2, sourceRect, rotation.toFloat())
+                        val processed = cropAndRotateImageBitmap(
+                            src2, sourceRect, rotation.toFloat(), filterMatrix
+                        )
                         saveImageBitmapToGallery(processed, media.filename)
                     }
                     onDismiss()
@@ -177,16 +221,22 @@ fun ImageEditor(
                     aspect = aspect,
                     viewport = viewport,
                     cropRect = cropRect,
+                    editMode = editMode,
+                    filterMatrix = filterMatrix,
                     onViewport = { viewport = it },
                     onCropRect = { cropRect = it },
                     density = density
                 )
             }
 
-            // 底部宽高比选择条。
-            BottomAspectBar(
-                selectedIndex = aspectIndex,
-                onSelect = { aspectIndex = it },
+            // 底部模式 + 选项条。
+            BottomBar(
+                editMode = editMode,
+                onModeChange = { editMode = it },
+                aspectIndex = aspectIndex,
+                onAspectChange = { aspectIndex = it },
+                filterIndex = filterIndex,
+                onFilterChange = { filterIndex = it },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
@@ -195,8 +245,8 @@ fun ImageEditor(
 
 /**
  * 编辑画布：根据源图尺寸与 [viewAspect] 在可用区内 Fit 渲染图片，叠加 [CropOverlay]。
- * 旋转用 [graphicsLayer].rotationZ 应用到图片本身；裁剪框套在 fitted 矩形上且不旋转，
- * 使裁剪交互始终在"旋转后视图"的正向坐标系内进行。
+ * 旋转用 [graphicsLayer].rotationZ 应用到图片本身；滤镜用 [ColorFilter.colorMatrix]。
+ * 裁剪 overlay 仅在 CROP 模式下显示。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -209,6 +259,8 @@ private fun EditorCanvas(
     aspect: Float?,
     viewport: IntSize,
     cropRect: Rect?,
+    editMode: EditMode,
+    filterMatrix: FloatArray?,
     onViewport: (IntSize) -> Unit,
     onCropRect: (Rect) -> Unit,
     density: androidx.compose.ui.unit.Density
@@ -216,16 +268,13 @@ private fun EditorCanvas(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 56.dp, bottom = 96.dp)
+            .padding(top = 56.dp, bottom = 140.dp)
     ) {
         val maxWpx = with(density) { maxWidth.toPx() }
         val maxHpx = with(density) { maxHeight.toPx() }
-        // Fit：按 viewAspect 在显示区内求最大可视矩形尺寸（以 0,0 为左上，宽高即所需）。
         val fitted = fittedRect(maxWpx, maxHpx, viewAspect)
         val fittedInt = IntSize(fitted.width.toInt().coerceAtLeast(1), fitted.height.toInt().coerceAtLeast(1))
 
-        // 视口/裁剪框初始化：fitted 尺寸、比例或旋转变化时，重置 cropRect 为 fitted 内
-        // 符合当前比例的最大居中框。
         LaunchedEffect(fittedInt.width, fittedInt.height, aspect, rotation, srcW, srcH) {
             if (fittedInt.width > 0 && fittedInt.height > 0) {
                 onViewport(fittedInt)
@@ -233,7 +282,6 @@ private fun EditorCanvas(
             }
         }
 
-        // 图片层：graphicsLayer 旋转；裁剪 overlay 套在 fitted 矩形上且不旋转。
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Box(
                 modifier = Modifier
@@ -242,23 +290,31 @@ private fun EditorCanvas(
                         with(density) { fitted.height.toDp() }
                     )
             ) {
+                val colorFilter = if (filterMatrix != null) {
+                    ColorFilter.colorMatrix(ColorMatrix(filterMatrix))
+                } else {
+                    null
+                }
                 Image(
                     bitmap = sourceBitmap,
                     contentDescription = "编辑中图片",
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(rotationZ = rotation.toFloat()),
-                    contentScale = ContentScale.Fit
+                    contentScale = ContentScale.Fit,
+                    colorFilter = colorFilter
                 )
-                val cr = cropRect
-                if (cr != null && viewport.width > 0 && viewport.height > 0) {
-                    // cropRect 坐标系即 fitted 矩形局部像素系（0,0 起），与 overlay 同系。
-                    CropOverlay(
-                        viewSize = viewport,
-                        cropRect = cr,
-                        aspectRatio = aspect,
-                        onCropRectChange = onCropRect
-                    )
+                // 裁剪 overlay 仅在 CROP 模式下显示。
+                if (editMode == EditMode.CROP) {
+                    val cr = cropRect
+                    if (cr != null && viewport.width > 0 && viewport.height > 0) {
+                        CropOverlay(
+                            viewSize = viewport,
+                            cropRect = cr,
+                            aspectRatio = aspect,
+                            onCropRectChange = onCropRect
+                        )
+                    }
                 }
             }
         }
@@ -346,34 +402,86 @@ private fun TopToolbar(
 }
 
 /**
- * 底部宽高比选择条：横向滚动的 FilterChip。
+ * 底部栏：两行结构。
+ * 第一行：模式切换 FilterChip（裁剪/旋转/滤镜）。
+ * 第二行：根据当前模式显示对应选项（宽高比 / 旋转提示 / 滤镜选择）。
  */
 @Composable
-private fun BottomAspectBar(
-    selectedIndex: Int,
-    onSelect: (Int) -> Unit,
+private fun BottomBar(
+    editMode: EditMode,
+    onModeChange: (EditMode) -> Unit,
+    aspectIndex: Int,
+    onAspectChange: (Int) -> Unit,
+    filterIndex: Int,
+    onFilterChange: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(96.dp)
-            .background(Color.Black.copy(alpha = 0.4f))
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .background(Color.Black.copy(alpha = 0.5f))
+            .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+        // 模式切换行
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
         ) {
-            items(ASPECT_OPTIONS) { opt ->
-                val idx = ASPECT_OPTIONS.indexOf(opt)
+            EditMode.entries.forEach { mode ->
                 FilterChip(
-                    selected = idx == selectedIndex,
-                    onClick = { onSelect(idx) },
-                    label = { Text(opt.label) }
+                    selected = editMode == mode,
+                    onClick = { onModeChange(mode) },
+                    label = { Text(mode.label) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primary,
+                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                    )
                 )
+                if (mode != EditMode.entries.last()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        // 选项行：根据模式显示
+        when (editMode) {
+            EditMode.CROP -> LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(ASPECT_OPTIONS) { opt ->
+                    val idx = ASPECT_OPTIONS.indexOf(opt)
+                    FilterChip(
+                        selected = idx == aspectIndex,
+                        onClick = { onAspectChange(idx) },
+                        label = { Text(opt.label) }
+                    )
+                }
+            }
+            EditMode.ROTATE -> Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    "点击顶部旋转按钮调整方向",
+                    color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            EditMode.FILTER -> LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(FILTER_OPTIONS) { opt ->
+                    val idx = FILTER_OPTIONS.indexOf(opt)
+                    FilterChip(
+                        selected = idx == filterIndex,
+                        onClick = { onFilterChange(idx) },
+                        label = { Text(opt.label) }
+                    )
+                }
             }
         }
     }
@@ -381,7 +489,7 @@ private fun BottomAspectBar(
 
 /**
  * 在 (maxW,maxH) 内按 [aspect] (w/h) 求最大内接矩形（居中）。返回的 Rect 以 (0,0) 为左上，
- * 由调用方在 `Alignment.Center` 容器内居中放置——这里返回尺寸而非绝对坐标，宽高即够。
+ * 由调用方在 `Alignment.Center` 容器内居中放置。
  */
 private fun fittedRect(maxW: Float, maxH: Float, aspect: Float): Rect {
     if (maxW <= 0f || maxH <= 0f || aspect <= 0f) return Rect(0f, 0f, 0f, 0f)
@@ -425,22 +533,7 @@ private fun centeredCropFor(fitted: Rect, aspect: Float?): Rect {
 }
 
 /**
- * 把显示像素坐标的裁剪框（在 fitted/viewport 局部系，0..viewport.width）换算为
- * **源图未旋转坐标系**（0..srcW, 0..srcH）内的裁剪框，再随 [cropAndRotateImageBitmap]
- * 旋转。本函数不旋转，只做"用户在旋转后视图里框选的区域 ↔ 源图区域"的反向映射。
- *
- * 旋转关系（顺时针旋转源图得到当前视图，旋转角 = [rotation]）：
- * - 0°：视图(dx,dy) ↔ 源(dx,dy)，等比缩放。
- * - 180°：视图(dx,dy) ↔ 源(srcW−dx, srcH−dy)，双向翻转。
- * - 90°：视图宽对应源高、视图高对应源宽；视图(dx,dy) ↔ 源(dy·kH, (dvw−dx)·kW)。
- * - 270°：视图(dx,dy) ↔ 源(dy·kH, dx·kW)。
- *
- * 实现：先按旋转角确定"视图→源"的轴对应与系数，再把裁剪框两端投影到源坐标并排序，
- * 保证返回的 Rect 为正向（left/right、top/bottom 不反）。
- *
- * 系数约定：kX 为视图 x 像素 → 源对应轴的源像素数；kY 为视图 y 像素 → 源对应轴的源像素数。
- * 90/270 时视图 x 轴对应源的 **高度** 轴，故 kX = srcH/dvh；视图 y 轴对应源的 **宽度** 轴，
- * 故 kY = srcW/dvw。
+ * 把显示像素坐标的裁剪框换算为源图未旋转坐标系内的裁剪框。
  */
 private fun mapDisplayRectToSource(
     displayRect: Rect,
@@ -452,7 +545,6 @@ private fun mapDisplayRectToSource(
     val dvw = viewport.width.toFloat()
     val dvh = viewport.height.toFloat()
     if (dvw <= 0f || dvh <= 0f || srcW <= 0 || srcH <= 0) return displayRect
-    // kX: 视图 x 像素 → 源对应轴源像素数；kY: 视图 y 像素 → 源对应轴源像素数。
     val kX: Float
     val kY: Float
     when (rotation % 360) {
@@ -464,16 +556,13 @@ private fun mapDisplayRectToSource(
     val r = displayRect.right.coerceIn(0f, dvw)
     val b = displayRect.bottom.coerceIn(0f, dvh)
 
-    // 投影裁剪框两端到源坐标：(sx0,sy0)-(sx1,sy1) 可能因翻转而反序，下方取 min/max 归正。
     val (sx0, sy0, sx1, sy1) = when (rotation % 360) {
         0 -> Quad4(l * kX, t * kY, r * kX, b * kY)
         180 -> Quad4((dvw - r) * kX, (dvh - b) * kY, (dvw - l) * kX, (dvh - t) * kY)
         90 -> {
-            // 视图 x → 源 y（翻转）：源 y = (dvw - dx)·kX；视图 y → 源 x：源 x = dy·kY
             Quad4(t * kY, (dvw - r) * kX, b * kY, (dvw - l) * kX)
         }
         270 -> {
-            // 视图 x → 源 y：源 y = dx·kX；视图 y → 源 x：源 x = dy·kY
             Quad4(t * kY, l * kX, b * kY, r * kX)
         }
         else -> Quad4(l * kX, t * kY, r * kX, b * kY)
@@ -488,4 +577,3 @@ private fun mapDisplayRectToSource(
 
 /** 4 值组，仅 [mapDisplayRectToSource] 内部承载两端的源坐标。 */
 private data class Quad4(val a: Float, val b: Float, val c: Float, val d: Float)
-
