@@ -148,6 +148,8 @@ fun SlideshowPlayer(
             .background(Color.Black)
     ) {
         // 图片页 —— HorizontalPager 自带滑动手势切换
+        // 内存优化：仅为当前页±1 加载原图，其他页加载缩略图（小内存占位），
+        // 避免 Pager 预渲染过多页导致全分辨率 ImageBitmap 同时驻留内存。
         HorizontalPager(
             state = pagerState,
             modifier = Modifier
@@ -160,9 +162,11 @@ fun SlideshowPlayer(
                     )
                 }
         ) { page ->
+            val isCurrentOrAdjacent = kotlin.math.abs(page - currentIndex) <= 1
             SlideshowImage(
                 media = mediaList[page],
-                useBackendLoader = useBackendLoader
+                useBackendLoader = useBackendLoader,
+                loadFullResolution = isCurrentOrAdjacent
             )
         }
 
@@ -290,31 +294,56 @@ fun SlideshowPlayer(
 }
 
 /**
- * 幻灯片单张图片：加载全尺寸图片，淡入显示。
+ * 幻灯片单张图片。
+ *
+ * @param loadFullResolution true 加载全尺寸原图；false 仅加载缩略图（低内存占位），
+ *   用于非当前/相邻页，避免 Pager 预渲染的远页全图占用过多内存。
+ *   当用户滑动到该页时 [loadFullResolution] 变为 true，重新触发 LaunchedEffect 加载原图。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun SlideshowImage(
     media: MediaMetadata,
-    useBackendLoader: Boolean
+    useBackendLoader: Boolean,
+    loadFullResolution: Boolean = true
 ) {
     var imageBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(media.id) { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(media.id, useBackendLoader) {
-        scope.launch(dispatchers.io) {
-            try {
-                val image = if (useBackendLoader) {
-                    BackendImageLoader.loadFullImage(media.id)
-                } else {
-                    loadFullImage(media.id)
+    LaunchedEffect(media.id, useBackendLoader, loadFullResolution) {
+        if (!loadFullResolution && imageBitmap == null) {
+            // 远页：仅加载缩略图作为低内存占位
+            scope.launch(dispatchers.io) {
+                try {
+                    val thumb = if (useBackendLoader) {
+                        BackendImageLoader.loadThumbnail(media.id)
+                    } else {
+                        loadThumbnail(media.id)
+                    }
+                    imageBitmap = thumb
+                } catch (e: Exception) {
+                    // 加载失败静默
+                } finally {
+                    isLoading = false
                 }
-                imageBitmap = image
-            } catch (e: Exception) {
-                // 加载失败静默
-            } finally {
-                isLoading = false
+            }
+        } else if (loadFullResolution) {
+            // 当前页或相邻页：加载全尺寸原图
+            isLoading = true
+            scope.launch(dispatchers.io) {
+                try {
+                    val image = if (useBackendLoader) {
+                        BackendImageLoader.loadFullImage(media.id)
+                    } else {
+                        loadFullImage(media.id)
+                    }
+                    imageBitmap = image
+                } catch (e: Exception) {
+                    // 加载失败静默
+                } finally {
+                    isLoading = false
+                }
             }
         }
     }

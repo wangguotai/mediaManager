@@ -8,8 +8,24 @@ import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "BackendImageLoader"
 
-/** 每个缓存（缩略图 / 原图）最多保留的条目数，超出按 LRU 淘汰最久未使用项。 */
-private const val MAX_CACHE_ENTRIES = 30
+/**
+ * 缩略图缓存上限：60 项。
+ *
+ * 网格瀑布流每屏可见约 6-12 个缩略图，滚动时快速滑动可能涉及 30+ 项。
+ * 60 项覆盖两屏滚动窗口，超出的最久未使用项被 LRU 淘汰，
+ * 解码后 ImageBitmap 内存占用受控（每个 128px 缩略图约 64KB，60 项 ≈ 3.7MB）。
+ */
+private const val MAX_THUMBNAIL_CACHE_ENTRIES = 60
+
+/**
+ * 原图缓存上限：10 项。
+ *
+ * 原图解码后内存远大于缩略图（单张全分辨率图片可达 5-15MB），
+ * 仅缓存当前预览页左右少量原图以保证滑动手感，超出即 LRU 淘汰。
+ * 10 项上限把原图缓存内存控制在 ~100MB 以内，配合系统垃圾回收
+ * 避免触发 MIUI 等系统的低内存杀进程策略。
+ */
+private const val MAX_FULLIMAGE_CACHE_ENTRIES = 10
 
 /**
  * 从后端 REST 端点加载并解码图片 —— 供"网盘图片" / "已上传" Tab 使用。
@@ -49,19 +65,23 @@ object BackendImageLoader {
     }
 
     /**
-     * 插入条目并在超出 [MAX_CACHE_ENTRIES] 时淘汰头部（最久未使用）。
+     * 插入条目并在超出 [maxEntries] 时淘汰头部（最久未使用）。
      * 调用方需在 [cacheLock] 内调用。
      */
-    private fun <K, V> LinkedHashMap<K, V>.putBounded(key: K, value: V) {
+    private fun <K, V> LinkedHashMap<K, V>.putBounded(key: K, value: V, maxEntries: Int) {
         put(key, value)
-        if (size > MAX_CACHE_ENTRIES) {
+        if (size > maxEntries) {
             val eldest = keys.first()
             remove(eldest)
         }
     }
 
     /**
-     * 加载缩略图。走 `GET /api/media/thumbnail/{id}?size=medium`。
+     * 加载缩略图。走 `GET /api/media/thumbnail/{id}?size=small`。
+     *
+     * 使用 small（128px）而非 medium（256px），将解码后 ImageBitmap
+     * 内存占用降至原来的 1/4，配合 [MAX_THUMBNAIL_CACHE_ENTRIES]=60
+     * 把缩略图缓存总内存控制在 ~3.7MB。
      *
      * @param mediaId 后端媒体 id（网盘图片为去扩展名的文件名）
      * @return 解码后的 [ImageBitmap]；网络失败或解码失败返回 null
@@ -71,9 +91,9 @@ object BackendImageLoader {
         val cached = cacheLock.withLock { thumbnailCache.access(mediaId) }
         if (cached != null) return cached
         return try {
-            val bytes = MediaService.getThumbnail(mediaId, size = "medium")
+            val bytes = MediaService.getThumbnail(mediaId, size = "small")
             val decoded = decodeImageBitmap(bytes)
-            if (decoded != null) cacheLock.withLock { thumbnailCache.putBounded(mediaId, decoded) }
+            if (decoded != null) cacheLock.withLock { thumbnailCache.putBounded(mediaId, decoded, MAX_THUMBNAIL_CACHE_ENTRIES) }
             decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadThumbnail failed for $mediaId: ${e.message}")
@@ -93,7 +113,7 @@ object BackendImageLoader {
         return try {
             val bytes = MediaService.getMediaStream(mediaId)
             val decoded = decodeImageBitmap(bytes)
-            if (decoded != null) cacheLock.withLock { fullImageCache.putBounded(mediaId, decoded) }
+            if (decoded != null) cacheLock.withLock { fullImageCache.putBounded(mediaId, decoded, MAX_FULLIMAGE_CACHE_ENTRIES) }
             decoded
         } catch (e: Exception) {
             logger.error(TAG, "loadFullImage failed for $mediaId: ${e.message}")

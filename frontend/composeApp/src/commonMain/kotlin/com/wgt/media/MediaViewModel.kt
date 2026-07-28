@@ -192,6 +192,21 @@ class MediaViewModel {
     private var cachedCloudMedia: List<MediaMetadata>? = null
 
     /**
+     * 本地相册分页加载每页大小上限。
+     *
+     * MIUI 等系统在内存紧张时会杀进程，一次全量加载数千张照片的元数据
+     * 加上后续缩略图解码会导致内存峰值过高。分页加载把每次元数据
+     * 查询的结果限制在 [GALLERY_PAGE_SIZE] 内，显著降低首屏内存占用。
+     */    private val galleryPageSize = 50
+
+    /** 本地相册当前已加载的页数（0-based），用于 [loadMoreGallery] 增量加载。 */
+    private var galleryPage = 0
+
+    /** 本地相册是否还有更多数据可加载（万物尽之时置 false）。 */
+    var hasMoreGallery by mutableStateOf(true)
+        private set
+
+    /**
      * 视频时长缓存：mediaId → 秒。`loadCloudMediaList` 加载视频列表后，后台逐个调用
      * 后端 `/api/media/video-info/{id}` 预取时长，供网格时长标签与 [VideoPlayer] 初始
      * 总时长复用，避免每次进入播放器都要等加载。失败项不入表，播放器再按实际播放获取。
@@ -348,7 +363,10 @@ class MediaViewModel {
     }
 
     /**
-     * 从本地照片图库加载媒体
+     * 从本地照片图库加载媒体（分页加载，每次最多 [galleryPageSize] 项）。
+     *
+     * 首次调用加载第一页；后续调用若已命中缓存则直接使用缓存。
+     * 增量加载更多请调 [loadMoreGallery]。
      */
     fun loadMediaFromGallery(forceRefresh: Boolean = false) {
 
@@ -361,6 +379,12 @@ class MediaViewModel {
         }
 
         if (isGalleryLoading) return
+
+        // 强制刷新时重置分页状态
+        if (forceRefresh) {
+            galleryPage = 0
+            hasMoreGallery = true
+        }
 
         isGalleryLoading = true
         errorMessage = null
@@ -379,14 +403,62 @@ class MediaViewModel {
                 }
 
                 hasGalleryPermission = true
+                // 分页加载：从第一页开始，最多 galleryPageSize 项。
                 val galleryMedia = galleryFeature.getMediaFromGallery()
-                cachedLocalMedia = galleryMedia
-                mediaList = galleryMedia
+                val pagedMedia = galleryMedia.take(galleryPageSize)
+                cachedLocalMedia = pagedMedia
+                mediaList = pagedMedia
+                galleryPage = 0
+                hasMoreGallery = galleryMedia.size > galleryPageSize
+                // 保留全量列表供 loadMoreGallery 增量切片
+                allGalleryMedia = galleryMedia
 
             } catch (e: Exception) {
                 mediaList = cachedLocalMedia ?: emptyList()
                 listLoadError = e.message ?: "加载照片图库失败"
                 errorMessage = "加载照片图库失败: ${e.message}"
+            } finally {
+                isGalleryLoading = false
+            }
+        }
+    }
+
+    /**
+     * 全量相册数据（仅首次加载时持有，分页加载增量切片用）。
+     * 放在 ViewModel 内存中但不直接暴露给 UI，避免一次性占用过高内存——
+     * 实际渲染只取 [mediaList]（当前页 + 已加载页的合并）。
+     */
+    private var allGalleryMedia: List<MediaMetadata>? = null
+
+    /**
+     * 增量加载下一页本地相册媒体（每次最多 [galleryPageSize] 项）。
+     *
+     * 在 [loadMediaFromGallery] 首次加载后，UI 滚动到底部时调用此方法
+     * 追加下一页。合并已加载部分与新页，保持 [mediaList] 增长。
+     * [hasMoreGallery] 为 false 时不再加载。
+     */
+    fun loadMoreGallery() {
+        if (isGalleryLoading || !hasMoreGallery) return
+        val all = allGalleryMedia ?: return
+
+        isGalleryLoading = true
+        viewModelScope.launch {
+            try {
+                galleryPage++
+                val fromIndex = galleryPage * galleryPageSize
+                val toIndex = minOf(fromIndex + galleryPageSize, all.size)
+                if (fromIndex >= all.size) {
+                    hasMoreGallery = false
+                    isGalleryLoading = false
+                    return@launch
+                }
+                val nextSlice = all.subList(fromIndex, toIndex)
+                val merged = (cachedLocalMedia ?: emptyList()) + nextSlice
+                cachedLocalMedia = merged
+                mediaList = merged
+                hasMoreGallery = toIndex < all.size
+            } catch (e: Exception) {
+                errorMessage = "加载更多失败: ${e.message}"
             } finally {
                 isGalleryLoading = false
             }
