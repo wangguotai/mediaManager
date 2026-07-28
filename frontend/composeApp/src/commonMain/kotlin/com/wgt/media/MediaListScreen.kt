@@ -56,6 +56,7 @@ import com.wgt.common.util.formatBytesToMB
 import com.wgt.platform.architecture.dispatchers.dispatchers
 import kotlinx.coroutines.launch
 import media.MediaMetadata
+import media.MediaType
 import mediamanager.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
@@ -74,6 +75,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
     // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
     var previewIndex by remember { mutableStateOf<Int?>(null) }
+
+    // 视频播放状态：点击视频项时填充，非空即在顶层渲染全屏 [VideoPlayer]。
+    // 与图片预览互斥：视频项点击直接进播放器，不走 [ImagePreviewDialog]。
+    var videoPlayerMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
     // OpenClaw 桥梁对话框状态 + 视图模型（与媒体列表同生命周期，复用即可）
     var showOpenClawDialog by remember { mutableStateOf(false) }
@@ -112,6 +117,16 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             // 列表刷新后索引越界，直接关闭
             previewIndex = null
         }
+    }
+
+    // 视频播放器：点击视频项时填充 videoPlayerMedia，全屏播放。
+    // 初始时长取 ViewModel 预取缓存（若有），让进度条立即显示总时长；无则在播放器内按实际播放获取。
+    videoPlayerMedia?.let { media ->
+        VideoPlayer(
+            media = media,
+            initialDurationSeconds = viewModel.videoDurations[media.id],
+            onDismiss = { videoPlayerMedia = null }
+        )
     }
 
     // OpenClaw 桥梁命令对话框
@@ -326,13 +341,26 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             selectedMediaIds = viewModel.selectedMediaIds,
                             onMediaClick = { media ->
                                 if (selectedTab == 2) {
-                                    previewIndex = mediaList.indexOf(media)
+                                    // 网盘 Tab：视频项打开全屏播放器，图片项进预览（且不影响选择态）。
+                                    if (media.type == MediaType.VIDEO) {
+                                        videoPlayerMedia = media
+                                    } else {
+                                        previewIndex = mediaList.indexOf(media)
+                                    }
                                 } else {
                                     viewModel.toggleMediaSelection(media.id)
                                 }
                             },
-                            onMediaLongClick = { media -> previewIndex = mediaList.indexOf(media) },
+                            onMediaLongClick = { media ->
+                                // 长按预览：视频项同样进播放器，与网格点击一致。
+                                if (media.type == MediaType.VIDEO) {
+                                    videoPlayerMedia = media
+                                } else {
+                                    previewIndex = mediaList.indexOf(media)
+                                }
+                            },
                             useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                            videoDurations = viewModel.videoDurations,
                            modifier = Modifier.fillMaxSize()
                        )
                    }
@@ -612,6 +640,7 @@ fun MediaGrid(
     onMediaClick: (MediaMetadata) -> Unit,
     onMediaLongClick: (MediaMetadata) -> Unit,
     useBackendLoader: Boolean = false,
+    videoDurations: Map<String, Double> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
     LazyVerticalGrid(
@@ -633,6 +662,7 @@ fun MediaGrid(
                onClick = { onMediaClick(media) },
                onLongClick = { onMediaLongClick(media) },
                useBackendLoader = useBackendLoader,
+               videoDurationSeconds = videoDurations[media.id],
                 // animateItem：新增/删除/重排项时平滑滑动到目标位（取代旧 animateItemPlacement），
                 // 配合 key={it.id} 让网格变更时已有项不闪烁、新项从插值位置滑入。
                 modifier = Modifier
@@ -654,8 +684,10 @@ fun MediaGridItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     useBackendLoader: Boolean = false,
+    videoDurationSeconds: Double? = null,
     modifier: Modifier = Modifier
 ) {
+    val isVideo = media.type == MediaType.VIDEO
     // 缩略图状态
     var thumbnailBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -781,6 +813,25 @@ fun MediaGridItem(
                         }
                     }
                 }
+
+                // 视频项：居中播放图标，区分于图片，提示点击可播放。
+                // 时长徽标单独放在外层右下（见信息栏之后），避免被底部文件名条遮挡。
+                if (isVideo) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(44.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painterResource(Res.drawable.ic_play_arrow),
+                            contentDescription = "播放视频",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
             }
 
             // 选中状态指示器（角落勾选）
@@ -823,6 +874,26 @@ fun MediaGridItem(
                     style = MaterialTheme.typography.labelSmall,
                     fontSize = 10.sp
                 )
+            }
+
+            // 视频时长徽标：置于外层右下、信息栏之后渲染，浮于文件名条之上。
+            // 预取缓存命中即显示；未到（后端 video-info 尚未返回）则留空，不阻断网格渲染。
+            if (isVideo) {
+                videoDurationSeconds?.let { dur ->
+                    if (dur > 0) {
+                        Text(
+                            formatDuration(dur),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(6.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                }
             }
         }
     }
