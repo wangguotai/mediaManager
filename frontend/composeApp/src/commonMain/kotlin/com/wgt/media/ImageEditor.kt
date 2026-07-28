@@ -157,7 +157,7 @@ fun ImageEditor(
                         val sourceRect = displayRect?.let {
                             mapDisplayRectToSource(it, viewport, src2.width, src2.height, rotation)
                         }
-                        val processed = cropAndRotateImageBitmap(src2, sourceRect, rotation)
+                        val processed = cropAndRotateImageBitmap(src2, sourceRect, rotation.toFloat())
                         saveImageBitmapToGallery(processed, media.filename)
                     }
                     onDismiss()

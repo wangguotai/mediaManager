@@ -7,8 +7,7 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.wgt.platform.logger.logger
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
-import org.jetbrains.skia.Color4
-import org.jetbrains.skia.FilterMode
+import org.jetbrains.skia.ColorMatrix
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Paint
@@ -48,7 +47,7 @@ actual fun cropAndRotateImageBitmap(
         // 旋转（任意角度）：计算旋转后 bounding box 尺寸，用 canvas.rotate 绕中心旋转。
         val rotated: Bitmap =
             if (rotationDegrees != 0f) {
-                val rad = Math.toRadians(rotationDegrees.toDouble())
+                val rad = kotlin.math.PI * rotationDegrees.toDouble() / 180.0
                 val cos = kotlin.math.abs(kotlin.math.cos(rad)).toFloat()
                 val sin = kotlin.math.abs(kotlin.math.sin(rad)).toFloat()
                 val origW = cropped.width.toFloat()
@@ -61,7 +60,7 @@ actual fun cropAndRotateImageBitmap(
                     canvas.translate(outW / 2f, outH / 2f)
                     canvas.rotate(rotationDegrees)
                     canvas.translate(-origW / 2f, -origH / 2f)
-                    canvas.drawImage(srcImg, 0f, 0f, FilterMode.LINEAR)
+                    canvas.drawImage(srcImg, 0f, 0f, Paint())
                 }
             } else {
                 cropped
@@ -73,9 +72,9 @@ actual fun cropAndRotateImageBitmap(
                 allocPixels(ImageInfo.makeN32Premul(rotated.width, rotated.height))
                 val canvas = Canvas(this)
                 val paint = Paint().apply {
-                    colorFilter = org.jetbrains.skia.ColorFilter.makeMatrix(colorMatrix)
+                    colorFilter = org.jetbrains.skia.ColorFilter.makeMatrix(ColorMatrix(*colorMatrix))
                 }
-                canvas.drawImage(Image.makeFromBitmap(rotated), 0f, 0f, FilterMode.LINEAR, paint)
+                canvas.drawImage(Image.makeFromBitmap(rotated), 0f, 0f, paint)
             }
             Image.makeFromBitmap(filtered).toComposeImageBitmap()
         } else {
