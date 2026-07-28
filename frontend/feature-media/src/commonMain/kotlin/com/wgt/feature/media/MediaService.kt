@@ -15,9 +15,8 @@ import com.wgt.platform.logger.logger
 import kotlin.time.Clock
 
 // 后端 REST gateway 地址。必须用运行后端的机器在局域网内的 IP，而非 localhost：
-// Android 真机的 localhost 指向真机自身，访问不到开发机的服务。
-// 此处为本机局域网 IP（确认方式：ifconfig 看 en0/wlan 的 inet）。
-private const val BASE_URL = "http://10.0.2.2:8080"
+// Android 真机的 localhost 指向真机自身，访问不到开发机的服务，通过adb reverse 将localhost指向服务端。
+private const val BASE_URL = "http://localhost:8080"
 
 private val jsonClient = HttpClient {
     install(ContentNegotiation) {
