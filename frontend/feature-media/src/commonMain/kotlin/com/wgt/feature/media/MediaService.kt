@@ -176,16 +176,22 @@ object MediaService {
 
     /**
      * 上传媒体
+     *
+     * 协议：POST /api/media/upload，body = 文件原始字节流（raw bytes），
+     * filename 通过 query param 传递。与后端 handleMediaUpload 的读取方式对齐
+     * （io.ReadAll 读取 raw body）。
+     *
+     * @param fileData 文件字节
+     * @param filename 原始文件名（用于后端取扩展名与 metadata sidecar）
+     * @param isLivePhoto 是否为 Live Photo（通过 query param 传递）
      */
     suspend fun uploadMedia(fileData: ByteArray, filename: String, isLivePhoto: Boolean = false): Boolean {
         return try {
             val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/upload") {
-                contentType(ContentType.Application.Json)
-                setBody(buildJsonObject {
-                    put("filename", filename)
-                    put("is_live_photo", isLivePhoto)
-                    put("data", Json.encodeToJsonElement(fileData.toList()))
-                })
+                parameter("filename", filename)
+                if (isLivePhoto) parameter("is_live_photo", "true")
+                contentType(ContentType.Application.OctetStream)
+                setBody(fileData)
             }
             response.status == HttpStatusCode.OK
         } catch (e: Exception) {

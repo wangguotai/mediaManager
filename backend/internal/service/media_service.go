@@ -915,12 +915,16 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly b
 
 func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequest) (*gen.DeleteMediaResponse, error) {
 	deletedCount := 0
+	notFoundCount := 0
 
 	for _, mediaID := range req.MediaIds {
 		// 安全检查：防止路径穿越。
 		if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+			notFoundCount++
 			continue
 		}
+
+		found := false
 
 		// 先在 uploads 目录查找并删除。
 		files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*"))
@@ -928,6 +932,7 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 			for _, file := range files {
 				if err := os.Remove(file); err == nil {
 					deletedCount++
+					found = true
 				}
 			}
 		}
@@ -939,9 +944,14 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 				for _, file := range cloudFiles {
 					if err := os.Remove(file); err == nil {
 						deletedCount++
+						found = true
 					}
 				}
 			}
+		}
+
+		if !found {
+			notFoundCount++
 		}
 
 		// 删除关联的缩略图（best-effort，不计数）。
@@ -957,18 +967,27 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 	}
 	// File deletions change directory contents — invalidate caches.
 	if deletedCount > 0 {
-		s.invalidateListCache()
+		// Best-effort: remove cached video metadata files for deleted media.
+		for _, mediaID := range req.MediaIds {
+			metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+			_ = os.Remove(metaPath)
+		}
+		// Invalidate list cache so the remaining list is fresh.
+		defer s.invalidateListCache()
 	}
 
-	// Best-effort: remove cached video metadata files for deleted media.
-	for _, mediaID := range req.MediaIds {
-		metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
-		_ = os.Remove(metaPath)
+	// 如实反映删除结果：全部命中并删除 → success；部分未找到 → partial；
+	// 全部未找到 → not_found。status 字段让调用方能区分“真的删了”还是“ID 不存在”。
+	status := "success"
+	if notFoundCount > 0 && deletedCount > 0 {
+		status = "partial"
+	} else if notFoundCount > 0 && deletedCount == 0 {
+		status = "not_found"
 	}
 
 	return &gen.DeleteMediaResponse{
-		Status:       "success",
-		Message:      fmt.Sprintf("Deleted %d files", deletedCount),
+		Status:       status,
+		Message:      fmt.Sprintf("Deleted %d files, %d not found", deletedCount, notFoundCount),
 		DeletedCount: int32(deletedCount),
 	}, nil
 }
