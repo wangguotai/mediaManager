@@ -15,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +44,13 @@ import kotlinx.coroutines.launch
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_check_circle
+import mediamanager.composeapp.generated.resources.ic_cloud
+import mediamanager.composeapp.generated.resources.ic_info
 import mediamanager.composeapp.generated.resources.ic_openclaw
+import mediamanager.composeapp.generated.resources.ic_palette
+import mediamanager.composeapp.generated.resources.ic_photo
+import mediamanager.composeapp.generated.resources.ic_settings
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 
@@ -180,7 +187,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // ---- 1. 后端地址 ----
-            SectionTitle("后端地址")
+            SectionTitle("后端地址", iconRes = Res.drawable.ic_cloud)
             OutlinedTextField(
                 value = urlInput,
                 onValueChange = { urlInput = it },
@@ -253,9 +260,11 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
 
             // ---- 2. 主题 ----
-            SectionTitle("主题")
+            SectionTitle("主题", iconRes = Res.drawable.ic_palette)
             ThemeMode.values().forEach { mode ->
                 Row(
                     modifier = Modifier
@@ -277,9 +286,11 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
 
             // ---- 3. 关于 ----
-            SectionTitle("关于")
+            SectionTitle("关于", iconRes = Res.drawable.ic_info)
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -305,9 +316,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
             }
             Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
 
             // ---- 4. OpenClaw 桥梁 ----
-            SectionTitle("OpenClaw")
+            SectionTitle("OpenClaw", iconRes = Res.drawable.ic_openclaw)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -325,15 +338,29 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalResourceApi::class)
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold,
-        color = MaterialTheme.colorScheme.primary,
+private fun SectionTitle(text: String, iconRes: DrawableResource? = null) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-    )
+    ) {
+        if (iconRes != null) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(
+            text,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
 }
 
 private fun modeLabel(mode: ThemeMode): String = when (mode) {

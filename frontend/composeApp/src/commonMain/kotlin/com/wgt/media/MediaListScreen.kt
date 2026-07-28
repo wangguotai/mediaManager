@@ -25,6 +25,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
@@ -35,6 +36,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.*
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -81,6 +84,8 @@ import org.jetbrains.compose.resources.painterResource
 @Composable
 fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit = {}, onNavigateToAlbums: () -> Unit = {}) {
     val snackbarHostState = remember { SnackbarHostState() }
+    // TopAppBar 滚动行为：列表滚动时 TopAppBar elevation 动画升高，增强层次感。
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     // 默认打开"网盘图片" Tab（index=2）：真机启动即对后端发 q=source=cloud 请求，
     // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
     var selectedTab by remember { mutableStateOf(2) }
@@ -280,6 +285,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             Column {
                 TopAppBar(
@@ -290,6 +296,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             fontSize = 20.sp
                         )
                     },
+                    scrollBehavior = scrollBehavior,
                    actions = {
                         // 搜索图标：展开/收起搜索栏
                         IconButton(onClick = { searchExpanded = !searchExpanded }) {
@@ -955,9 +962,9 @@ fun MediaGrid(
 ) {
     LazyVerticalStaggeredGrid(
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
-        // 外边距 8dp，项间 6dp：密集但不挤压，圆角卡片间留呼吸缝。
+        // 外边距 8dp，项间横向 4dp 纵向 6dp：更紧凑的瀑布流布局。
         contentPadding = PaddingValues(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalItemSpacing = 6.dp,
         modifier = modifier
     ) {
@@ -1304,6 +1311,7 @@ private fun PreviewActionButton(
     label: String,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -1312,7 +1320,11 @@ private fun PreviewActionButton(
                 contentDescription = label
             }
             .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(bounded = true),
+                onClick = onClick
+            )
             .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
         Icon(

@@ -57,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wgt.feature.media.MediaService
+import com.wgt.feature.media.MediaService.MediaSource
 import com.wgt.platform.architecture.dispatchers.dispatchers
 import kotlinx.coroutines.launch
 import media.MediaMetadata
@@ -272,7 +273,8 @@ private fun AlbumCard(
     var isLoadingCover by remember(album.id) { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
-    // 异步加载封面缩略图（仅后端相册有 coverMediaId 时）
+    // 异步加载封面缩略图：优先用 coverMediaId；若为空但相册有媒体（mediaCount>0），
+    // 则拉取相册首张媒体作为封面 fallback，避免空白占位。
     LaunchedEffect(album.id, album.coverMediaId) {
         val coverId = album.coverMediaId
         if (coverId != null) {
@@ -280,6 +282,22 @@ private fun AlbumCard(
                 try {
                     val bmp = BackendImageLoader.loadThumbnail(coverId)
                     coverBitmap = bmp
+                } catch (e: Exception) {
+                    // 静默
+                } finally {
+                    isLoadingCover = false
+                }
+            }
+        } else if (album.mediaCount > 0) {
+            // coverMediaId 为空但相册有媒体：拉取首张媒体作为封面 fallback。
+            scope.launch(dispatchers.io) {
+                try {
+                    val media = MediaService.getMediaList(source = MediaSource.BACKEND)
+                    val first = media.firstOrNull()
+                    if (first != null) {
+                        val bmp = BackendImageLoader.loadThumbnail(first.id)
+                        coverBitmap = bmp
+                    }
                 } catch (e: Exception) {
                     // 静默
                 } finally {
