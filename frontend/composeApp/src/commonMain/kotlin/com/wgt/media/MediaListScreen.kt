@@ -313,56 +313,40 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             fontSize = 20.sp
                         )
                     },
-                    scrollBehavior = scrollBehavior
+                    scrollBehavior = scrollBehavior,
+                   actions = {
+                        // 搜索图标：展开/收起搜索栏
+                        IconButton(onClick = { searchExpanded = !searchExpanded }) {
+                            Icon(
+                                painterResource(Res.drawable.ic_search),
+                                contentDescription = "搜索"
+                            )
+                        }
+                        // 刷新当前 Tab 数据源
+                        IconButton(
+                            onClick = {
+                                when (selectedTab) {
+                                    0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                                    1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
+                                }
+                            },
+                            enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
+                        ) {
+                            Icon(
+                                painterResource(Res.drawable.ic_refresh),
+                                contentDescription = "刷新"
+                            )
+                        }
+                        // 相册入口：相册图标，点击进入相册管理
+                        IconButton(onClick = onNavigateToAlbums) {
+                            Icon(
+                                painterResource(Res.drawable.ic_photo),
+                                contentDescription = "相册"
+                            )
+                        }
+                    }
                 )
-
-                // MIUI 沉浸式状态栏会覆盖 TopAppBar actions slot 触摸区域，
-                // 改用独立 Row 放操作按钮，避开系统 UI 层。
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 搜索图标：展开/收起搜索栏
-                    IconButton(onClick = { searchExpanded = !searchExpanded }) {
-                        Icon(
-                            painterResource(Res.drawable.ic_search),
-                            contentDescription = "搜索"
-                        )
-                    }
-                    // 刷新当前 Tab 数据源
-                    IconButton(
-                        onClick = {
-                            when (selectedTab) {
-                                0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                                1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
-                                else -> viewModel.loadCloudMediaList(forceRefresh = true)
-                            }
-                        },
-                        enabled = !viewModel.isLoading && !viewModel.isGalleryLoading && !viewModel.isCloudLoading
-                    ) {
-                        Icon(
-                            painterResource(Res.drawable.ic_refresh),
-                            contentDescription = "刷新"
-                        )
-                    }
-                    // 相册入口
-                    IconButton(onClick = onNavigateToAlbums) {
-                        Icon(
-                            painterResource(Res.drawable.ic_photo),
-                            contentDescription = "相册"
-                        )
-                    }
-                    // 设置入口
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(
-                            painterResource(Res.drawable.ic_settings),
-                            contentDescription = "设置"
-                        )
-                    }
-                }
 
                 // 标签栏：自定义滑动指示器，spring 动画驱动 offset/width，切换更丝滑。
                 TabRow(
