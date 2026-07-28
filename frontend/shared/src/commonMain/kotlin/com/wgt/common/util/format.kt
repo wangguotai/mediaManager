@@ -5,15 +5,28 @@ import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 /**
- * 格式化文件大小为MB单位
+ * 自适应格式化文件大小：
+ * - <1KB 显示 B
+ * - <1MB 显示 KB
+ * - ≥1MB 显示 MB
+ *
  * @param bytes 文件大小（字节）
  * @param decimalPlaces 保留小数点位数，默认为1
- * @return 格式化后的字符串，如 "10.5 MB", "20.0 MB", "3.2 MB"
+ * @return 格式化后的字符串，如 "512 B", "10.5 KB", "20.0 MB"
  */
 fun formatBytesToMB(bytes: Double, decimalPlaces: Int = 1): String {
-    val sizeMB = bytes / (1024.0 * 1024.0)
-    val rounded = roundToDecimalPlaces(sizeMB, decimalPlaces)
-    return "$rounded MB"
+    val rounded = roundToDecimalPlaces(bytes, 0).toLong()
+    return when {
+        rounded < 1024L -> "$rounded B"
+        rounded < 1024L * 1024L -> {
+            val sizeKB = bytes / 1024.0
+            "${roundToDecimalPlaces(sizeKB, decimalPlaces)} KB"
+        }
+        else -> {
+            val sizeMB = bytes / (1024.0 * 1024.0)
+            "${roundToDecimalPlaces(sizeMB, decimalPlaces)} MB"
+        }
+    }
 }
 
 /**
