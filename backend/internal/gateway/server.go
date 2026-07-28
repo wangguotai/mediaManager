@@ -384,12 +384,25 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	if filename == "" {
 		filename = "upload.dat"
 	}
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// Use the original filename for on-disk storage so the filename is preserved
+	// even without a metadata sidecar. Resolve collisions by appending a counter.
 	ext := filepath.Ext(filename)
 	if ext == "" {
 		ext = ".dat"
+		filename = filename + ext
 	}
-	uploadPath := filepath.Join(s.uploadsDir, id+ext)
+	baseName := strings.TrimSuffix(filename, ext)
+	uploadPath := filepath.Join(s.uploadsDir, filename)
+	collision := 0
+	for {
+		if _, err := os.Stat(uploadPath); os.IsNotExist(err) {
+			break
+		}
+		collision++
+		uploadPath = filepath.Join(s.uploadsDir, fmt.Sprintf("%s_%d%s", baseName, collision, ext))
+	}
+	id := strings.TrimSuffix(filepath.Base(uploadPath), ext)
 	if err := os.WriteFile(uploadPath, body, 0644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

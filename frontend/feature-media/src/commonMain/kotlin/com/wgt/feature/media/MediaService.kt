@@ -385,6 +385,21 @@ object MediaService {
 
     // ---- 解析 ----
 
+    /**
+     * parseMediaType converts the backend type field to [MediaType].
+     *
+     * The backend serialises the protobuf enum as an integer (0=IMAGE, 1=LIVE_PHOTO,
+     * 2=VIDEO) via standard `json.Marshal`. Older code paths may also omit the field
+     * entirely (IMAGE is the zero value with `omitempty`), in which case we default
+     * to IMAGE.
+     */
+    private fun parseMediaType(raw: String?): MediaType = when (raw?.trim()?.uppercase()) {
+        null, "", "0", "IMAGE" -> MediaType.IMAGE
+        "1", "LIVE_PHOTO" -> MediaType.LIVE_PHOTO
+        "2", "VIDEO" -> MediaType.VIDEO
+        else -> MediaType.IMAGE // unknown types fall back to image
+    }
+
     private fun parseMediaList(json: String): List<MediaMetadata> {
         val obj = Json.parseToJsonElement(json).jsonObject
         return obj["media_list"]?.jsonArray?.map { item ->
@@ -392,7 +407,7 @@ object MediaService {
             MediaMetadata(
                 id = m["id"]?.jsonPrimitive?.content ?: "",
                 filename = m["filename"]?.jsonPrimitive?.content ?: "",
-                type = MediaType.valueOf(m["type"]?.jsonPrimitive?.content?.uppercase() ?: "IMAGE"),
+                type = parseMediaType(m["type"]?.jsonPrimitive?.content),
                 size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
                 mime_type = m["mime_type"]?.jsonPrimitive?.content ?: "",
                 created_at = m["created_at"]?.jsonPrimitive?.longOrNull ?: 0L,
