@@ -902,12 +902,12 @@ private fun ZoomableImage(
                 } catch (e: Exception) {
                     // 加载失败
                 } finally {
-                    isLoading = false
+                    isLoadingFull = false
                 }
             }
         } else if (loadFullResolution) {
             // 当前页：加载全尺寸原图
-            isLoading = true
+            isLoadingFull = true
             scope.launch(dispatchers.io) {
                 try {
                     val image = if (useBackendLoader) {
@@ -919,7 +919,7 @@ private fun ZoomableImage(
                 } catch (e: Exception) {
                     // 加载失败
                 } finally {
-                    isLoading = false
+                    isLoadingFull = false
                 }
             }
         }
