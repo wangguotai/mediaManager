@@ -381,47 +381,15 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 }
 
                 mediaList.isEmpty() -> {
-                    // 空状态：仍包一层 PullToRefreshBox，便于在有数据前下拉重试请求。
+                    // 空状态：每个 Tab 不同文案与图标，包一层 PullToRefreshBox 便于下拉重试。
                     PullToRefreshBox(
                         isRefreshing = isLoading,
                         onRefresh = onRefresh,
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                     ) {
-                          Text(
-                              when (selectedTab) {
-                                  0 -> "相册里还没有本地图片"
-                                  2 -> "网盘里还没有图片"
-                                  else -> "还没有上传过图片"
-                              },
-                              style = MaterialTheme.typography.titleMedium,
-                              fontWeight = FontWeight.Medium,
-                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                          )
-                          Spacer(modifier = Modifier.height(8.dp))
-                          Text(
-                              when (selectedTab) {
-                                  0 -> "授权访问相册后，本地图片会出现在这里"
-                                  2 -> "把图片放进 media/data/cloud-images 目录即可"
-                                  else -> "选中本地图片后点上传，文件会出现在这里"
-                              },
-                              style = MaterialTheme.typography.bodySmall,
-                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                              textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                          )
-                          Spacer(modifier = Modifier.height(16.dp))
-                          Text(
-                              "下拉刷新",
-                              style = MaterialTheme.typography.bodySmall,
-                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                          )
-                      }
-                  }
-              }
+                        EmptyStateView(tabIndex = selectedTab)
+                    }
+                }
 
                 // 搜索/筛选后无结果：数据源有内容但 [filteredList] 为空，提示无匹配。
                 // 与"暂无 X"区分：此处可一键清除过滤条件回到完整列表。
@@ -1256,37 +1224,204 @@ private fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
 }
 
 /**
- * 全屏加载态：圆圈 + 文案 + shimmer 进度条，比单一圆圈更连贯。
+ * 空状态视图：每个 Tab 不同文案与图标，带淡入动画。
+ *
+ * - Tab 0 (本地图片)：图片图标 + "相册是空的" + "下拉刷新从图库加载"
+ * - Tab 1 (已上传)：云上传图标 + "还没有上传过图片" + "点击右下角按钮上传"
+ * - Tab 2 (网盘图片)：云图标 + "网盘暂无图片" + "下拉刷新重试"
  */
+@OptIn(ExperimentalResourceApi::class)
 @Composable
-private fun FullScreenLoading() {
+private fun EmptyStateView(tabIndex: Int) {
+    // 入场动画：图标与文案依次淡入+上移，比同时闪现更柔和。
+    val iconAlpha by animateFloatAsState(
+        targetValue = 1f,
+        animationSpec = tween(600, delayMillis = 100),
+        label = "emptyIconAlpha"
+    )
+    val textAlpha by animateFloatAsState(
+        targetValue = 1f,
+        animationSpec = tween(600, delayMillis = 250),
+        label = "emptyTextAlpha"
+    )
+
+    // 脉冲动画：图标轻微缩放循环，赋予空状态生命力。
+    val infiniteTransition = rememberInfiniteTransition(label = "emptyPulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "emptyPulseScale"
+    )
+
+    val iconRes = when (tabIndex) {
+        0 -> Res.drawable.ic_photo
+        1 -> Res.drawable.ic_cloud_upload
+        else -> Res.drawable.ic_cloud
+    }
+    val title = when (tabIndex) {
+        0 -> "相册是空的"
+        1 -> "还没有上传过图片"
+        else -> "网盘暂无图片"
+    }
+    val subtitle = when (tabIndex) {
+        0 -> "下拉刷新从图库加载"
+        1 -> "点击右下角按钮上传"
+        else -> "下拉刷新重试"
+    }
+
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        CircularProgressIndicator()
-        Spacer(modifier = Modifier.height(16.dp))
+        // 背景圆圈 + 图标，脉冲动画驱动缩放。
+        Box(
+            modifier = Modifier.size(96.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        CircleShape
+                    )
+            )
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(52.dp)
+                    .graphicsLayer(
+                        scaleX = pulseScale,
+                        scaleY = pulseScale,
+                        alpha = iconAlpha
+                    ),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
         Text(
-            "加载中...",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f * textAlpha),
+            modifier = Modifier.graphicsLayer(alpha = textAlpha)
         )
-        Spacer(modifier = Modifier.height(12.dp))
-        ShimmerPlaceholder(
-            modifier = Modifier
-                .width(180.dp)
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f * textAlpha),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.graphicsLayer(alpha = textAlpha)
         )
     }
 }
 
 /**
- * 列表加载失败占位：图标 + 错误文案 + 重试按钮。
+ * 全屏加载态：脉冲动画驱动 App logo 缩放与透明度循环，
+ * 比单一 CircularProgressIndicator 更有品牌感且视觉柔和。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun FullScreenLoading() {
+    // 脉冲过渡：scale 在 0.85→1.15 间循环，alpha 在 0.5→1.0 间同步呼吸。
+    val infiniteTransition = rememberInfiniteTransition(label = "loadingPulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.15f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+    // 外层光晕：一圈半透明 primary 色圆环随脉冲缩放，营造呼吸光圈效果。
+    val haloScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "haloScale"
+    )
+    val haloAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "haloAlpha"
+    )
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(
+            modifier = Modifier.size(96.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            // 外层呼吸光圈
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer(
+                        scaleX = haloScale,
+                        scaleY = haloScale,
+                        alpha = haloAlpha
+                    )
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+                        CircleShape
+                    )
+            )
+            // 脉冲 App logo
+            Icon(
+                painter = painterResource(Res.drawable.ic_openclaw),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(56.dp)
+                    .graphicsLayer(
+                        scaleX = pulseScale,
+                        scaleY = pulseScale,
+                        alpha = pulseAlpha
+                    ),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+    }
+}
+
+/**
+ * 列表加载失败占位：动画错误图标 + 错误文案 + 重试按钮（带 loading 状态）。
  *
  * 用于后端未启动 / 网络异常导致 [MediaViewModel.listLoadError] 非空且 mediaList 为空时，
  * 替代"暂无 X"误导为白屏的场景。重试走对应 Tab 的强制刷新。
+ * 错误图标做轻微据头+缩放动画，按钮点击后显示 CircularProgressIndicator。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -1294,22 +1429,67 @@ private fun ErrorStateView(
     message: String,
     onRetry: () -> Unit
 ) {
+    // 错误图标动画：轻微缩放+据头，循环播放，吸引注意但不刺眼。
+    val infiniteTransition = rememberInfiniteTransition(label = "errorShake")
+    val shakeScale by infiniteTransition.animateFloat(
+        initialValue = 0.92f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "errorScale"
+    )
+    val shakeRotation by infiniteTransition.animateFloat(
+        initialValue = -8f,
+        targetValue = 8f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "errorRotation"
+    )
+
+    // 重试按钮 loading 状态：点击后显示圆圈，防止重复点击。
+    var isRetrying by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(
-            painter = painterResource(Res.drawable.ic_image_placeholder),
-            contentDescription = null,
-            modifier = Modifier.size(72.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-        )
-        Spacer(modifier = Modifier.height(16.dp))
+        // 背景圆圈 + 错误图标，据头动画驱动 rotation+scale。
+        Box(
+            modifier = Modifier.size(96.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                        CircleShape
+                    )
+            )
+            Icon(
+                painter = painterResource(Res.drawable.ic_error),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(56.dp)
+                    .graphicsLayer(
+                        scaleX = shakeScale,
+                        scaleY = shakeScale,
+                        rotationZ = shakeRotation
+                    ),
+                tint = MaterialTheme.colorScheme.error
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
         Text(
             "加载失败",
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.error
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -1321,14 +1501,29 @@ private fun ErrorStateView(
             overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.height(24.dp))
-        FilledTonalButton(onClick = onRetry) {
-            Icon(
-                painterResource(Res.drawable.ic_refresh),
-                contentDescription = null,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("重试")
+        FilledTonalButton(
+            onClick = {
+                if (!isRetrying) {
+                    isRetrying = true
+                    onRetry()
+                }
+            },
+            enabled = !isRetrying
+        ) {
+            if (isRetrying) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Icon(
+                    painterResource(Res.drawable.ic_refresh),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("重试")
+            }
         }
     }
 }
@@ -1359,7 +1554,7 @@ private fun NoSearchResultView(
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
-            painter = painterResource(Res.drawable.ic_image_placeholder),
+            painter = painterResource(Res.drawable.ic_search_off),
             contentDescription = null,
             modifier = Modifier.size(72.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
@@ -1388,6 +1583,12 @@ private fun NoSearchResultView(
         )
         Spacer(modifier = Modifier.height(24.dp))
         FilledTonalButton(onClick = onClear) {
+            Icon(
+                painterResource(Res.drawable.ic_close),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
             Text("清除筛选")
         }
     }
