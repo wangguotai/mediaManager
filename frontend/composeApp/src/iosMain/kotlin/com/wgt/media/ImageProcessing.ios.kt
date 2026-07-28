@@ -7,17 +7,18 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.wgt.platform.logger.logger
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
+import org.jetbrains.skia.Color4
+import org.jetbrains.skia.FilterMode
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Paint
 import org.jetbrains.skia.Rect as SkiaRect
 
-private fun normalizeRotation(degrees: Int): Int = ((degrees % 360) + 360) % 360 / 90 * 90
-
 actual fun cropAndRotateImageBitmap(
     source: ImageBitmap,
     cropRect: Rect?,
-    rotationDegrees: Int
+    rotationDegrees: Float,
+    colorMatrix: FloatArray?
 ): ImageBitmap {
     return try {
         val srcBitmap = source.asSkiaBitmap()
@@ -42,33 +43,44 @@ actual fun cropAndRotateImageBitmap(
                 srcBitmap
             }
 
-        val rot = normalizeRotation(rotationDegrees)
-        if (rot == 0) return Image.makeFromBitmap(cropped).toComposeImageBitmap()
-
         val srcImg = Image.makeFromBitmap(cropped)
-        val outW: Int
-        val outH: Int
-        when (rot) {
-            90, 270 -> { outW = cropped.height; outH = cropped.width }
-            else -> { outW = cropped.width; outH = cropped.height }
-        }
-        val rotated = Bitmap().apply {
-            allocPixels(ImageInfo.makeN32Premul(outW, outH))
-            val canvas = Canvas(this)
-            val paint = Paint()
-            when (rot) {
-                90 -> canvas.drawImageRect(srcImg,
-                    SkiaRect(0f, 0f, cropped.width.toFloat(), cropped.height.toFloat()),
-                    SkiaRect(outW.toFloat(), 0f, 0f, outH.toFloat()), paint)
-                180 -> canvas.drawImageRect(srcImg,
-                    SkiaRect(0f, 0f, cropped.width.toFloat(), cropped.height.toFloat()),
-                    SkiaRect(cropped.width.toFloat(), cropped.height.toFloat(), 0f, 0f), paint)
-                270 -> canvas.drawImageRect(srcImg,
-                    SkiaRect(0f, 0f, cropped.width.toFloat(), cropped.height.toFloat()),
-                    SkiaRect(0f, outH.toFloat(), outW.toFloat(), 0f), paint)
+
+        // 旋转（任意角度）：计算旋转后 bounding box 尺寸，用 canvas.rotate 绕中心旋转。
+        val rotated: Bitmap =
+            if (rotationDegrees != 0f) {
+                val rad = Math.toRadians(rotationDegrees.toDouble())
+                val cos = kotlin.math.abs(kotlin.math.cos(rad)).toFloat()
+                val sin = kotlin.math.abs(kotlin.math.sin(rad)).toFloat()
+                val origW = cropped.width.toFloat()
+                val origH = cropped.height.toFloat()
+                val outW = (origW * cos + origH * sin).toInt().coerceAtLeast(1)
+                val outH = (origW * sin + origH * cos).toInt().coerceAtLeast(1)
+                Bitmap().apply {
+                    allocPixels(ImageInfo.makeN32Premul(outW, outH))
+                    val canvas = Canvas(this)
+                    canvas.translate(outW / 2f, outH / 2f)
+                    canvas.rotate(rotationDegrees)
+                    canvas.translate(-origW / 2f, -origH / 2f)
+                    canvas.drawImage(srcImg, 0f, 0f, FilterMode.LINEAR)
+                }
+            } else {
+                cropped
             }
+
+        // 滤镜（ColorMatrix via Skia ColorFilter）
+        if (colorMatrix != null && colorMatrix.size >= 20) {
+            val filtered = Bitmap().apply {
+                allocPixels(ImageInfo.makeN32Premul(rotated.width, rotated.height))
+                val canvas = Canvas(this)
+                val paint = Paint().apply {
+                    colorFilter = org.jetbrains.skia.ColorFilter.makeMatrix(colorMatrix)
+                }
+                canvas.drawImage(Image.makeFromBitmap(rotated), 0f, 0f, FilterMode.LINEAR, paint)
+            }
+            Image.makeFromBitmap(filtered).toComposeImageBitmap()
+        } else {
+            Image.makeFromBitmap(rotated).toComposeImageBitmap()
         }
-        Image.makeFromBitmap(rotated).toComposeImageBitmap()
     } catch (e: Exception) {
         logger.error("ImageProcessing", "cropAndRotate failed: ${e.message}")
         source
@@ -79,8 +91,6 @@ actual suspend fun saveImageBitmapToGallery(
     bitmap: ImageBitmap,
     filename: String
 ): String? {
-    // iOS 端保存相册暂未实现：Kotlin/Native cinterop 不暴露 NSData(bytes:length:) 构造器，
-    // 需用 ObjC runtime bridging 或 memScoped 方案补全。
     logger.warning("ImageProcessing", "saveImageBitmapToGallery not yet implemented on iOS")
     return null
 }

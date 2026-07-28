@@ -2,7 +2,9 @@ package com.wgt.media
 
 import android.content.ContentValues
 import android.graphics.Bitmap
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.ui.geometry.Rect
@@ -15,15 +17,14 @@ import com.wgt.platform.logger.logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private fun normalizeRotation(degrees: Int): Int = ((degrees % 360) + 360) % 360 / 90 * 90
-
 actual fun cropAndRotateImageBitmap(
     source: ImageBitmap,
     cropRect: Rect?,
-    rotationDegrees: Int
+    rotationDegrees: Float,
+    colorMatrix: FloatArray?
 ): ImageBitmap {
     return try {
-        val srcBitmap = source.asAndroidBitmap()
+        val srcBitmap = source.asAndroidBitmap().copy(Bitmap.Config.ARGB_8888, true)
 
         // 裁剪
         val cropped: Bitmap =
@@ -37,12 +38,27 @@ actual fun cropAndRotateImageBitmap(
                 srcBitmap
             }
 
-        val rot = normalizeRotation(rotationDegrees)
-        if (rot == 0) return cropped.asImageBitmap()
+        // 旋转（任意角度）
+        val rotated: Bitmap =
+            if (rotationDegrees != 0f) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees) }
+                Bitmap.createBitmap(cropped, 0, 0, cropped.width, cropped.height, matrix, true)
+            } else {
+                cropped
+            }
 
-        val matrix = Matrix().apply { postRotate(rot.toFloat()) }
-        val rotated = Bitmap.createBitmap(cropped, 0, 0, cropped.width, cropped.height, matrix, true)
-        rotated.asImageBitmap()
+        // 滤镜（ColorMatrix）
+        if (colorMatrix != null && colorMatrix.size >= 20) {
+            val paint = Paint().apply {
+                colorFilter = ColorMatrixColorFilter(android.graphics.ColorMatrix(colorMatrix))
+            }
+            val filtered = Bitmap.createBitmap(rotated.width, rotated.height, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(filtered)
+            canvas.drawBitmap(rotated, 0f, 0f, paint)
+            filtered.asImageBitmap()
+        } else {
+            rotated.asImageBitmap()
+        }
     } catch (e: Exception) {
         logger.error("ImageProcessing", "cropAndRotate failed: ${e.message}")
         source

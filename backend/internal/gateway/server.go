@@ -74,6 +74,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/upload", s.handleMediaUpload)
 	s.mux.HandleFunc("/api/media/metadata/", s.handleMediaMetadata)
 
+	// 媒体收藏：POST 设置/取消收藏，GET 返回收藏列表。
+	s.mux.HandleFunc("/api/media/favorite", s.handleMediaFavorite)
+	s.mux.HandleFunc("/api/media/favorites", s.handleMediaFavorites)
+
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
 
@@ -130,6 +134,12 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 如果 media service 支持收藏查询，给每条媒体补充 favorite 字段。
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		writeJSON(w, http.StatusOK, enrichMediaList(resp, fav))
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -417,6 +427,94 @@ func (s *Server) handleOpenClawCommand(w http.ResponseWriter, r *http.Request) {
 		out.RawBody = string(bodyBytes)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ============ Favorite endpoints ============
+
+// favoriteProvider 是 service.MediaService 的收藏能力接口，
+// gateway 借此对 mediaSvc 做能力断言并按需调用收藏方法。
+type favoriteProvider interface {
+	IsFavorite(mediaId string) bool
+	ListFavorites() []string
+	AddFavorite(mediaId string) error
+	RemoveFavorite(mediaId string) error
+}
+
+// handleMediaFavorite 处理 POST /api/media/favorite，设置或取消收藏。
+// 请求体: {"media_id":"xxx","favorite":true}
+func (s *Server) handleMediaFavorite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		MediaId  string `json:"media_id"`
+		Favorite bool   `json:"favorite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.MediaId == "" || strings.Contains(req.MediaId, "..") || strings.Contains(req.MediaId, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	fav, ok := s.mediaSvc.(favoriteProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "favorite is not supported by the configured media service"})
+		return
+	}
+
+	var err error
+	if req.Favorite {
+		err = fav.AddFavorite(req.MediaId)
+	} else {
+		err = fav.RemoveFavorite(req.MediaId)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "media_id": req.MediaId, "favorite": req.Favorite})
+}
+
+// handleMediaFavorites 处理 GET /api/media/favorites，返回收藏的 mediaId 列表。
+func (s *Server) handleMediaFavorites(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	fav, ok := s.mediaSvc.(favoriteProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "favorite is not supported by the configured media service"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"favorites": fav.ListFavorites()})
+}
+
+// enrichMediaList 将 GetMediaListResponse 中每条媒体补充 favorite 字段，
+// 返回一个兼容原 JSON 结构但多了 favorite 键的 map。
+func enrichMediaList(resp *gen.GetMediaListResponse, fav favoriteProvider) map[string]any {
+	list := make([]map[string]any, 0, len(resp.MediaList))
+	for _, m := range resp.MediaList {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		var item map[string]any
+		if err := json.Unmarshal(raw, &item); err != nil {
+			continue
+		}
+		item["favorite"] = fav.IsFavorite(m.Id)
+		list = append(list, item)
+	}
+	return map[string]any{
+		"media_list":   list,
+		"total_count":  resp.TotalCount,
+		"page":         resp.Page,
+		"page_size":    resp.PageSize,
+	}
 }
 
 // ============ Helpers ============

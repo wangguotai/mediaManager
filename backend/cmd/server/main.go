@@ -42,8 +42,15 @@ func main() {
 		log.Fatalf("Failed to create cloud-images directory: %v", err)
 	}
 
+	favoritesPath := filepath.Join(dataDir, "favorites.json")
+	favStore, err := service.NewFavoriteStore(favoritesPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize favorite store: %v", err)
+	}
+
 	mediaService := service.NewMediaService(uploadsDir, thumbsDir)
 	mediaService.SetCloudSource(service.NewLocalCloudSource(cloudImagesDir))
+	mediaService.SetFavoriteStore(favStore)
 
 	// Start gRPC server
 	lis, err := net.Listen("tcp", grpcPort)

@@ -394,6 +394,7 @@ type MediaService struct {
 	uploadsDir  string
 	thumbsDir   string
 	cloudSource CloudImageSource
+	favStore    *FavoriteStore
 }
 
 func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
@@ -407,6 +408,46 @@ func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
 func (s *MediaService) SetCloudSource(src CloudImageSource) {
 	s.cloudSource = src
 }
+
+// SetFavoriteStore 注入收藏存储；为 nil 表示收藏功能禁用。
+func (s *MediaService) SetFavoriteStore(fs *FavoriteStore) {
+	s.favStore = fs
+}
+
+// IsFavorite 返回 mediaId 是否被收藏。favStore 未配置时返回 false。
+func (s *MediaService) IsFavorite(mediaId string) bool {
+	if s.favStore == nil {
+		return false
+	}
+	return s.favStore.IsFavorite(mediaId)
+}
+
+// ListFavorites 返回所有收藏的 mediaId 列表。favStore 未配置时返回空切片。
+func (s *MediaService) ListFavorites() []string {
+	if s.favStore == nil {
+		return []string{}
+	}
+	return s.favStore.ListFavorites()
+}
+
+// AddFavorite 收藏 mediaId。
+func (s *MediaService) AddFavorite(mediaId string) error {
+	if s.favStore == nil {
+		return fmt.Errorf("favorite store is not configured")
+	}
+	return s.favStore.AddFavorite(mediaId)
+}
+
+// RemoveFavorite 取消收藏 mediaId。
+func (s *MediaService) RemoveFavorite(mediaId string) error {
+	if s.favStore == nil {
+		return fmt.Errorf("favorite store is not configured")
+	}
+	return s.favStore.RemoveFavorite(mediaId)
+}
+
+// favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。
+const favoriteFilterKey = "favorite=true"
 
 const cloudSearchPrefix = "source=cloud"
 
@@ -502,9 +543,13 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 }
 
 func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRequest) (*gen.GetMediaListResponse, error) {
+	// 解析 searchQuery 中的 favorite=true 过滤标记，剩余部分作为关键字。
+	query, favOnly := parseFavoriteQuery(req.SearchQuery)
+
 	// 当 searchQuery 以 "source=cloud" 开头时，改用网盘图片源返回图片。
-	if strings.HasPrefix(req.SearchQuery, cloudSearchPrefix) {
-		return s.getCloudMediaList(req)
+	if strings.HasPrefix(query, cloudSearchPrefix) {
+		req.SearchQuery = query
+		return s.getCloudMediaList(req, favOnly)
 	}
 
 	// Scan uploads directory for media files
@@ -530,8 +575,9 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 		}
 
 		mediaType := s.detectMediaType(file.Name())
+		mediaId := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
 		metadata := &gen.MediaMetadata{
-			Id:        strings.TrimSuffix(file.Name(), filepath.Ext(file.Name())),
+			Id:        mediaId,
 			Filename:  file.Name(),
 			Type:      mediaType,
 			Size:      fileInfo.Size(),
@@ -548,7 +594,12 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 			continue
 		}
 
-		if req.SearchQuery != "" && !strings.Contains(strings.ToLower(metadata.Filename), strings.ToLower(req.SearchQuery)) {
+		if query != "" && !strings.Contains(strings.ToLower(metadata.Filename), strings.ToLower(query)) {
+			continue
+		}
+
+		// favorite=true 过滤：仅保留收藏的媒体。
+		if favOnly && !s.IsFavorite(mediaId) {
 			continue
 		}
 
@@ -585,7 +636,8 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 }
 
 // getCloudMediaList 通过注入的 CloudImageSource 获取网盘图片，支持附加的关键字过滤与分页。
-func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest) (*gen.GetMediaListResponse, error) {
+// favOnly 为 true 时仅返回收藏的媒体。
+func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly bool) (*gen.GetMediaListResponse, error) {
 	if s.cloudSource == nil {
 		return nil, fmt.Errorf("cloud source is not configured")
 	}
@@ -607,6 +659,11 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest) (*gen.Get
 		}
 
 		if remainingQuery != "" && !strings.Contains(strings.ToLower(meta.Filename), strings.ToLower(remainingQuery)) {
+			continue
+		}
+
+		// favorite=true 过滤：仅保留收藏的媒体。
+		if favOnly && !s.IsFavorite(meta.Id) {
 			continue
 		}
 
@@ -645,17 +702,42 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 	deletedCount := 0
 
 	for _, mediaID := range req.MediaIds {
-		// Find all files with this media ID (including different extensions)
-		files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*"))
-		if err != nil {
+		// 安全检查：防止路径穿越。
+		if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
 			continue
 		}
 
-		for _, file := range files {
-			err := os.Remove(file)
-			if err == nil {
-				deletedCount++
+		// 先在 uploads 目录查找并删除。
+		files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*"))
+		if err == nil {
+			for _, file := range files {
+				if err := os.Remove(file); err == nil {
+					deletedCount++
+				}
 			}
+		}
+
+		// 回退到网盘图片源目录（data/cloud-images），支持删除网盘文件。
+		if root := s.CloudImagesDir(); root != "" {
+			cloudFiles, err := filepath.Glob(filepath.Join(root, mediaID+".*"))
+			if err == nil {
+				for _, file := range cloudFiles {
+					if err := os.Remove(file); err == nil {
+						deletedCount++
+					}
+				}
+			}
+		}
+
+		// 删除关联的缩略图（best-effort，不计数）。
+		thumbs, _ := filepath.Glob(filepath.Join(s.thumbsDir, mediaID+"_*"))
+		for _, t := range thumbs {
+			_ = os.Remove(t)
+		}
+
+		// 取消收藏（best-effort）。
+		if s.favStore != nil {
+			_ = s.favStore.RemoveFavorite(mediaID)
 		}
 	}
 
@@ -1140,6 +1222,19 @@ func (s *MediaService) getMimeType(filename string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// parseFavoriteQuery 从 searchQuery 中提取 "favorite=true" 标记。
+// 返回去除该标记后的剩余查询字符串，以及是否启用了收藏过滤。
+func parseFavoriteQuery(query string) (remaining string, favOnly bool) {
+	if !strings.Contains(strings.ToLower(query), "favorite=true") {
+		return query, false
+	}
+	// 移除 "favorite=true"（大小写不敏感），剩余部分做 trim。
+	lowered := strings.ToLower(query)
+	idx := strings.Index(lowered, "favorite=true")
+	removed := query[:idx] + query[idx+len("favorite=true"):]
+	return strings.TrimSpace(removed), true
 }
 
 func getFileExtension(filename string) string {
