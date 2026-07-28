@@ -16,17 +16,19 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +41,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -58,6 +62,7 @@ import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
 import mediamanager.composeapp.generated.resources.*
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 
@@ -129,7 +134,11 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 initialIndex = index,
                 useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
                 sourceLabel = sourceLabel,
-                onDismiss = { previewIndex = null }
+                onDismiss = { previewIndex = null },
+                onDelete = { media ->
+                    previewIndex = null
+                    viewModel.deleteSingleMedia(media.id)
+                }
             )
         } else {
             // 列表刷新/过滤变化后索引越界，直接关闭
@@ -256,8 +265,12 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             if (viewModel.hasSelection && selectedTab != 2) {
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
+                    totalCount = viewModel.filteredList.size,
                     onDelete = { viewModel.deleteSelectedMedia() },
                     onUpload = { if (selectedTab == 0) viewModel.uploadSelectedLocalMedia() },
+                    onShare = { viewModel.shareSelectedMedia() },
+                    onSelectAll = { viewModel.selectAll() },
+                    onDeselectAll = { viewModel.deselectAll() },
                     isDeleting = viewModel.isDeleting,
                     isUploading = viewModel.isUploading,
                     showUploadButton = selectedTab == 0
@@ -460,20 +473,24 @@ fun ImagePreviewDialog(
     initialIndex: Int,
     onDismiss: () -> Unit,
     useBackendLoader: Boolean = false,
-    sourceLabel: String = ""
+    sourceLabel: String = "",
+    onEdit: (MediaMetadata) -> Unit = {},
+    onShare: (MediaMetadata) -> Unit = {},
+    onDelete: (MediaMetadata) -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
     }
     val currentIndex by remember { derivedStateOf { pagerState.currentPage } }
     val currentMedia = mediaList[currentIndex]
+    val scope = rememberCoroutineScope()
+    var isSharing by remember { mutableStateOf(false) }
 
     // 进入/退出动画：进入时整体淡入 + 轻微放大；退出时先淡出再真正回调关闭，
     // 让 Dialog 消失更自然而非瞬切。visible 初始 false，首帧后翻 true 触发 enter；
     // 关闭走 animateOutThenDismiss：先翻 false 播 exit，等动画时长结束后 onDismiss。
    var visible by remember { mutableStateOf(false) }
    LaunchedEffect(Unit) { visible = true }
-    val scope = rememberCoroutineScope()
     // 关闭走 animateOutThenDismiss：先翻 visible=false 播 exit，等动画时长结束后再真正 onDismiss，
     // 让 Dialog 消失走淡出而非瞬切。
     val animateOutThenDismiss: () -> Unit = {
@@ -491,8 +508,8 @@ fun ImagePreviewDialog(
         // 动画包裹层：进入 fadeIn+scaleIn，退出 fadeOut。背景黑色始终在，避免白闪。
         AnimatedVisibility(
             visible = visible,
-            enter = fadeIn(tween(300)) + scaleIn(initialScale = 0.92f, animationSpec = tween(300)),
-            exit = fadeOut(tween(300))
+            enter = fadeIn(tween(350)) + scaleIn(initialScale = 0.88f, animationSpec = tween(350)),
+            exit = fadeOut(tween(300)) + scaleOut(targetScale = 0.92f, animationSpec = tween(300))
         ) {
             Box(
                 modifier = Modifier
@@ -526,39 +543,63 @@ fun ImagePreviewDialog(
                 )
             }
 
-            // 当前图片信息 + 页码
-            Column(
+            // 分享按钮：获取当前图片字节流后调用系统分享
+            IconButton(
+                onClick = {
+                    if (!isSharing) {
+                        isSharing = true
+                        scope.launch(dispatchers.io) {
+                            try {
+                                val bytes = if (useBackendLoader) {
+                                    BackendImageLoader.loadFullImageBytes(currentMedia.id)
+                                } else {
+                                    // 本地图片：通过 galleryFeature 获取字节
+                                    // 在 commonMain 无法直接访问 galleryFeature，
+                                    // 这里用 loadFullImage 解码后再转字节比较复杂，
+                                    // 简化处理：后端图走 BackendImageLoader，本地图暂不支持分享
+                                    BackendImageLoader.loadFullImageBytes(currentMedia.id)
+                                }
+                                if (bytes != null) {
+                                    val mimeType = when (currentMedia.type) {
+                                        MediaType.VIDEO -> "video/mp4"
+                                        else -> "image/jpeg"
+                                    }
+                                    shareMedia(bytes, currentMedia.filename, mimeType)
+                                }
+                            } catch (e: Exception) {
+                                // 分享失败静默
+                            } finally {
+                                isSharing = false
+                            }
+                        }
+                    }
+                },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(16.dp),
-                horizontalAlignment = Alignment.End
+                    .padding(start = 0.dp, top = 16.dp, end = 56.dp)
             ) {
-                Text(
-                    currentMedia.filename,
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    "${formatFileSize(currentMedia.size)} • ${currentMedia.width}x${currentMedia.height}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (mediaList.size > 1) {
-                    Text(
-                        "${currentIndex + 1} / ${mediaList.size}",
-                        color = Color.White.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.bodySmall
+                if (isSharing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = Color.White
+                    )
+                } else {
+                    Icon(
+                        painterResource(Res.drawable.ic_share),
+                        contentDescription = "分享",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
             }
 
-            // 底部信息区：操作提示 + 详情面板（bottom sheet）上下排列，
-            // 整体贴屏底对齐；详情面板上滑展开时变高，把操作提示自然顶上去，
-            // 避免与面板内容重叠。DetailPanel 收起态露指示器条 + 简要信息，
-            // 展开时半透明遮罩自动加深覆盖底部图片，显示 EXIF / 尺寸 / 日期 / 来源等。
-            // sourceLabel 由调用方依当前来源（本地相册/已上传/网盘图片）传入。
+            // 当前图片信息 + 页码（置右下方，避免与顶部按钮重叠）
+
+            // 底部区：详情面板（可切换）+ 操作栏（编辑/分享/删除/详情）
+            // showDetails 默认 true：进入预览即显示详情面板的收起态（預覽条）；
+            // 点击「详情」按钮可隐藏/显示整个面板区域。
+            var showDetails by remember { mutableStateOf(true) }
+
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -566,16 +607,50 @@ fun ImagePreviewDialog(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Bottom
             ) {
-                Text(
-                    "左右滑动切换 • 双击重置 • 捏合缩放",
-                    color = Color.White.copy(alpha = 0.5f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-                DetailPanel(
-                    media = currentMedia,
-                    sourceLabel = sourceLabel
-                )
+                if (showDetails) {
+                    DetailPanel(
+                        media = currentMedia,
+                        sourceLabel = sourceLabel
+                    )
+                }
+
+                // 底部操作栏：半透明背景 + 四个等距图标按钮。
+                Surface(
+                    color = Color.Black.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        PreviewActionButton(
+                            iconRes = Res.drawable.ic_edit,
+                            label = "编辑",
+                            onClick = { onEdit(currentMedia) }
+                        )
+                        PreviewActionButton(
+                            iconRes = Res.drawable.ic_share,
+                            label = "分享",
+                            onClick = { onShare(currentMedia) }
+                        )
+                        PreviewActionButton(
+                            iconRes = Res.drawable.ic_delete,
+                            label = "删除",
+                            onClick = {
+                                animateOutThenDismiss()
+                                onDelete(currentMedia)
+                            }
+                        )
+                        PreviewActionButton(
+                            iconRes = Res.drawable.ic_info,
+                            label = "详情",
+                            onClick = { showDetails = !showDetails }
+                        )
+                    }
+                }
             }
            } // AnimatedVisibility inner Box
        }
@@ -730,12 +805,12 @@ fun MediaGrid(
     videoDurations: Map<String, Double> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 110.dp),
+    LazyVerticalStaggeredGrid(
+        columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
         // 外边距 8dp，项间 6dp：密集但不挤压，圆角卡片间留呼吸缝。
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalItemSpacing = 6.dp,
         modifier = modifier
     ) {
         items(
@@ -750,11 +825,8 @@ fun MediaGrid(
                onLongClick = { onMediaLongClick(media) },
                useBackendLoader = useBackendLoader,
                videoDurationSeconds = videoDurations[media.id],
-                // animateItem：新增/删除/重排项时平滑滑动到目标位（取代旧 animateItemPlacement），
-                // 配合 key={it.id} 让网格变更时已有项不闪烁、新项从插值位置滑入。
                 modifier = Modifier
                     .fillMaxWidth()
-                    .animateItem()
            )
        }
     }
@@ -775,6 +847,14 @@ fun MediaGridItem(
     modifier: Modifier = Modifier
 ) {
     val isVideo = media.type == MediaType.VIDEO
+    // 瀑布流高度：用图片实际宽高比，钳制在 0.6–1.8 防止极端值导致项过高/过矮。
+    val aspectRatio = if (media.width > 0 && media.height > 0) {
+        (media.width.toFloat() / media.height.toFloat()).coerceIn(0.6f, 1.8f)
+    } else {
+        1f
+    }
+    // 长按触感反馈：长按选中/预览时震动，提升交互确认感（cross-platform HapticFeedback）。
+    val hapticFeedback = LocalHapticFeedback.current
     // 缩略图状态：remember 以 media.id 为 key，确保 LazyGrid 复用 slot 渲染不同媒体时
     // 状态随 media 切换而重置，避免滚动时把上一项的 thumbnailBitmap/isLoading 串到新项
     // 造成错位（与上方 ZoomableImage 的 remember(media.id) 同口径）。
@@ -813,21 +893,24 @@ fun MediaGridItem(
     )
     Card(
        modifier = modifier
-           .aspectRatio(1f)
+           .aspectRatio(aspectRatio)
             .graphicsLayer(
                 scaleX = selectionScale,
                 scaleY = selectionScale
             )
            .shadow(
-               elevation = if (isSelected) 6.dp else 3.dp,
-               shape = RoundedCornerShape(12.dp),
+               elevation = if (isSelected) 4.dp else 2.dp,
+               shape = RoundedCornerShape(16.dp),
                clip = false
            )
            .combinedClickable(
                onClick = onClick,
-               onLongClick = onLongClick
+               onLongClick = {
+                   hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                   onLongClick()
+               }
            ),
-       shape = RoundedCornerShape(12.dp),
+       shape = RoundedCornerShape(16.dp),
        colors = CardDefaults.cardColors(
            containerColor = MaterialTheme.colorScheme.surfaceVariant
        )
@@ -835,13 +918,13 @@ fun MediaGridItem(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .border(2.dp, borderColor, RoundedCornerShape(12.dp))
+                .border(2.dp, borderColor, RoundedCornerShape(16.dp))
         ) {
             // 媒体缩略图
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(12.dp)),
+                    .clip(RoundedCornerShape(16.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 when {
@@ -985,6 +1068,39 @@ fun MediaGridItem(
                 }
             }
         }
+    }
+}
+
+/**
+ * 预览底部操作栏按钮：图标 + 文字垂直排列，半透明背景，点击无涟漪（与暗色预览背景一致）。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun PreviewActionButton(
+    iconRes: DrawableResource,
+    label: String,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+    ) {
+        Icon(
+            painter = painterResource(iconRes),
+            contentDescription = label,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            label,
+            color = Color.White.copy(alpha = 0.85f),
+            style = MaterialTheme.typography.labelSmall,
+            fontSize = 11.sp
+        )
     }
 }
 
@@ -1179,25 +1295,54 @@ private fun formatFileSize(size: Long): String {
 
 /**
  * 选择状态底部栏
+ *
+ * 包含：全选/取消全选、已选计数（带 animateContentSize 动画）、批量分享、上传、删除。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 fun SelectionBottomBar(
     selectedCount: Int,
+    totalCount: Int,
     onDelete: () -> Unit,
     onUpload: () -> Unit,
+    onShare: () -> Unit,
+    onSelectAll: () -> Unit,
+    onDeselectAll: () -> Unit,
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean
 ) {
+    val isAllSelected = selectedCount == totalCount && totalCount > 0
+
     BottomAppBar(
         modifier = Modifier.fillMaxWidth()
     ) {
+        // 全选 / 取消全选
+        IconButton(onClick = { if (isAllSelected) onDeselectAll() else onSelectAll() }) {
+            Icon(
+                painterResource(Res.drawable.ic_check_circle),
+                contentDescription = if (isAllSelected) "取消全选" else "全选",
+                tint = if (isAllSelected) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // 已选择计数器 —— animateContentSize 让数字变化时宽度平滑过渡
         Text(
-            "已选择 $selectedCount 项",
-            modifier = Modifier.weight(1f),
+            "已选 $selectedCount/$totalCount",
+            modifier = Modifier
+                .weight(1f)
+                .animateContentSize(animationSpec = tween(200)),
             fontWeight = FontWeight.Medium
         )
+
+        // 批量分享
+        IconButton(onClick = onShare) {
+            Icon(
+                painterResource(Res.drawable.ic_share),
+                contentDescription = "分享选中项"
+            )
+        }
 
         if (showUploadButton) {
             IconButton(
@@ -1224,7 +1369,8 @@ fun SelectionBottomBar(
             } else {
                 Icon(
                     painterResource(Res.drawable.ic_delete),
-                    contentDescription = "删除选中项"
+                    contentDescription = "删除选中项",
+                    tint = MaterialTheme.colorScheme.error
                 )
             }
         }

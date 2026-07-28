@@ -100,4 +100,21 @@ object BackendImageLoader {
             null
         }
     }
+
+    /**
+     * 加载原图字节流（不解码）。走 `GET /api/media/stream/{id}`。
+     *
+     * 供分享功能使用：需要原始字节流传给系统分享面板，而非解码后的 ImageBitmap。
+     *
+     * @param mediaId 后端媒体 id
+     * @return 原始字节流；失败返回 null
+     */
+    suspend fun loadFullImageBytes(mediaId: String): ByteArray? {
+        return try {
+            MediaService.getMediaStream(mediaId)
+        } catch (e: Exception) {
+            logger.error(TAG, "loadFullImageBytes failed for $mediaId: ${e.message}")
+            null
+        }
+    }
 }

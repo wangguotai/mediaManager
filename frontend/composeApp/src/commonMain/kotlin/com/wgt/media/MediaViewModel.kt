@@ -366,6 +366,92 @@ class MediaViewModel {
     }
 
     /**
+     * 全选当前 [filteredList] 中的所有媒体。
+     *
+     * 选择范围与当前可见列表一致（搜索/筛选后），避免选中不可见项造成困惑。
+     * 若已全选则不重复操作。
+     */
+    fun selectAll() {
+        val allIds = filteredList.map { it.id }
+        if (selectedMediaIds.toSet() != allIds.toSet()) {
+            selectedMediaIds.clear()
+            selectedMediaIds.addAll(allIds)
+        }
+    }
+
+    /**
+     * 取消全选（清空选中列表）。
+     */
+    fun deselectAll() {
+        selectedMediaIds.clear()
+    }
+
+    /**
+     * 批量分享选中的媒体文件。
+     *
+     * 遍历选中项，依来源获取字节流（本地走 galleryFeature.getMediaData，
+     * 后端走 BackendImageLoader 或 MediaService stream），再调 [shareMedia]。
+     * 当前实现：逐个分享（系统分享面板每次处理一个文件），
+     * 多选时依次弹出。后续可扩展为多文件分享（Android 支持 ACTION_SEND_MULTIPLE）。
+     *
+     * @param onShareStart 每个文件开始分享时的回调（UI 可显示提示）
+     * @param onComplete 全部处理完毕的回调
+     */
+    fun shareSelectedMedia(
+        onShareStart: (filename: String) -> Unit = {},
+        onComplete: () -> Unit = {}
+    ) {
+        if (selectedMediaIds.isEmpty()) return
+
+        viewModelScope.launch {
+            for (mediaId in selectedMediaIds) {
+                val media = mediaList.find { it.id == mediaId } ?: continue
+                try {
+                    val bytes = when (currentSource) {
+                        MediaSource.LOCAL -> galleryFeature.getMediaData(mediaId)
+                        MediaSource.BACKEND -> {
+                            // 后端图片：通过 BackendImageLoader 或直接 stream 获取字节
+                            BackendImageLoader.loadFullImageBytes(media.id)
+                        }
+                    }
+                    if (bytes != null) {
+                        onShareStart(media.filename)
+                        val mimeType = when (media.type) {
+                            MediaType.VIDEO -> "video/mp4"
+                            MediaType.IMAGE, MediaType.LIVE_PHOTO -> "image/jpeg"
+                        }
+                        shareMedia(bytes, media.filename, mimeType)
+                    }
+                } catch (e: Exception) {
+                    errorMessage = "分享失败: ${e.message}"
+                }
+            }
+            onComplete()
+        }
+    }
+
+    /**
+     * 删除单个媒体（从预览界面调用）。
+     *
+     * 与 [deleteSelectedMedia] 不同，此方法不依赖选中状态：
+     * 直接以传入的 mediaId 调 [MediaService.deleteMedia]，
+     * 成功后从 [mediaList] 移除该条目并清理可能的选中态。
+     */
+    fun deleteSingleMedia(mediaId: String) {
+        viewModelScope.launch {
+            try {
+                val success = MediaService.deleteMedia(listOf(mediaId))
+                if (success) {
+                    mediaList = mediaList.filter { it.id != mediaId }
+                    selectedMediaIds.remove(mediaId)
+                }
+            } catch (e: Exception) {
+                errorMessage = "删除媒体失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
      * 批量删除选中的媒体
      */
     fun deleteSelectedMedia() {

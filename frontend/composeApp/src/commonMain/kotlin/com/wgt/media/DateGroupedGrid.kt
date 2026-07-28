@@ -2,11 +2,11 @@ package com.wgt.media
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -34,9 +34,10 @@ import media.MediaMetadata
  * - 每个日期分组由两部分组成，均为同一 LazyVerticalGrid 的 item：
  *     1. [stickyHeader]：占满整行（[GridItemSpan.maxLineSpan]），滚动时吸顶，
  *        文案来自 [DateGroup.title]（"今天"/"昨天"/"YYYY年MM月DD日"）；
- *     2. 组内媒体项：以 [MediaGridItem] 平铺，自动按列自适应换行，组内仍是网格。
+ *     2. 组内媒体项：以 [MediaGridItem] 平铺，瀑布流列自适应换行。
  *
- * stickyHeader 在 `androidx.compose.foundation.lazy.grid` 包中已稳定（本项目 Compose 1.10）。
+ * LazyVerticalStaggeredGrid 不支持 stickyHeader，header 改用
+ * item(span = StaggeredGridItemSpan.FullLine) 内联展示。
  *
  * Header 进入时有淡入 + 轻微下移动画（见 [DateGroupHeader]），呼吸感更自然。
  *
@@ -48,7 +49,6 @@ import media.MediaMetadata
  * @param useBackendLoader 缩略图是否走后端加载器（与 [MediaGrid] 同义）
  * @param videoDurations 视频时长缓存，透传给 [MediaGridItem] 用于时长徽标
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DateGroupedGrid(
     groups: List<DateGroup>,
@@ -59,21 +59,24 @@ fun DateGroupedGrid(
     videoDurations: Map<String, Double> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 110.dp),
+    LazyVerticalStaggeredGrid(
+        columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
         // 与 MediaGrid 保持一致的外边距与间距，分组视觉与原网格无缝衔接。
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalItemSpacing = 6.dp,
         modifier = modifier
     ) {
         groups.forEach { group ->
-            // 吸顶标题：占满整行，滚动时浮于内容之上。key 含组内首项 id 以保证各分组唯一。
-            stickyHeader(key = "header_${group.title}_${group.items.firstOrNull()?.id ?: ""}") {
+            // 日期标题：占满整行（FullLine），不支持吸顶但内联展示。
+            item(
+                key = "header_${group.title}_${group.items.firstOrNull()?.id ?: ""}",
+                span = StaggeredGridItemSpan.FullLine
+            ) {
                 DateGroupHeader(title = group.title)
             }
 
-            // 组内媒体项：每个 item 自适应占一格，GridCells.Adaptive 自动换行成网格。
+            // 组内媒体项：瀑布流布局，每个 item 按实际宽高比自适应高度。
             items(
                 items = group.items,
                 key = { it.id },
@@ -88,7 +91,6 @@ fun DateGroupedGrid(
                     videoDurationSeconds = videoDurations[media.id],
                     modifier = Modifier
                         .fillMaxWidth()
-                        .animateItem()
                 )
             }
         }

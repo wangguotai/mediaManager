@@ -1,0 +1,157 @@
+# Night Sprint — media-manager 夜间迭代
+# 9 个任务, 4 层 DAG
+# 双端验证: Android assembleDebug + iOS compileKotlinIosArm64
+# 子任务执行: sessions_spawn
+
+tasks:
+  # ===== Phase 1: 稳定性补丁 (Layer 0, 并行) =====
+
+  - id: ns-01-backend-address
+    product: openclaw-subagent
+    prompt: |
+      修复后端地址真实生效 + 错误处理。
+
+      1. 验证 frontend/feature-media/src/commonMain/ 中 MediaService.kt 是否从 SettingsStorage 读取 backendUrl
+      2. 若未读取: 让 MediaService 的 BASE_URL 改为动态读取 SettingsState.backendUrl
+      3. VideoPlayer.kt 的 VIDEO_BACKEND_BASE_URL 也从 SettingsState 读取
+      4. MediaService.kt 中 deleteMedia/uploadMedia 异常分支返回 false 而非 true
+      5. 验证设置页改地址后刷新列表能用新地址
+    files: [frontend/]
+    depends_on: []
+    timeout: 300
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  - id: ns-02-search-highlight
+    product: openclaw-subagent
+    prompt: |
+      搜索高亮 + OpenClaw 入口归位。
+
+      1. MediaListScreen.kt 的 MediaGridItem：搜索匹配的文件名用 SpanStyle 高亮背景色
+      2. OpenClaw 入口从 MediaListScreen 的 TopAppBar 移到 SettingsScreen
+      3. TopAppBar actions 改为：搜索图标、刷新、设置齿轮
+      4. 高亮逻辑：用 searchQuery 匹配 filename，匹配部分加 background color
+    files: [frontend/composeApp/src/]
+    depends_on: []
+    timeout: 300
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  # ===== Phase 2: 核心体验 (Layer 1, 并行) =====
+
+  - id: ns-03-grid-preview-polish
+    product: openclaw-subagent
+    prompt: |
+      瀑布流网格 + 预览操作栏。
+
+      1. MediaListScreen.kt: LazyVerticalGrid → LazyVerticalStaggeredGrid，项高度自适应（Google Photos 风格）
+      2. 网格项圆角 16dp + 柔和阴影
+      3. ImagePreviewDialog 底部加操作栏：编辑/分享/删除/详情 四个图标按钮
+      4. 预览进入/退出加 scale+fade 动画过渡
+      5. 网格项长按加 HapticFeedback（expect/actual: Android用HapticFeedbackConstants, iOS用UIImpactFeedbackGenerator）
+    files: [frontend/composeApp/src/]
+    depends_on: [ns-01-backend-address, ns-02-search-highlight]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  - id: ns-04-image-editor
+    product: openclaw-subagent
+    prompt: |
+      图片编辑完善 + 滤镜。
+
+      1. ImageEditor.kt: 裁剪框可拖拽调整大小（CropOverlay.kt 已有基础）
+      2. 旋转：90°步进按钮 + 自由角度滑块（-180°到180°）
+      3. 滤镜：用 Compose ColorFilter/ColorMatrix 实现：原图/黑白/暖色/冷色/复古 5种
+      4. 保存：调 saveImageBitmapToGallery 落盘 + 可选上传后端
+      5. 编辑界面 Material3 风格，底部工具栏切换：裁剪/旋转/滤镜
+    files: [frontend/composeApp/src/commonMain/kotlin/com/wgt/media/]
+    depends_on: [ns-01-backend-address, ns-02-search-highlight]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  - id: ns-05-batch-favorite
+    product: openclaw-subagent
+    prompt: |
+      批量操作增强 + 收藏功能。
+
+      1. MediaListScreen.kt 选择模式底栏加：全选/反选 按钮
+      2. 批量分享：选中多张后调 ShareUtils 批量分享
+      3. 收藏：网格项右上角星标按钮，点击切换收藏状态
+      4. 收藏持久化：用 SettingsStorage 存收藏的 mediaId 列表
+      5. FilterChip 加「收藏」选项，筛选只看收藏的媒体
+      6. 选择计数器加 animateContentSize 动画
+    files: [frontend/composeApp/src/]
+    depends_on: [ns-01-backend-address, ns-02-search-highlight]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"
+
+  # ===== Phase 3: 后端增强 (Layer 2, 并行) =====
+
+  - id: ns-06-backend-favorite-api
+    product: openclaw-subagent
+    prompt: |
+      后端收藏 API + 元数据完善。
+
+      1. MediaMetadata 加 favorite 字段（可先在 REST 层实现，不改 proto）
+      2. 新增 REST: POST /api/media/favorite {media_id, favorite: true}
+      3. 后端用 JSON 文件 data/favorites.json 持久化收藏列表
+      4. GET /api/media/list 支持 ?favorite=true 筛选
+      5. DeleteMedia 支持 cloud 目录文件删除
+      6. 上传 REST 端点补写元数据
+    files: [backend/]
+    depends_on: [ns-05-batch-favorite]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  - id: ns-07-backend-perf
+    product: openclaw-subagent
+    prompt: |
+      后端性能 + 缓存优化。
+
+      1. GetMediaList 缓存：扫描结果缓存 30s，避免每次请求全扫描目录
+      2. 视频时长预取：ffprobe 结果缓存到 metadata 文件
+      3. 缩略图缓存：已有文件缓存，加内存 LRU 避免重复磁盘读
+      4. /healthz 返回：media_count, cache_hit_rate, uptime
+      5. GetCloudImages 排序优化：避免每次调用都 sort
+    files: [backend/]
+    depends_on: [ns-06-backend-favorite-api]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  # ===== Phase 4: QA + 修复 (Layer 3) =====
+
+  - id: ns-08-qa-audit
+    product: openclaw-subagent
+    prompt: |
+      全量 QA 验收。
+
+      1. 双端编译验证
+      2. 逐功能对照 docs/PRD-v2.md 验证
+      3. 检查线程安全/内存/缓存
+      4. 检查跨端兼容性（commonMain 无 java.*/android.*）
+      5. 输出报告到 docs/NS-QA-REPORT.md
+    files: [docs/]
+    depends_on: [ns-03-grid-preview-polish, ns-04-image-editor, ns-05-batch-favorite, ns-06-backend-favorite-api, ns-07-backend-perf]
+    timeout: 600
+    verify_commands: []
+
+  - id: ns-09-bugfix-docs
+    product: openclaw-subagent
+    prompt: |
+      Bug 修复 + 文档收尾。
+
+      1. 读取 docs/NS-QA-REPORT.md，修复所有 P0/P1
+      2. 更新 .agents/interface-contract.md
+      3. 更新 README.md
+      4. 最终双端构建验证
+    files: []
+    depends_on: [ns-08-qa-audit]
+    timeout: 600
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+      - "cd /Users/wgt/projects/media-manager/frontend && bash gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64 2>&1 | tail -5"

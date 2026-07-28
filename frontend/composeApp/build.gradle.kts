@@ -33,6 +33,7 @@ kotlin {
 
     sourceSets {
         androidMain.dependencies {
+            implementation(libs.androidx.core)
 //            implementation(project(":rn-plugin:rn-android"))
         }
         commonMain.dependencies {
