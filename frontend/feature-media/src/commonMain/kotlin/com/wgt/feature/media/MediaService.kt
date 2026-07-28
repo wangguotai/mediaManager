@@ -254,6 +254,107 @@ object MediaService {
         }
     }
 
+    // ---- 相册 API ----
+
+    /**
+     * 相册数据模型（前端用，commonMain 安全）。
+     */
+    data class Album(
+        val id: String,
+        val name: String,
+        val coverMediaId: String? = null,
+        val mediaCount: Int = 0
+    )
+
+    /**
+     * 创建相册。
+     *
+     * POST /api/media/album  {"name":"xxx"}
+     * 后端返回 {"id":"...","name":"..."}。
+     */
+    suspend fun createAlbum(name: String): Album? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("name", name) })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                Album(
+                    id = obj["id"]?.jsonPrimitive?.content ?: "",
+                    name = obj["name"]?.jsonPrimitive?.content ?: name
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "createAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 获取相册列表。
+     *
+     * GET /api/media/albums → 后端返回 [{"id","name","cover_media_id","media_count"}, ...]
+     */
+    suspend fun getAlbums(): List<Album> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/albums")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val arr = Json.parseToJsonElement(body).jsonArray
+                arr.map { item ->
+                    val o = item.jsonObject
+                    Album(
+                        id = o["id"]?.jsonPrimitive?.content ?: "",
+                        name = o["name"]?.jsonPrimitive?.content ?: "",
+                        coverMediaId = o["cover_media_id"]?.let { it.jsonPrimitive.content },
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else emptyList()
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbums FAILED: ${e::class.simpleName} ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * 将媒体加入相册。
+     *
+     * POST /api/media/album/add {"album_id":"x","media_id":"y"}
+     */
+    suspend fun addMediaToAlbum(albumId: String, mediaId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/add") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_id", mediaId)
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "addMediaToAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 删除相册。
+     *
+     * DELETE /api/media/album/{id}
+     */
+    suspend fun deleteAlbum(albumId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.delete("${backendBaseUrl()}/api/media/album/$albumId")
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "deleteAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
     /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *

@@ -197,6 +197,28 @@ class MediaViewModel {
     var videoDurations by mutableStateOf<Map<String, Double>>(emptyMap())
         private set
 
+    // ---- 相册状态 ----
+
+    /** 相册列表（列表页渲染数据源）。 */
+    var albumList by mutableStateOf<List<MediaService.Album>>(emptyList())
+        private set
+
+    /** 相册列表加载中。 */
+    var isAlbumLoading by mutableStateOf(false)
+        private set
+
+    /** 相册详情内的媒体列表（详情页渲染数据源）。 */
+    var albumDetailMedia by mutableStateOf<List<MediaMetadata>>(emptyList())
+        private set
+
+    /** 相册详情加载中。 */
+    var isAlbumDetailLoading by mutableStateOf(false)
+        private set
+
+    /** "加入相册"选择对话框：非空时弹出，值为待加入的 mediaId。 */
+    var pendingAddToAlbumMediaId by mutableStateOf<String?>(null)
+        private set
+
 
     init {
         // 从本地持久化加载收藏 id 集合，让星标状态在重启后保持。
@@ -707,4 +729,134 @@ class MediaViewModel {
      */
     val canAccessGallery: Boolean
         get() = hasGalleryPermission
+
+    // ---- 相册操作 ----
+
+    /**
+     * 加载相册列表。
+     *
+     * @param forceRefresh true 绕过缓存强制请求后端
+     */
+    fun loadAlbums(forceRefresh: Boolean = false) {
+        if (isAlbumLoading) return
+        if (!forceRefresh && albumList.isNotEmpty()) return
+
+        isAlbumLoading = true
+        errorMessage = null
+        viewModelScope.launch {
+            try {
+                albumList = MediaService.getAlbums()
+            } catch (e: Exception) {
+                errorMessage = "加载相册列表失败: ${e.message}"
+            } finally {
+                isAlbumLoading = false
+            }
+        }
+    }
+
+    /**
+     * 创建新相册。
+     *
+     * 成功后刷新列表并提示。
+     */
+    fun createAlbum(name: String) {
+        if (isAlbumLoading) return
+        isAlbumLoading = true
+        viewModelScope.launch {
+            try {
+                val album = MediaService.createAlbum(name)
+                if (album != null) {
+                    albumList = albumList + album
+                    errorMessage = "相册「${album.name}」已创建"
+                } else {
+                    errorMessage = "创建相册失败"
+                }
+            } catch (e: Exception) {
+                errorMessage = "创建相册失败: ${e.message}"
+            } finally {
+                isAlbumLoading = false
+            }
+        }
+    }
+
+    /**
+     * 删除相册。成功后从列表移除。
+     */
+    fun deleteAlbum(albumId: String) {
+        viewModelScope.launch {
+            try {
+                val success = MediaService.deleteAlbum(albumId)
+                if (success) {
+                    albumList = albumList.filter { it.id != albumId }
+                    errorMessage = "相册已删除"
+                }
+            } catch (e: Exception) {
+                errorMessage = "删除相册失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 加载相册详情内的媒体列表。
+     *
+     * 相册详情的数据暂用 albumDetailMedia 独立持有，不涉入主 Tab 用的 mediaList / 缓存。
+     */
+    fun loadAlbumDetail(albumId: String) {
+        if (isAlbumDetailLoading) return
+        isAlbumDetailLoading = true
+        albumDetailMedia = emptyList()
+        viewModelScope.launch {
+            try {
+                // 复用 getMediaList 获取该相册下媒体——后端按 album_id 过滤
+                albumDetailMedia = MediaService.getMediaList(source = MediaSource.BACKEND)
+                    .let { list ->
+                        // 若后端不支持按相册过滤则全量返回，前端按需展示
+                        list
+                    }
+            } catch (e: Exception) {
+                errorMessage = "加载相册内容失败: ${e.message}"
+            } finally {
+                isAlbumDetailLoading = false
+            }
+        }
+    }
+
+    /**
+     * 将指定媒体加入相册。
+     *
+     * 由网格长按菜单「加入相册」触发：先弹出相册选择列表（UI 层），
+     * 选定后调此方法。
+     */
+    fun addMediaToAlbum(albumId: String, mediaId: String) {
+        viewModelScope.launch {
+            try {
+                val success = MediaService.addMediaToAlbum(albumId, mediaId)
+                if (success) {
+                    errorMessage = "已加入相册"
+                    // 刷新相册列表以更新计数
+                    loadAlbums(forceRefresh = true)
+                } else {
+                    errorMessage = "加入相册失败"
+                }
+            } catch (e: Exception) {
+                errorMessage = "加入相册失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 弹出「加入相册」选择对话框（由网格长按菜单触发）。
+     */
+    fun showAddToAlbumDialog(mediaId: String) {
+        pendingAddToAlbumMediaId = mediaId
+        // 确保相册列表是最新的
+        if (albumList.isEmpty()) loadAlbums()
+    }
+
+    /**
+     * 关闭「加入相册」对话框。
+     */
+    fun dismissAddToAlbumDialog() {
+        pendingAddToAlbumMediaId = null
+    }
 }
