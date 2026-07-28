@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"media-manager/backend/gen"
+	"media-manager/backend/internal/service"
 )
 
 // OpenClawConfig describes how to reach the local OpenClaw gateway.
@@ -73,6 +74,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/upload", s.handleMediaUpload)
 	s.mux.HandleFunc("/api/media/metadata/", s.handleMediaMetadata)
 
+	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
+	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
+
 	// Health
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -101,11 +105,15 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	searchQuery := ""
 	if v := r.URL.Query().Get("page"); v != "" {
 		pi, _ := parseIntSafe(v)
-		if pi > 0 { page = int32(pi) }
+		if pi > 0 {
+			page = int32(pi)
+		}
 	}
 	if v := r.URL.Query().Get("page_size"); v != "" {
 		ps, _ := parseIntSafe(v)
-		if ps > 0 { pageSize = int32(ps) }
+		if ps > 0 {
+			pageSize = int32(ps)
+		}
 	}
 	if v := r.URL.Query().Get("type"); v != "" {
 		filterType = parseMediaType(v)
@@ -150,7 +158,79 @@ func (s *Server) handleMediaStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 显式设置 Content-Type：http.ServeFile 默认靠字节嗅探，对多数视频容器会得到
+	// application/octet-stream，导致浏览器无法内联播放。这里按扩展名前置正确的 video/* 或 image/*。
+	// ServeFile 不会覆盖已设置的 Content-Type，故 Range 分片播放不受影响。
+	if ct := videoMimeType(files[0]); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
 	http.ServeFile(w, r, files[0])
+}
+
+// handleMediaVideoInfo 用 ffprobe 返回视频时长与分辨率。
+// 仅 *service.MediaService 实现 GetVideoInfo（未进 proto），gateway 通过 service.VideoInfoProvider
+// 能力接口断言调用；不实现的 service 返回 501。
+func (s *Server) handleMediaVideoInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/video-info/")
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	provider, ok := s.mediaSvc.(videoInfoProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "video info is not supported by the configured media service"})
+		return
+	}
+	// ctx 超时限制 ffprobe，避免大文件/损坏文件挂起连接。
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	resp, err := provider.GetVideoInfo(ctx, &service.VideoInfoRequest{MediaId: mediaID})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// videoInfoProvider 是 service.VideoInfoProvider 的本地别名，gateway 借此对 mediaSvc 做能力
+// 断言并按需调用 GetVideoInfo（该方法未进 proto/未在 gen.MediaServiceServer 中声明）。
+type videoInfoProvider interface {
+	GetVideoInfo(ctx context.Context, req *service.VideoInfoRequest) (*service.VideoInfoResponse, error)
+}
+
+// videoMimeType 按小写扩展名返回视频/图片 MIME；未知扩展名回退 octet-stream。
+// 用于 handleMediaStream 在 ServeFile 前显式设置 Content-Type，确保浏览器以正确类型播放视频
+// （http.ServeFile 默认靠字节嗅探，对多数视频容器会得到 octet-stream）。
+func videoMimeType(filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".webm":
+		return "video/webm"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleMediaThumbnail(w http.ResponseWriter, r *http.Request) {

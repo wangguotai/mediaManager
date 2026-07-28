@@ -19,6 +19,14 @@ var cloudImageExts = map[string]bool{
 	".bmp":  true,
 }
 
+// cloudVideoExts 列出网盘源支持的视频扩展名（小写，含点），单独成表便于按扩展名判定类型。
+var cloudVideoExts = map[string]bool{
+	".mp4": true,
+	".mov": true,
+	".avi": true,
+	".mkv": true,
+}
+
 // CloudImageSource 抽象网盘图片源，可由本地目录扫描、远端 API 等多种实现提供图片元数据。
 type CloudImageSource interface {
 	// GetCloudImages 返回网盘图片源中的图片元数据列表。
@@ -60,7 +68,7 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 		}
 
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if !cloudImageExts[ext] {
+		if !cloudSupportedExts[ext] {
 			continue
 		}
 
@@ -72,7 +80,7 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 		list = append(list, &gen.MediaMetadata{
 			Id:        strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
 			Filename:  entry.Name(),
-			Type:      gen.MediaType_IMAGE,
+			Type:      cloudMediaType(ext),
 			Size:      info.Size(),
 			CreatedAt: info.ModTime().Unix(),
 			UpdatedAt: info.ModTime().Unix(),
@@ -99,7 +107,37 @@ func cloudImageMimeType(ext string) string {
 		return "image/webp"
 	case ".bmp":
 		return "image/bmp"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// cloudMediaType 根据小写扩展名返回 MediaType；视频扩展名返回 VIDEO，其余回退 IMAGE。
+func cloudMediaType(ext string) gen.MediaType {
+	if cloudVideoExts[ext] {
+		return gen.MediaType_VIDEO
+	}
+	return gen.MediaType_IMAGE
+}
+
+// cloudSupportedExts 汇总图片与视频扩展名，作为网盘源扫描时的按扩展名收录判定集合。
+var cloudSupportedExts = mergeExts(cloudImageExts, cloudVideoExts)
+
+// mergeExts 合并多个扩展名集合；返回的 map 不与入参共享底层状态。
+func mergeExts(maps ...map[string]bool) map[string]bool {
+	out := make(map[string]bool)
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif" // register decoder
@@ -10,8 +11,10 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -236,7 +239,8 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest) (*gen.Get
 
 	var mediaList []*gen.MediaMetadata
 	for _, meta := range allImages {
-		// 网盘源仅返回图片，已隐含 image 过滤；这里仍尊重非图片过滤的拒绝语义。
+		// 网盘源同时返回图片与视频；下方过滤沿用与 uploads 一致的 IMAGE 哨兵语义
+		// （FilterType 未设或为 IMAGE 时放行全部类型；显式 VIDEO 时只返回视频）。
 		if req.FilterType != gen.MediaType_IMAGE && req.FilterType != meta.Type {
 			continue
 		}
@@ -424,8 +428,15 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 		return nil, fmt.Errorf("media not found: %s", req.MediaId)
 	}
 
-	if s.detectMediaType(path) != gen.MediaType_IMAGE {
-		return nil, fmt.Errorf("thumbnails are only supported for images")
+	mediaType := s.detectMediaType(path)
+
+	// 视频缩略图：用 ffmpeg 抽取第 1s 的第一帧并缩放，缓存为 jpg。
+	if mediaType == gen.MediaType_VIDEO {
+		return s.getVideoThumbnail(ctx, req.MediaId, path, req.Size)
+	}
+
+	if mediaType != gen.MediaType_IMAGE {
+		return nil, fmt.Errorf("thumbnails are only supported for images and videos")
 	}
 
 	longEdge, ok := thumbnailLongEdge[req.Size]
@@ -480,6 +491,160 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 		Width:    int32(thumb.Bounds().Dx()),
 		Height:   int32(thumb.Bounds().Dy()),
 	}, nil
+}
+
+// getVideoThumbnail 用 ffmpeg 从视频第 1s 抽取一帧，按 longEdge 缩放后缓存为 jpg。
+// 缩略图文件名固定为 {mediaID}_{longEdge}.jpg，命中缓存则直接读取返回。
+func (s *MediaService) getVideoThumbnail(ctx context.Context, mediaID, srcPath string, size gen.ThumbnailSize) (*gen.GetThumbnailResponse, error) {
+	longEdge, ok := thumbnailLongEdge[size]
+	if !ok {
+		return nil, fmt.Errorf("unknown thumbnail size: %v", size)
+	}
+
+	if err := os.MkdirAll(s.thumbsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to ensure thumbs dir: %v", err)
+	}
+
+	thumbPath := filepath.Join(s.thumbsDir, fmt.Sprintf("%s_%d.jpg", mediaID, longEdge))
+
+	// Cache hit: 直接返回已渲染的视频缩略图。
+	if info, err := os.Stat(thumbPath); err == nil && info.Size() > 0 {
+		data, err := os.ReadFile(thumbPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read cached video thumbnail: %v", err)
+		}
+		w, h := imageDimensions(thumbPath)
+		return &gen.GetThumbnailResponse{
+			Data:     data,
+			MimeType: "image/jpeg",
+			Width:    int32(w),
+			Height:   int32(h),
+		}, nil
+	}
+
+	// ffmpeg 抽帧并缩放：-ss 00:00:01 取第 1s 画面，scale 限长边后按比例缩放，输出单帧 jpg。
+	// scale='if(gt(iw,ih),min(longEdge,iw),-2)':'if(gt(iw,ih),-2,min(longEdge,ih))' 在保持宽高比
+	// 的前提下让长边等于 longEdge，短边自动取偶数（视频编码要求）。
+	scale := fmt.Sprintf("scale='if(gt(iw,ih),min(%d,iw),-2)':'if(gt(iw,ih),-2,min(%d,ih))'", longEdge, longEdge)
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-y",
+		"-ss", "00:00:01",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-vf", scale,
+		"-f", "image2",
+		"-vframes", "1",
+		thumbPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ffmpeg thumbnail failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// 读取 ffmpeg 产物并返回；imageDimensions 仅对图片生效，这里给视频缩略图用同样路径。
+	data, err := os.ReadFile(thumbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read generated video thumbnail: %v", err)
+	}
+	w, h := imageDimensions(thumbPath)
+	return &gen.GetThumbnailResponse{
+		Data:     data,
+		MimeType: "image/jpeg",
+		Width:    int32(w),
+		Height:   int32(h),
+	}, nil
+}
+
+// VideoInfoRequest 是 GetVideoInfo 的请求（媒体 ID）。
+// 注：GetVideoInfo 未进 proto，仅作为 *MediaService 的普通 Go 方法供 REST gateway 调用。
+type VideoInfoRequest struct {
+	MediaId string
+}
+
+// VideoInfoResponse 返回视频时长（秒）与分辨率。
+type VideoInfoResponse struct {
+	DurationSeconds float64 `json:"duration_seconds"`
+	Width           int32   `json:"width"`
+	Height          int32   `json:"height"`
+	// Codec 与容器信息，便于前端展示与调试；缺失时为空字符串。
+	Codec     string `json:"codec,omitempty"`
+	Container string `json:"container,omitempty"`
+}
+
+// GetVideoInfo 用 ffprobe 解析视频时长与分辨率。支持 uploads 与网盘图片源目录。
+// 非 VIDEO 类型文件返回错误，避免误用 ffprobe 解析图片。
+func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) (*VideoInfoResponse, error) {
+	if req == nil || req.MediaId == "" {
+		return nil, fmt.Errorf("media_id is required")
+	}
+	path := s.resolveMediaPath(req.MediaId)
+	if path == "" {
+		return nil, fmt.Errorf("media not found: %s", req.MediaId)
+	}
+	if s.detectMediaType(path) != gen.MediaType_VIDEO {
+		return nil, fmt.Errorf("media %s is not a video", req.MediaId)
+	}
+
+	// ffprobe 以 JSON 输出 streams/format，便于结构化解析且无需逐字段流式处理。
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_format",
+		"-show_streams",
+		path,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return parseFFProbeJSON(out)
+}
+
+// ffProbeOutput 是 ffprobe -show_format -show_streams JSON 输出的最小结构。
+type ffProbeOutput struct {
+	Streams []struct {
+		CodecType string `json:"codec_type"`
+		CodecName string `json:"codec_name"`
+		Width     int    `json:"width"`
+		Height    int    `json:"height"`
+	} `json:"streams"`
+	Format struct {
+		Duration   string `json:"duration"`
+		FormatName string `json:"format_name"`
+	} `json:"format"`
+}
+
+// parseFFProbeJSON 解析 ffprobe JSON 并构造 VideoInfoResponse；缺字段以零值兜底。
+func parseFFProbeJSON(raw []byte) (*VideoInfoResponse, error) {
+	var probe ffProbeOutput
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("failed to parse ffprobe output: %v", err)
+	}
+
+	resp := &VideoInfoResponse{
+		Container: probe.Format.FormatName,
+	}
+	// 取第一个视频流作为分辨率/编码来源。
+	for _, st := range probe.Streams {
+		if strings.EqualFold(st.CodecType, "video") {
+			resp.Width = int32(st.Width)
+			resp.Height = int32(st.Height)
+			resp.Codec = st.CodecName
+			break
+		}
+	}
+	// duration 以字符串秒数给出（如 "12.345000"），解析失败则保留 0。
+	if probe.Format.Duration != "" {
+		if d, err := strconv.ParseFloat(strings.TrimSpace(probe.Format.Duration), 64); err == nil {
+			resp.DurationSeconds = d
+		}
+	}
+	return resp, nil
+}
+
+// VideoInfoProvider 是 REST gateway 用于探测具体 service 是否实现 GetVideoInfo 的能力接口。
+// gen.MediaServiceServer 不包含该方法（未进 proto），gateway 通过类型断言按需调用。
+type VideoInfoProvider interface {
+	GetVideoInfo(ctx context.Context, req *VideoInfoRequest) (*VideoInfoResponse, error)
 }
 
 // resizeLongEdge scales img so its longest side is <= longEdge, preserving aspect ratio.
