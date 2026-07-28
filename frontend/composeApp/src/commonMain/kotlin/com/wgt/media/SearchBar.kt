@@ -3,7 +3,12 @@ package com.wgt.media
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -97,11 +102,25 @@ fun SearchBar(
         }
     }
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 0.dp
-    ) {
+    // 宽度动画：展开时填满父宽，收起时收窄到图标+提示文案宽度，spring 过渡更丝滑。
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val maxW = maxWidth
+        val animatedWidth by animateDpAsState(
+            targetValue = if (expanded) maxW else 120.dp,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            label = "searchBarWidth"
+        )
+
+        Surface(
+            modifier = Modifier
+                .width(animatedWidth)
+                .align(Alignment.CenterEnd),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp
+        ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -197,5 +216,6 @@ fun SearchBar(
                 )
             }
         }
+    }
     }
 }

@@ -13,6 +13,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -50,6 +51,10 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -216,10 +221,43 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     }
                 )
 
-                // 标签栏
+                // 标签栏：自定义滑动指示器，spring 动画驱动 offset/width，切换更丝滑。
                 TabRow(
                     selectedTabIndex = selectedTab,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    indicator = { tabPositions ->
+                        if (selectedTab < tabPositions.size) {
+                            val position = tabPositions[selectedTab]
+                            val animatedOffset by animateDpAsState(
+                                targetValue = position.left,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                ),
+                                label = "tabIndicatorOffset"
+                            )
+                            val animatedWidth by animateDpAsState(
+                                targetValue = position.width,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                ),
+                                label = "tabIndicatorWidth"
+                            )
+                            Box(
+                                Modifier
+                                    .wrapContentSize(Alignment.BottomStart)
+                                    .offset(x = animatedOffset)
+                                    .width(animatedWidth)
+                                    .height(3.dp)
+                                    .padding(horizontal = 8.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(2.dp)
+                                    )
+                            )
+                        }
+                    }
                 ) {
                     Tab(
                         selected = selectedTab == 0,
@@ -914,6 +952,24 @@ fun MediaGridItem(
         ),
         label = "selectionScale"
     )
+    // 加载完成入场动画：spring 驱动缩放+透明度，缩略图出现时更丝滑。
+    // isLoading=true 时 alpha=0、scale=0.92；加载完成 spring 到 alpha=1、scale=1。
+    val loadAlpha by animateFloatAsState(
+        targetValue = if (isLoading) 0f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "loadAlpha"
+    )
+    val loadScale by animateFloatAsState(
+        targetValue = if (isLoading) 0.92f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "loadScale"
+    )
     Card(
        modifier = modifier
            .aspectRatio(aspectRatio)
@@ -960,7 +1016,13 @@ fun MediaGridItem(
                         Image(
                             bitmap = thumbnailBitmap!!,
                             contentDescription = media.filename,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer(
+                                    alpha = loadAlpha,
+                                    scaleX = loadScale,
+                                    scaleY = loadScale
+                                ),
                             contentScale = ContentScale.Crop
                         )
                     }
@@ -1129,13 +1191,17 @@ private fun PreviewActionButton(
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = label
+            }
             .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
         Icon(
             painter = painterResource(iconRes),
-            contentDescription = label,
+            contentDescription = null,
             tint = Color.White,
             modifier = Modifier.size(24.dp)
         )

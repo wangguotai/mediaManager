@@ -49,8 +49,11 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 
 private const val TAG = "SettingsScreen"
 
-/** 应用版本号 —— 与"关于"区展示一致。暂不接入 Gradle versionName 以避免跨模块依赖。 */
-private const val APP_VERSION = "0.2.0"
+/** 应用版本号 —— 与“关于”区展示一致。暂不接入 Gradle versionName 以避免跨模块依赖。 */
+private const val APP_VERSION = "v0.3.0"
+
+/** 构建时间戳 —— 手动维护，发布时更新。 */
+private const val BUILD_TIME = "2026-07-28"
 
 /**
  * 设置项的跨屏幕共享状态。单例，进程内唯一：
@@ -285,6 +288,18 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text("版本", style = MaterialTheme.typography.bodyLarge)
                 Text(
                     APP_VERSION,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("构建时间", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    BUILD_TIME,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
