@@ -57,6 +57,7 @@ fun DateGroupedGrid(
     onMediaLongClick: (MediaMetadata) -> Unit,
     useBackendLoader: Boolean = false,
     videoDurations: Map<String, Double> = emptyMap(),
+    searchQuery: String = "",
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
@@ -89,6 +90,7 @@ fun DateGroupedGrid(
                     onLongClick = { onMediaLongClick(media) },
                     useBackendLoader = useBackendLoader,
                     videoDurationSeconds = videoDurations[media.id],
+                    searchQuery = searchQuery,
                     modifier = Modifier
                         .fillMaxWidth()
                 )

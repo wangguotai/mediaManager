@@ -50,8 +50,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -88,10 +92,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
-
-    // OpenClaw 桥梁对话框状态 + 视图模型（与媒体列表同生命周期，复用即可）
-    var showOpenClawDialog by remember { mutableStateOf(false) }
-    val openClawViewModel = remember { OpenClawViewModel() }
 
     // 监听错误信息并显示 Snackbar
     LaunchedEffect(viewModel.errorMessage) {
@@ -156,14 +156,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         )
     }
 
-    // OpenClaw 桥梁命令对话框
-    if (showOpenClawDialog) {
-        OpenClawCommandDialog(
-            viewModel = openClawViewModel,
-            onDismiss = { showOpenClawDialog = false }
-        )
-    }
-
     Scaffold(
         topBar = {
             Column {
@@ -176,20 +168,14 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                         )
                     },
                    actions = {
-                       // OpenClaw 桥梁入口：点击弹出命令输入对话框，经后端 /api/openclaw/command 转发。
-                       IconButton(onClick = { showOpenClawDialog = true }) {
-                           Icon(
-                               painterResource(Res.drawable.ic_openclaw),
-                               contentDescription = "OpenClaw 桥梁"
-                           )
-                       }
-                        // 设置入口：齿轮图标，点击切换到 SettingsScreen（后端地址 / 主题 / 关于）。
-                        IconButton(onClick = onNavigateToSettings) {
+                        // 搜索图标：展开/收起搜索栏
+                        IconButton(onClick = { searchExpanded = !searchExpanded }) {
                             Icon(
-                                painterResource(Res.drawable.ic_settings),
-                                contentDescription = "设置"
+                                painterResource(Res.drawable.ic_search),
+                                contentDescription = "搜索"
                             )
                         }
+                        // 刷新当前 Tab 数据源
                         IconButton(
                             onClick = {
                                 when (selectedTab) {
@@ -203,6 +189,13 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             Icon(
                                 painterResource(Res.drawable.ic_refresh),
                                 contentDescription = "刷新"
+                            )
+                        }
+                        // 设置入口：齿轮图标，点击切换到 SettingsScreen
+                        IconButton(onClick = onNavigateToSettings) {
+                            Icon(
+                                painterResource(Res.drawable.ic_settings),
+                                contentDescription = "设置"
                             )
                         }
                     }
@@ -435,6 +428,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                 onMediaLongClick = onMediaLongClick,
                                 useBackendLoader = useBackend,
                                 videoDurations = viewModel.videoDurations,
+                                searchQuery = viewModel.searchQuery,
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
@@ -445,6 +439,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                 onMediaLongClick = onMediaLongClick,
                                 useBackendLoader = useBackend,
                                 videoDurations = viewModel.videoDurations,
+                                searchQuery = viewModel.searchQuery,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -803,6 +798,7 @@ fun MediaGrid(
     onMediaLongClick: (MediaMetadata) -> Unit,
     useBackendLoader: Boolean = false,
     videoDurations: Map<String, Double> = emptyMap(),
+    searchQuery: String = "",
     modifier: Modifier = Modifier
 ) {
     LazyVerticalStaggeredGrid(
@@ -825,6 +821,7 @@ fun MediaGrid(
                onLongClick = { onMediaLongClick(media) },
                useBackendLoader = useBackendLoader,
                videoDurationSeconds = videoDurations[media.id],
+               searchQuery = searchQuery,
                 modifier = Modifier
                     .fillMaxWidth()
            )
@@ -844,6 +841,7 @@ fun MediaGridItem(
     onLongClick: () -> Unit,
     useBackendLoader: Boolean = false,
     videoDurationSeconds: Double? = null,
+    searchQuery: String = "",
     modifier: Modifier = Modifier
 ) {
     val isVideo = media.type == MediaType.VIDEO
@@ -1034,7 +1032,7 @@ fun MediaGridItem(
                     .padding(4.dp)
             ) {
                 Text(
-                    media.filename,
+                    highlightFilename(media.filename, searchQuery),
                     color = Color.White,
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
@@ -1279,6 +1277,34 @@ private fun NoSearchResultView(
         FilledTonalButton(onClick = onClear) {
             Text("清除筛选")
         }
+    }
+}
+
+/**
+ * 构建带搜索高亮的文件名 AnnotatedString。
+ *
+ * 在 filename 中查找 query 的首个大小写不敏感匹配位置，将匹配段用黄色半透明背景标出。
+ * query 为空或未匹配时返回普通文本，无额外样式开销。
+ *
+ * 纯 Kotlin 字符串操作，无 java 或 android 包依赖，commonMain 安全。
+ */
+private fun highlightFilename(filename: String, query: String): AnnotatedString {
+    if (query.isBlank()) return AnnotatedString(filename)
+    val q = query.trim()
+    if (q.isEmpty()) return AnnotatedString(filename)
+
+    val lowerFilename = filename.lowercase()
+    val lowerQuery = q.lowercase()
+    val index = lowerFilename.indexOf(lowerQuery)
+
+    if (index < 0) return AnnotatedString(filename)
+
+    return buildAnnotatedString {
+        append(filename.substring(0, index))
+        withStyle(SpanStyle(background = Color(0xFFFFD600).copy(alpha = 0.4f))) {
+            append(filename.substring(index, index + q.length))
+        }
+        append(filename.substring(index + q.length))
     }
 }
 

@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_check_circle
+import mediamanager.composeapp.generated.resources.ic_openclaw
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 
@@ -126,11 +127,23 @@ fun SettingsScreen(onBack: () -> Unit) {
     var isPinging by remember { mutableStateOf(false) }
     var pingResult by remember { mutableStateOf<String?>(null) } // null=未测, ""=成功, 非空=失败描述
 
+    // OpenClaw 桥梁对话框状态 + 视图模型
+    var showOpenClawDialog by remember { mutableStateOf(false) }
+    val openClawViewModel = remember { OpenClawViewModel() }
+
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
         if (r.isEmpty()) snackbarHostState.showSnackbar("连通成功 ✓")
         else snackbarHostState.showSnackbar("连通失败：$r")
+    }
+
+    // OpenClaw 桥梁命令对话框
+    if (showOpenClawDialog) {
+        OpenClawCommandDialog(
+            viewModel = openClawViewModel,
+            onDismiss = { showOpenClawDialog = false }
+        )
     }
 
     Scaffold(
@@ -275,6 +288,23 @@ fun SettingsScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ---- 4. OpenClaw 桥梁 ----
+            SectionTitle("OpenClaw")
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("OpenClaw 命令桥梁", style = MaterialTheme.typography.bodyLarge)
+                OutlinedButton(onClick = { showOpenClawDialog = true }) {
+                    Text("打开")
+                }
             }
         }
     }
