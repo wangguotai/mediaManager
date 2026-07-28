@@ -97,6 +97,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 图片编辑器状态：预览操作栏点「编辑」时填充，非空即渲染全屏 [ImageEditor]。
     var editorMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
+    // 幻灯片播放状态：非空即渲染全屏 [SlideshowPlayer]，传入当前 filteredList。
+    var slideshowActive by remember { mutableStateOf(false) }
+
     // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
@@ -156,6 +159,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 onDelete = { media ->
                     previewIndex = null
                     viewModel.deleteSingleMedia(media.id)
+                },
+                onSlideshow = {
+                    previewIndex = null
+                    slideshowActive = true
                 }
             )
         } else {
@@ -181,6 +188,21 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
             onDismiss = { editorMedia = null }
         )
+    }
+
+    // 幻灯片播放器：预览操作栏点「幻灯片」进入，全屏自动播放当前 filteredList。
+    if (slideshowActive) {
+        val list = viewModel.filteredList
+        if (list.isNotEmpty()) {
+            SlideshowPlayer(
+                mediaList = list,
+                initialIndex = previewIndex ?: 0,
+                useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
+                onDismiss = { slideshowActive = false }
+            )
+        } else {
+            slideshowActive = false
+        }
     }
 
     // 长按上下文菜单：预览 / 加入相册
@@ -557,7 +579,8 @@ fun ImagePreviewDialog(
     sourceLabel: String = "",
     onEdit: (MediaMetadata) -> Unit = {},
     onShare: (MediaMetadata) -> Unit = {},
-    onDelete: (MediaMetadata) -> Unit = {}
+    onDelete: (MediaMetadata) -> Unit = {},
+    onSlideshow: () -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -729,6 +752,11 @@ fun ImagePreviewDialog(
                             iconRes = Res.drawable.ic_info,
                             label = "详情",
                             onClick = { showDetails = !showDetails }
+                        )
+                        PreviewActionButton(
+                            iconRes = Res.drawable.ic_slideshow,
+                            label = "幻灯片",
+                            onClick = onSlideshow
                         )
                     }
                 }
