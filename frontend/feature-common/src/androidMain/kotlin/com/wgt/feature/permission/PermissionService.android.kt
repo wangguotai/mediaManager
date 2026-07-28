@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -197,16 +198,33 @@ class AndroidPermissionService(private val context: Context) : PermissionService
     }
 
     /**
-     * 将通用权限类型转换为Android权限字符串
+     * 将通用权限类型转换为Android权限字符串。
+     *
+     * Android 13 (API 33) 引入了细粒度媒体权限（READ_MEDIA_IMAGES / READ_MEDIA_VIDEO），
+     * 取代了 READ_EXTERNAL_STORAGE。在 API 33+ 上，READ_EXTERNAL_STORAGE 已被弃用且不再
+     * 授予媒体访问权——必须使用对应的 READ_MEDIA_* 权限。在 API < 33 上，READ_MEDIA_*
+     * 权限不存在，必须使用 READ_EXTERNAL_STORAGE。
      */
     private fun PermissionType.toAndroidPermission(): String {
         return when (this) {
-            PermissionType.STORAGE_READ -> Manifest.permission.READ_EXTERNAL_STORAGE
+            PermissionType.STORAGE_READ -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    Manifest.permission.READ_MEDIA_IMAGES
+                } else {
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                }
+            }
             PermissionType.STORAGE_WRITE -> Manifest.permission.WRITE_EXTERNAL_STORAGE
             PermissionType.CAMERA -> Manifest.permission.CAMERA
             PermissionType.LOCATION_PRECISE -> Manifest.permission.ACCESS_FINE_LOCATION
             PermissionType.LOCATION_COARSE -> Manifest.permission.ACCESS_COARSE_LOCATION
-            PermissionType.PHOTO_LIBRARY -> Manifest.permission.READ_EXTERNAL_STORAGE
+            PermissionType.PHOTO_LIBRARY -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    Manifest.permission.READ_MEDIA_IMAGES
+                } else {
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                }
+            }
             PermissionType.MICROPHONE -> Manifest.permission.RECORD_AUDIO
             PermissionType.CONTACTS -> Manifest.permission.READ_CONTACTS
             PermissionType.CALENDAR -> Manifest.permission.READ_CALENDAR
