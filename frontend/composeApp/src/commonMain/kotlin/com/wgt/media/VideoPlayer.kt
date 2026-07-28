@@ -22,7 +22,7 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
  * 设置页未配置时的回退地址——与历史行为一致（模拟器 10.0.2.2 回环到开发机）。
  * 仅当 [SettingsState.backendUrl] 为空时使用，避免拼出空 host。
  */
-internal const val DEFAULT_VIDEO_BACKEND_URL = "http://10.0.2.2:8080"
+internal const val DEFAULT_VIDEO_BACKEND_URL = "http://192.168.31.251:8080"
 
 /**
  * 当前后端基址（归一化）：读 [SettingsState.backendUrl]，去空白/尾斜杠；
@@ -40,7 +40,7 @@ internal fun currentBackendBaseUrl(): String {
  * 构造视频原片流地址。
  *
  * @param mediaId 后端媒体 id（网盘视频为去扩展名的文件名，如 `sample`）
- * @return 形如 `http://10.0.2.2:8080/api/media/stream/sample`（地址取自用户设置）
+ * @return 形如 `http://192.168.31.251:8080/api/media/stream/sample`（地址取自用户设置）
  */
 internal fun backendStreamUrl(mediaId: String): String =
     "${currentBackendBaseUrl()}/api/media/stream/$mediaId"

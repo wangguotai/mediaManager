@@ -108,7 +108,7 @@ object SettingsState {
     }
 
     /** 后端地址默认值——与 MediaService 既有的 10.0.2.2:8080 模拟器回环地址一致。 */
-    private const val DEFAULT_BACKEND_URL = "http://10.0.2.2:8080"
+    private const val DEFAULT_BACKEND_URL = "http://192.168.31.251:8080"
 }
 
 /**
@@ -193,7 +193,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 onValueChange = { urlInput = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("http://10.0.2.2:8080") },
+                placeholder = { Text("http://192.168.31.251:8080") },
                 enabled = !isPinging
             )
             Row(
