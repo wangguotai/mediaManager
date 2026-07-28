@@ -2,9 +2,7 @@ package com.wgt.media
 
 import android.content.ContentValues
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Matrix
-import android.graphics.Rect as AndroidRect
 import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.ui.geometry.Rect
@@ -34,15 +32,7 @@ actual fun cropAndRotateImageBitmap(
                 val top = cropRect.top.toInt().coerceIn(0, srcBitmap.height - 1)
                 val right = cropRect.right.toInt().coerceIn(left + 1, srcBitmap.width)
                 val bottom = cropRect.bottom.toInt().coerceIn(top + 1, srcBitmap.height)
-                val w = right - left
-                val h = bottom - top
-                Bitmap.createBitmap(
-                    srcBitmap,
-                    left,
-                    top,
-                    w,
-                    h
-                )
+                Bitmap.createBitmap(srcBitmap, left, top, right - left, bottom - top)
             } else {
                 srcBitmap
             }
@@ -50,9 +40,7 @@ actual fun cropAndRotateImageBitmap(
         val rot = normalizeRotation(rotationDegrees)
         if (rot == 0) return cropped.asImageBitmap()
 
-        val matrix = Matrix().apply {
-            postRotate(rot.toFloat())
-        }
+        val matrix = Matrix().apply { postRotate(rot.toFloat()) }
         val rotated = Bitmap.createBitmap(cropped, 0, 0, cropped.width, cropped.height, matrix, true)
         rotated.asImageBitmap()
     } catch (e: Exception) {
@@ -81,9 +69,7 @@ actual suspend fun saveImageBitmapToGallery(
         val uri = context.contentResolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             values
-        )
-        if (uri == null) return@withContext null
-        val result: String? = uri.toString()
+        ) ?: return@withContext null
 
         context.contentResolver.openOutputStream(uri)?.use { out ->
             androidBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
