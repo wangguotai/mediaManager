@@ -27,6 +27,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
@@ -40,6 +43,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
@@ -608,6 +612,12 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
  * 基于 [androidx.compose.foundation.pager.HorizontalPager] 实现左右滑动切换上一张/下一张；
  * 每页是一个可双指缩放/平移的 [ZoomableImage]。点击空白或按钮退出。
  *
+ * 增强功能：
+ * - 底部缩略图条：当前页高亮，点击跳转
+ * - 顶部信息栏：文件名 + 大小 + 日期
+ * - 毛玻璃背景：模糊当前图片作为背景
+ * - 缩放态禁用翻页：避免放大时误触发 pager 滑动
+ *
  * @param mediaList 当前 Tab 的完整媒体列表
  * @param initialIndex 进入预览时聚焦的媒体在 [mediaList] 中的索引
  * @param useBackendLoader true 走 [BackendImageLoader]（后端 HTTP），false 走平台相册加载器
@@ -633,26 +643,22 @@ fun ImagePreviewDialog(
     val scope = rememberCoroutineScope()
     var isSharing by remember { mutableStateOf(false) }
 
-    // 进入/退出动画：进入时整体淡入 + 轻微放大；退出时先淡出再真正回调关闭，
-    // 让 Dialog 消失更自然而非瞬切。visible 初始 false，首帧后翻 true 触发 enter；
-    // 关闭走 animateOutThenDismiss：先翻 false 播 exit，等动画时长结束后 onDismiss。
-   var visible by remember { mutableStateOf(false) }
-   LaunchedEffect(Unit) { visible = true }
-    // 关闭走 animateOutThenDismiss：先翻 visible=false 播 exit，等动画时长结束后再真正 onDismiss，
-    // 让 Dialog 消失走淡出而非瞬切。
+    // 跟踪当前页是否处于缩放态：缩放时禁用 pager 滑动，避免放大浏览时误翻页。
+    var currentZoomed by remember { mutableStateOf(false) }
+
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { visible = true }
     val animateOutThenDismiss: () -> Unit = {
         visible = false
-        // 与 exit 动画时长(300ms)匹配，播完再真正关闭。
         scope.launch { kotlinx.coroutines.delay(320); onDismiss() }
     }
 
-   Dialog(
-     onDismissRequest = animateOutThenDismiss,
-     properties = DialogProperties(
-         usePlatformDefaultWidth = false
-     )
+    Dialog(
+        onDismissRequest = animateOutThenDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false
+        )
     ) {
-        // 动画包裹层：进入 fadeIn+scaleIn，退出 fadeOut。背景黑色始终在，避免白闪。
         AnimatedVisibility(
             visible = visible,
             enter = fadeIn(tween(350)) + scaleIn(initialScale = 0.88f, animationSpec = tween(350)),
@@ -663,169 +669,193 @@ fun ImagePreviewDialog(
                     .fillMaxSize()
                     .background(Color.Black)
             ) {
-            // 可滑动切换的图片页
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize()
-            ) { page ->
-                ZoomableImage(
-                    media = mediaList[page],
-                    useBackendLoader = useBackendLoader,
-                    onTapClose = animateOutThenDismiss
+                // ── 毛玻璃背景层 ──
+                // 用当前图片的低分辨率缩略图放大填充 + 大模糊半径模拟毛玻璃效果。
+                // 叠加半透明黑色遮罩保证前景图片对比度。
+                BlurredBackground(
+                    media = currentMedia,
+                    useBackendLoader = useBackendLoader
                 )
-            }
 
-            // 关闭按钮
-            IconButton(
-                onClick = animateOutThenDismiss,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp)
-            ) {
-                Icon(
-                    painter = painterResource(Res.drawable.ic_close),
-                    contentDescription = "关闭",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
-
-            // 分享按钮：获取当前图片字节流后调用系统分享
-            IconButton(
-                onClick = {
-                    if (!isSharing) {
-                        isSharing = true
-                        scope.launch(dispatchers.io) {
-                            try {
-                                val bytes = if (useBackendLoader) {
-                                    BackendImageLoader.loadFullImageBytes(currentMedia.id)
-                                } else {
-                                    // 本地图片：通过 galleryFeature 获取字节
-                                    // 在 commonMain 无法直接访问 galleryFeature，
-                                    // 这里用 loadFullImage 解码后再转字节比较复杂，
-                                    // 简化处理：后端图走 BackendImageLoader，本地图暂不支持分享
-                                    BackendImageLoader.loadFullImageBytes(currentMedia.id)
-                                }
-                                if (bytes != null) {
-                                    val mimeType = when (currentMedia.type) {
-                                        MediaType.VIDEO -> "video/mp4"
-                                        else -> "image/jpeg"
-                                    }
-                                    shareMedia(bytes, currentMedia.filename, mimeType)
-                                }
-                            } catch (e: Exception) {
-                                // 分享失败静默
-                            } finally {
-                                isSharing = false
+                // 可滑动切换的图片页：缩放态禁用翻页
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                    userScrollEnabled = !currentZoomed
+                ) { page ->
+                    ZoomableImage(
+                        media = mediaList[page],
+                        useBackendLoader = useBackendLoader,
+                        onTapClose = animateOutThenDismiss,
+                        onZoomChanged = { zoomed ->
+                            // 仅当 page == currentIndex 时更新，避免预加载页干扰
+                            if (page == pagerState.currentPage) {
+                                currentZoomed = zoomed
                             }
                         }
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(start = 0.dp, top = 16.dp, end = 56.dp)
-            ) {
-                if (isSharing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = Color.White
-                    )
-                } else {
-                    Icon(
-                        painterResource(Res.drawable.ic_share),
-                        contentDescription = "分享",
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            }
-
-            // 当前图片信息 + 页码（置右下方，避免与顶部按钮重叠）
-
-            // 底部区：详情面板（可切换）+ 操作栏（编辑/分享/删除/详情）
-            // showDetails 默认 true：进入预览即显示详情面板的收起态（預覽条）；
-            // 点击「详情」按钮可隐藏/显示整个面板区域。
-            var showDetails by remember { mutableStateOf(true) }
-
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Bottom
-            ) {
-                if (showDetails) {
-                    DetailPanel(
-                        media = currentMedia,
-                        sourceLabel = sourceLabel
                     )
                 }
 
-                // 底部操作栏：半透明背景 + 四个等距图标按钮。
-                Surface(
-                    color = Color.Black.copy(alpha = 0.6f),
-                    modifier = Modifier.fillMaxWidth()
+                // ── 顶部信息栏：文件名 + 大小 + 日期 ──
+                PreviewInfoBar(
+                    media = currentMedia,
+                    currentIndex = currentIndex,
+                    totalCount = mediaList.size,
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+
+                // 关闭按钮
+                IconButton(
+                    onClick = animateOutThenDismiss,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(top = 40.dp, start = 16.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        PreviewActionButton(
-                            iconRes = Res.drawable.ic_edit,
-                            label = "编辑",
-                            onClick = { onEdit(currentMedia) }
-                        )
-                        PreviewActionButton(
-                            iconRes = Res.drawable.ic_share,
-                            label = "分享",
-                            onClick = { onShare(currentMedia) }
-                        )
-                        PreviewActionButton(
-                            iconRes = Res.drawable.ic_delete,
-                            label = "删除",
-                            onClick = {
-                                animateOutThenDismiss()
-                                onDelete(currentMedia)
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_close),
+                        contentDescription = "关闭",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+
+                // 分享按钮
+                IconButton(
+                    onClick = {
+                        if (!isSharing) {
+                            isSharing = true
+                            scope.launch(dispatchers.io) {
+                                try {
+                                    val bytes = BackendImageLoader.loadFullImageBytes(currentMedia.id)
+                                    if (bytes != null) {
+                                        val mimeType = when (currentMedia.type) {
+                                            MediaType.VIDEO -> "video/mp4"
+                                            else -> "image/jpeg"
+                                        }
+                                        shareMedia(bytes, currentMedia.filename, mimeType)
+                                    }
+                                } catch (e: Exception) {
+                                    // 分享失败静默
+                                } finally {
+                                    isSharing = false
+                                }
                             }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 40.dp, end = 16.dp)
+                ) {
+                    if (isSharing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = Color.White
                         )
-                        PreviewActionButton(
-                            iconRes = Res.drawable.ic_info,
-                            label = "详情",
-                            onClick = { showDetails = !showDetails }
-                        )
-                        PreviewActionButton(
-                            iconRes = Res.drawable.ic_slideshow,
-                            label = "幻灯片",
-                            onClick = onSlideshow
+                    } else {
+                        Icon(
+                            painterResource(Res.drawable.ic_share),
+                            contentDescription = "分享",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
                         )
                     }
                 }
-            }
-           } // AnimatedVisibility inner Box
-       }
+
+                // ── 底部区：缩略图条 + 详情面板 + 操作栏 ──
+                var showDetails by remember { mutableStateOf(true) }
+
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    // 缩略图条：水平滚动，当前项高亮，点击跳转
+                    ThumbnailStrip(
+                        mediaList = mediaList,
+                        currentIndex = currentIndex,
+                        useBackendLoader = useBackendLoader,
+                        onThumbnailClick = { index ->
+                            scope.launch { pagerState.animateScrollToPage(index) }
+                        }
+                    )
+
+                    if (showDetails) {
+                        DetailPanel(
+                            media = currentMedia,
+                            sourceLabel = sourceLabel
+                        )
+                    }
+
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.6f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_edit,
+                                label = "编辑",
+                                onClick = { onEdit(currentMedia) }
+                            )
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_share,
+                                label = "分享",
+                                onClick = { onShare(currentMedia) }
+                            )
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_delete,
+                                label = "删除",
+                                onClick = {
+                                    animateOutThenDismiss()
+                                    onDelete(currentMedia)
+                                }
+                            )
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_info,
+                                label = "详情",
+                                onClick = { showDetails = !showDetails }
+                            )
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_slideshow,
+                                label = "幻灯片",
+                                onClick = onSlideshow
+                            )
+                        }
+                    }
+                }
+            } // AnimatedVisibility inner Box
+        }
     }
 }
 
 /**
  * 单张可缩放图片。
  *
- * 缩放交互：双指捏合缩放 + 单指拖动平移（缩放>1 时生效）；双击在 1x/2x 间切换；
- * 单击逻辑修正——缩放态下单击**先复位缩放与平移**而非直接关闭，避免放大浏览时
- * 单击误退预览；1x 下单击才触发关闭。缩放>1 时消费手势，避免误触发 pager 滑动——
- * 这里用 `pointerInput(scale)` 的 key 随缩放重建，使 `detectTransformGestures`
- * 与 pager 的水平滑动在缩放态下互不抢占（缩放态下主要由 transform 手势消费平移）。
+ * 缩放交互重写：
+ * - 双指捏合缩放：max 5x，min 1x
+ * - 双击在 1x → 2x → 4x 间循环，超过 4x 回到 1x
+ * - 单指拖动平移：仅缩放>1 时生效
+ * - 单击：缩放态先复位（不关闭），1x 下关闭预览
+ * - 缩放态禁用 pager 翻页：通过 [onZoomChanged] 回调通知父组件
  *
- * 复位用动画过渡，缩放/平移回落而非瞬切，手感更顺。
+ * 手势冲突处理：detectTransformGestures 与 HorizontalPager 共存时，
+ * 缩放>1 的情况下 pager 的 userScrollEnabled 被关闭，
+ * 平移手势在缩放态下由 transform 消费；1x 时 pager 正常响应水平滑动。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun ZoomableImage(
     media: MediaMetadata,
     useBackendLoader: Boolean,
-    onTapClose: () -> Unit
+    onTapClose: () -> Unit,
+    onZoomChanged: (Boolean) -> Unit = {}
 ) {
     var fullImageBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(media.id) { mutableStateOf(true) }
@@ -834,10 +864,15 @@ private fun ZoomableImage(
     var offsetY by remember(media.id) { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
 
-    // 缩放/平移直接用手势值（瞬切，与原双击行为一致），优先保证手势跟手与
-    // 单击语义正确，避免动画与手势状态源互相干扰。放大态单击只复位不关闭。
+    // 双击缩放循环：1x → 2x → 4x → 1x
+    val zoomSteps = listOf(1f, 2f, 4f)
 
-    // 加载完整图片：本地相册走平台加载器；后端图片走 BackendImageLoader（HTTP stream）。
+    // 缩放状态变化时通知父组件（用于禁用/启用 pager 翻页）
+    LaunchedEffect(scale) {
+        onZoomChanged(scale > 1f)
+    }
+
+    // 加载完整图片
     LaunchedEffect(media.id, useBackendLoader) {
         scope.launch(dispatchers.io) {
             try {
@@ -858,11 +893,11 @@ private fun ZoomableImage(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(scale) {
+            // 点击手势：双击在 1x/2x/4x 间循环，单击缩放态复位/1x 关闭
+            .pointerInput(media.id) {
                 detectTapGestures(
                     onTap = {
                         if (scale > 1f) {
-                            // 放大态单击：只复位缩放/平移，不关闭预览，避免误退。
                             scale = 1f
                             offsetX = 0f
                             offsetY = 0f
@@ -871,24 +906,28 @@ private fun ZoomableImage(
                         }
                     },
                     onDoubleTap = {
-                        // 双击在 1x 与 2x 间切换，并复位平移。
-                        if (scale > 1f) {
-                            scale = 1f
-                            offsetX = 0f
-                            offsetY = 0f
-                        } else {
-                            scale = 2f
-                        }
+                        // 1x → 2x → 4x → 1x 循环
+                        val currentStepIndex = zoomSteps.indexOfFirst { kotlin.math.abs(it - scale) < 0.1f }
+                        val nextScale = zoomSteps[
+                            ((currentStepIndex + 1) % zoomSteps.size).coerceAtLeast(0)
+                        ]
+                        scale = nextScale
+                        offsetX = 0f
+                        offsetY = 0f
                     }
                 )
             }
-            .pointerInput(scale) {
+            // 双指缩放 + 单指平移：缩放态下消费手势
+            .pointerInput(Unit) {
                 detectTransformGestures(panZoomLock = false) { _, pan, zoom, _ ->
                     val newScale = (scale * zoom).coerceIn(1f, 5f)
-                    // 仅在已放大时累加平移，避免 1x 下平移把图片拖出视口
                     if (newScale > 1f) {
                         offsetX += pan.x
                         offsetY += pan.y
+                    } else {
+                        // 回到 1x 时复位平移
+                        offsetX = 0f
+                        offsetY = 0f
                     }
                     scale = newScale
                 }
@@ -903,7 +942,6 @@ private fun ZoomableImage(
     ) {
         when {
             isLoading -> {
-                // 全屏加载占位：居中圆圈 + 下方 shimmer 条，比单一圆圈信息量更足。
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -1298,6 +1336,297 @@ fun MediaGridItem(
                 }
             }
         }
+    }
+}
+
+/**
+ * 预览顶部信息栏：文件名 + 大小 + 日期 + 页码，半透明黑色背景。
+ */
+@Composable
+private fun PreviewInfoBar(
+    media: MediaMetadata,
+    currentIndex: Int,
+    totalCount: Int,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.4f),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 56.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 左侧：文件名 + 副信息（大小 • 日期）
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text(
+                    text = media.filename,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = buildString {
+                        append(formatBytesToMB(media.size))
+                        if (media.created_at > 0) {
+                            append(" • ")
+                            append(formatPreviewDate(media.created_at))
+                        }
+                        if (media.width > 0 && media.height > 0) {
+                            append(" • ")
+                            append("${media.width}×${media.height}")
+                        }
+                    },
+                    color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+            // 右侧：页码
+            Text(
+                text = "${currentIndex + 1} / $totalCount",
+                color = Color.White.copy(alpha = 0.85f),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+/**
+ * 格式化预览日期：epoch 毫秒 → "YYYY/MM/DD"（简短格式，无时分）。
+ * 纯整数运算，无 java.time 依赖。
+ */
+private fun formatPreviewDate(epochMillis: Long): String {
+    if (epochMillis <= 0L) return ""
+    val localMillis = epochMillis + systemTimeZoneOffsetMillis()
+    val days = localMillis.floorDiv(86_400_000L)
+    val (y, m, d) = civilFromDaysPreview(days)
+    return "$y/${m.pad2Preview()}/${d.pad2Preview()}"
+}
+
+private fun civilFromDaysPreview(z: Long): Triple<Int, Int, Int> {
+    val z0 = z + 719468L
+    val era = if (z0 >= 0) z0 / 146097 else (z0 - 146096) / 146097
+    val doe = z0 - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val y = yoe + era * 400
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = (doy - (153 * mp + 2) / 5 + 1).toInt()
+    val m = (if (mp < 10) mp + 3 else mp - 9).toInt()
+    val year = if (m <= 2) y + 1 else y
+    return Triple(year.toInt(), m, d)
+}
+
+private fun Int.pad2Preview(): String = if (this < 10) "0$this" else this.toString()
+
+/**
+ * 预览底部缩略图条：水平滚动列表，当前项高亮，点击跳转。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ThumbnailStrip(
+    mediaList: List<MediaMetadata>,
+    currentIndex: Int,
+    useBackendLoader: Boolean,
+    onThumbnailClick: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val lazyListState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    // 当前页变化时，将缩略图条滚动到当前项居中位置
+    LaunchedEffect(currentIndex) {
+        if (mediaList.size > 8) {
+            scope.launch {
+                lazyListState.animateScrollToItem(
+                    index = currentIndex.coerceIn(0, mediaList.lastIndex),
+                    scrollOffset = -200
+                )
+            }
+        }
+    }
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.5f),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        LazyRow(
+            state = lazyListState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp)
+        ) {
+            items(
+                items = mediaList,
+                key = { it.id },
+                contentType = { "thumbnail_strip_item" }
+            ) { media ->
+                val index = mediaList.indexOf(media)
+                val isCurrent = index == currentIndex
+                ThumbnailStripItem(
+                    media = media,
+                    isCurrent = isCurrent,
+                    useBackendLoader = useBackendLoader,
+                    onClick = { onThumbnailClick(index) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 缩略图条单项：48×48 dp 圆角缩略图，选中态加白色边框 + 轻微放大。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ThumbnailStripItem(
+    media: MediaMetadata,
+    isCurrent: Boolean,
+    useBackendLoader: Boolean,
+    onClick: () -> Unit
+) {
+    var thumbnailBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(media.id) { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(media.id, useBackendLoader) {
+        scope.launch(dispatchers.io) {
+            try {
+                val thumbnail = if (useBackendLoader) {
+                    BackendImageLoader.loadThumbnail(media.id)
+                } else {
+                    loadThumbnail(media.id)
+                }
+                thumbnailBitmap = thumbnail
+            } catch (e: Exception) {
+                // 加载失败
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    // 选中态缩放反馈
+    val itemScale by animateFloatAsState(
+        targetValue = if (isCurrent) 1.15f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "thumbScale"
+    )
+    val borderColor = if (isCurrent) Color.White else Color.Transparent
+    val borderWidth = if (isCurrent) 2.dp else 0.dp
+
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .graphicsLayer(scaleX = itemScale, scaleY = itemScale)
+            .clip(RoundedCornerShape(6.dp))
+            .border(borderWidth, borderColor, RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            isLoading -> {
+                ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
+            }
+            thumbnailBitmap != null -> {
+                Image(
+                    bitmap = thumbnailBitmap!!,
+                    contentDescription = media.filename,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            else -> {
+                Icon(
+                    painter = painterResource(Res.drawable.ic_image_placeholder),
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = Color.Gray
+                )
+            }
+        }
+        // 选中态遮罩
+        if (isCurrent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White.copy(alpha = 0.15f))
+            )
+        }
+    }
+}
+
+/**
+ * 毛玻璃背景层：用当前图片缩略图放大填充 + 暗色遮罩模拟模糊背景效果。
+ *
+ * 纯 commonMain 实现：不依赖平台 BlurEffect/RenderEffect。
+ * 缩略图本身分辨率低，放大后天然带有模糊感，叠加暗色遮罩保证前景对比度。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun BlurredBackground(
+    media: MediaMetadata,
+    useBackendLoader: Boolean
+) {
+    var thumbnailBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(media.id) { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(media.id, useBackendLoader) {
+        scope.launch(dispatchers.io) {
+            try {
+                val thumbnail = if (useBackendLoader) {
+                    BackendImageLoader.loadThumbnail(media.id)
+                } else {
+                    loadThumbnail(media.id)
+                }
+                thumbnailBitmap = thumbnail
+            } catch (e: Exception) {
+                // 加载失败
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        if (thumbnailBitmap != null) {
+            // 缩略图放大填充全屏作为“模糊”背景
+            Image(
+                bitmap = thumbnailBitmap!!,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = 1.3f,
+                        scaleY = 1.3f,
+                        alpha = 0.25f
+                    ),
+                contentScale = ContentScale.Crop
+            )
+        }
+        // 暗色遮罩：保证前景图片对比度
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.75f))
+        )
     }
 }
 
