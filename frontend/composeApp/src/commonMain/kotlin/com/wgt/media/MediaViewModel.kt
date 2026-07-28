@@ -430,7 +430,7 @@ class MediaViewModel {
         viewModelScope.launch {
             for (media in toFetch) {
                 val info = try {
-                    loadVideoInfo(VIDEO_BACKEND_BASE_URL, media.id)
+                    loadVideoInfo(currentBackendBaseUrl(), media.id)
                 } catch (e: Exception) {
                     null
                 }

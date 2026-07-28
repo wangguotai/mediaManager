@@ -14,9 +14,43 @@ import kotlinx.coroutines.delay
 import com.wgt.platform.logger.logger
 import kotlin.time.Clock
 
-// 后端 REST gateway 地址。必须用运行后端的机器在局域网内的 IP，而非 localhost：
-// Android 真机的 localhost 指向真机自身，访问不到开发机的服务，通过adb reverse 将localhost指向服务端。
-private const val BASE_URL = "http://localhost:8080"
+/**
+ * 后端 REST gateway 地址 —— 运行时可变，由上层（composeApp 的 [SettingsState]）经
+ * [setBackendUrl] 注入，不再硬编码。
+ *
+ * 历史上这里写死 `http://localhost:8080`，导致设置页保存的地址从不生效（P0-1）。
+ * 现改为单一可变源：feature-media 不反向依赖 composeApp，故不直接读 SettingsState，
+ * 而由 composeApp 在启动与设置变更时把地址推入此处。见 MediaService.setBackendUrl。
+ *
+ * 默认值与既有行为保持一致（`http://localhost:8080`），首次未配置时仍可命中
+ * adb reverse / 本机回环场景；用户在设置页配置后即时覆盖。
+ */
+@Volatile
+private var backendUrl: String = DEFAULT_BACKEND_URL
+
+/** 后端地址默认值——本机回环，配合 adb reverse 可在真机访问开发机后端。 */
+private const val DEFAULT_BACKEND_URL = "http://localhost:8080"
+
+/**
+ * 归一化后端基址：去首尾空白、去尾斜杠；空串时回退 [DEFAULT_BACKEND_URL]，
+ * 保证请求拼接不出空 host。补 http 前缀逻辑留给各端网络层（与 pingBackend 同款）。
+ */
+private fun backendBaseUrl(): String {
+    val trimmed = backendUrl.trim().trimEnd('/')
+    return trimmed.ifEmpty { DEFAULT_BACKEND_URL }
+}
+
+/**
+ * 由上层注入运行时后端地址（来自用户设置）。feature-media 不依赖 composeApp，
+ * 故采用推模型：composeApp 在启动及 [SettingsState.backendUrl] 变更后调用本方法。
+ * 标记 `@Volatile` 保证跨线程可见性（请求协程与设置页 UI 线程并发读写）。
+ */
+fun setBackendUrl(url: String) {
+    val normalized = url.trim().trimEnd('/')
+    if (normalized == backendUrl) return
+    backendUrl = normalized
+    logger.info("MediaService", "backend url updated: $normalized")
+}
 
 private val jsonClient = HttpClient {
     install(ContentNegotiation) {
@@ -55,7 +89,7 @@ object MediaService {
         cloud: Boolean = false
     ): List<MediaMetadata> {
         return try {
-            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/list") {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/list") {
                 parameter("page", page)
                 parameter("page_size", pageSize)
                 if (cloud) parameter("q", "source=cloud")
@@ -85,7 +119,7 @@ object MediaService {
      */
     suspend fun getMediaStream(mediaId: String): ByteArray? {
         return try {
-            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/stream/$mediaId")
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/stream/$mediaId")
             val bytes = if (response.status == HttpStatusCode.OK) response.body<ByteArray>() else null
             if (bytes != null) {
                 logger.info("MediaService", "getMediaStream id=$mediaId status=${response.status} bytes=${bytes.size}")
@@ -104,7 +138,7 @@ object MediaService {
      */
     suspend fun getThumbnail(mediaId: String, size: String = "medium"): ByteArray? {
         return try {
-            val response: HttpResponse = jsonClient.get("$BASE_URL/api/media/thumbnail/$mediaId") {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/thumbnail/$mediaId") {
                 parameter("size", size)
             }
             val bytes = if (response.status == HttpStatusCode.OK) response.body<ByteArray>() else null
@@ -125,7 +159,7 @@ object MediaService {
      */
     suspend fun deleteMedia(mediaIds: List<String>): Boolean {
         return try {
-            val response: HttpResponse = jsonClient.post("$BASE_URL/api/media/delete") {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/delete") {
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject { put("media_ids", Json.encodeToJsonElement(mediaIds)) })
             }
@@ -141,7 +175,7 @@ object MediaService {
      */
     suspend fun uploadMedia(fileData: ByteArray, filename: String, isLivePhoto: Boolean = false): Boolean {
         return try {
-            val response: HttpResponse = jsonClient.post("$BASE_URL/api/media/upload") {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/upload") {
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject {
                     put("filename", filename)
@@ -169,7 +203,7 @@ object MediaService {
         body: JsonObject? = null
     ): JsonObject? {
         return try {
-            val response: HttpResponse = jsonClient.post("$BASE_URL/api/openclaw/command") {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/openclaw/command") {
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject {
                     put("path", path)
