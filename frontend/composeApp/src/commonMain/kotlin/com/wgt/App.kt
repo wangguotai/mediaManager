@@ -8,11 +8,13 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
+import com.wgt.feature.media.MediaService
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
 import com.wgt.media.SettingsScreen
@@ -46,6 +48,18 @@ fun App() {
         ThemeMode.DARK -> true
     }
     val colors = resolveColorScheme(isDark)
+
+    // 把用户设置的后端地址注入 MediaService（feature-media 不反向依赖 composeApp，
+    // 故用推模型）。直接读 SettingsState.backendUrl —— 它本身是 mutableStateOf 委托属性，
+    // 在 @Composable 体内读取会建立 snapshot 订阅：设置页保存后值变化触发本 Composable
+    // 重组，LaunchedEffect 的 key 随之改变并重新推送，保证运行时可变、即时生效（P0-1）。
+    //
+    // 注意：此前误用 `remember { mutableStateOf(SettingsState.backendUrl) }`，那只
+    // 在首次组合时拍一张快照、之后与 SettingsState 脱钩，地址变更永不传导，等于 P0-1 未解。
+    val backendUrl = SettingsState.backendUrl
+    LaunchedEffect(backendUrl) {
+        MediaService.setBackendUrl(backendUrl)
+    }
 
     var showSplash by remember { mutableStateOf(true) }
     var screen by remember { mutableStateOf(Screen.MEDIA) }
