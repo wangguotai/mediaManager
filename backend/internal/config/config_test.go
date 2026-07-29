@@ -57,3 +57,54 @@ func TestLoadEmptyDBPathDerives(t *testing.T) {
 		t.Fatalf("derived DBPath: got %q want /opt/data/media.db", cfg.DBPath)
 	}
 }
+
+// TestDefaultSignupIsOff 验证无配置文件（与 Default）时 allow_signup 默认为最安全的 "off"。
+func TestDefaultSignupIsOff(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load missing file should not error: %v", err)
+	}
+	if cfg.AllowSignup != SignupOff {
+		t.Fatalf("default AllowSignup: got %q want off", cfg.AllowSignup)
+	}
+}
+
+// TestLoadJWTFields 验证 jwt_secret / jwt_ttl_seconds / allow_signup 被解析与归一化。
+func TestLoadJWTFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "jwt_secret: s3cret\njwt_ttl_seconds: 3600\nallow_signup: OPEN\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JWTSecret != "s3cret" {
+		t.Fatalf("JWTSecret: got %q want s3cret", cfg.JWTSecret)
+	}
+	if cfg.JWTTTLSeconds != 3600 {
+		t.Fatalf("JWTTTLSeconds: got %d want 3600", cfg.JWTTTLSeconds)
+	}
+	// allow_signup 应被归一化为小写合法值。
+	if cfg.AllowSignup != SignupOpen {
+		t.Fatalf("AllowSignup: got %q want open", cfg.AllowSignup)
+	}
+}
+
+// TestLoadSignupNormalizeUnknown 验证未知 allow_signup 值退化为 "off"。
+func TestLoadSignupNormalizeUnknown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("allow_signup: yes\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AllowSignup != SignupOff {
+		t.Fatalf("unknown AllowSignup should normalize to off, got %q", cfg.AllowSignup)
+	}
+}
