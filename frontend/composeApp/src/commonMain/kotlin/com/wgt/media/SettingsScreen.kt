@@ -25,6 +25,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -40,11 +41,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wgt.platform.logger.logger
+import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_check_circle
 import mediamanager.composeapp.generated.resources.ic_cloud
+import mediamanager.composeapp.generated.resources.ic_cloud_upload
 import mediamanager.composeapp.generated.resources.ic_info
 import mediamanager.composeapp.generated.resources.ic_openclaw
 import mediamanager.composeapp.generated.resources.ic_palette
@@ -79,6 +82,29 @@ object SettingsState {
     var backendUrl by mutableStateOf(loadBackendUrl())
         private set
 
+    /**
+     * 云相册自动备份开关。默认关——需用户在设置页主动开启，避免未授权情况下静默上传
+     * 用户图库。开启后 [MediaViewModel] 后台监听本地图库新增并增量上传（带 sha256 去重）。
+     * persistence：落 [SettingsKeys.AUTO_BACKUP_ENABLED]（"true"/"false"）。
+     */
+    var autoBackupEnabled by mutableStateOf(loadAutoBackup())
+        private set
+
+    /**
+     * 当前设备 id（服务端 [MediaService.registerDevice] 分配）。自动备份开启后首次注册获得，
+     * 持久化以避免每次启动重复注册。空串表示尚未注册。
+     */
+    var deviceId by mutableStateOf(loadDeviceId())
+        private set
+
+    /**
+     * 上次增量同步推进到的 cursor（毫秒）。0 表示从未同步过（下次拉全量）。
+     * 持久化使冷启动后能续拉增量，而非每次重头全量。由 [MediaViewModel.loadCloudChanges]
+     * 在每页成功后经 [saveSyncCursor] 推进。
+     */
+    var syncCursor by mutableStateOf(loadSyncCursor())
+        private set
+
     private fun loadThemeMode(): ThemeMode {
         val raw = storage.getString(SettingsKeys.THEME_MODE, ThemeMode.SYSTEM.name)
         return runCatching { ThemeMode.valueOf(raw.uppercase()) }.getOrDefault(ThemeMode.SYSTEM)
@@ -86,6 +112,14 @@ object SettingsState {
 
     private fun loadBackendUrl(): String =
         storage.getString(SettingsKeys.BACKEND_URL, DEFAULT_BACKEND_URL)
+
+    private fun loadAutoBackup(): Boolean =
+        storage.getString(SettingsKeys.AUTO_BACKUP_ENABLED, "false").equals("true", ignoreCase = true)
+
+    private fun loadDeviceId(): String = storage.getString(SettingsKeys.DEVICE_ID, "")
+
+    private fun loadSyncCursor(): Long =
+        storage.getString(SettingsKeys.SYNC_CURSOR, "0").toLongOrNull() ?: 0L
 
     /**
      * 持久化新的后端地址并更新内存状态。仅做存取，不做可达性校验——
@@ -107,6 +141,35 @@ object SettingsState {
         logger.info(TAG, "theme mode saved: ${mode.name}")
     }
 
+    /**
+     * 开/关云相册自动备份。仅落地开关值；真正启动后台备份监听由 [MediaViewModel] 响应
+     * [autoBackupEnabled] 变化编排（开启→注册设备+预检，关闭→停止轮询）。设备注册在
+     * ViewModel 内按需进行（需网络与登录态），不在此处耦合。
+     */
+    fun saveAutoBackup(enabled: Boolean) {
+        if (autoBackupEnabled == enabled) return
+        autoBackupEnabled = enabled
+        storage.putString(SettingsKeys.AUTO_BACKUP_ENABLED, if (enabled) "true" else "false")
+        logger.info(TAG, "auto backup $enabled")
+    }
+
+    /** 持久化服务端分配的设备 id（注册成功后由 ViewModel 回调落地）。 */
+    fun saveDeviceId(id: String) {
+        deviceId = id
+        storage.putString(SettingsKeys.DEVICE_ID, id)
+        logger.info(TAG, "device id saved")
+    }
+
+    /**
+     * 推进增量同步游标并持久化。仅当新值严格大于当前值才写盘，避免空页回退/重复写入。
+     * 0 不落（视为未同步）。
+     */
+    fun saveSyncCursor(cursor: Long) {
+        if (cursor <= 0 || cursor <= syncCursor) return
+        syncCursor = cursor
+        storage.putString(SettingsKeys.SYNC_CURSOR, cursor.toString())
+    }
+
     /** 后端地址默认值——与 MediaService 既有的 10.0.2.2:8080 模拟器回环地址一致。 */
     private const val DEFAULT_BACKEND_URL = "http://192.168.31.251:8080"
 }
@@ -125,7 +188,10 @@ object SettingsState {
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(
+    viewModel: MediaViewModel,
+    onBack: () -> Unit
+) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -285,6 +351,93 @@ fun SettingsScreen(onBack: () -> Unit) {
                 enabled = AuthState.isLoggedIn,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("退出登录") }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ---- 云相册自动备份 ----
+            SectionTitle("云相册", iconRes = Res.drawable.ic_cloud_upload)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("自动备份新增图片", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "本地新增图片后台增量上传到云端（自动去重）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = SettingsState.autoBackupEnabled,
+                    onCheckedChange = { enabled ->
+                        SettingsState.saveAutoBackup(enabled)
+                        // 开关切换即启停后台备份轮询（登录态下）。开启时 startAutoBackup
+                        // 内部按需注册设备+建立快照+起轮询；关闭时 stopAutoBackup 取消轮询清队列。
+                        if (enabled) viewModel.startAutoBackup() else viewModel.stopAutoBackup()
+                        scope.launch {
+                            snackbarHostState.showSnackbar(
+                                if (enabled) "已开启自动备份" else "已关闭自动备份"
+                            )
+                        }
+                    },
+                    enabled = AuthState.isLoggedIn
+                )
+            }
+            // 设备登记状态：供用户确认本机已被云同步纳入。
+            if (SettingsState.autoBackupEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("本机设备", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        SettingsState.deviceId.ifEmpty { "未登记" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            // 云端用量 + 待传队列：登录态展示，让用户直观看到已用空间与离线待传条数。
+            // 用量来自 /api/sync/usage（viewModel.cloudUsage），待传来自 uploadQueue.size。
+            if (AuthState.isLoggedIn) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("云端用量", style = MaterialTheme.typography.bodyMedium)
+                    val usage = viewModel.cloudUsage
+                    Text(
+                        if (usage != null) "${usage.fileCount} 项 / ${formatBytesToMB(usage.totalBytes)}"
+                        else "—",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                if (viewModel.uploadQueue.size > 0) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("待上传（离线队列）", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "${viewModel.uploadQueue.size} 项",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

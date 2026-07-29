@@ -617,6 +617,149 @@ object MediaService {
         } catch (e: Exception) { null }
     }
 
+    // ---- 增量同步 / 设备注册 ----
+
+    /**
+     * 单条增量变更项，对齐后端 [gateway.syncChangeItem]。
+     *
+     * 在 [MediaMetadata] 基础字段之外携带同步语义字段：
+     * - [deleted]：墓碑标记，true 表示该媒体已被软删，客户端应本地移除。
+     * - [sha256]：内容指纹，用于上传去重（与 [com.wgt.common.util.sha256] 比对）。
+     * - [updatedAt]：毫秒，作为下次 [since] 游标推进依据。
+     *
+     * [toMediaMetadata] 把非删除项转成 UI 网格直接消费的标准元数据。
+     */
+    data class SyncChange(
+        val id: String,
+        val filename: String,
+        val type: MediaType,
+        val size: Long,
+        val mimeType: String,
+        val createdAt: Long,
+        val updatedAt: Long,
+        val width: Int,
+        val height: Int,
+        val deleted: Boolean,
+        val sha256: String,
+        val isLivePhoto: Boolean = false,
+        val livePhotoVideoId: String = ""
+    ) {
+        /** 转为 UI 通用元数据（删除项不应调用，调用方需自行按 [deleted] 过滤）。 */
+        fun toMediaMetadata(): MediaMetadata = MediaMetadata(
+            id = id,
+            filename = filename,
+            type = type,
+            size = size,
+            mime_type = mimeType,
+            created_at = createdAt,
+            updated_at = updatedAt,
+            is_live_photo = isLivePhoto,
+            live_photo_video_id = livePhotoVideoId,
+            width = width,
+            height = height
+        )
+    }
+
+    /**
+     * /api/sync/changes 单页响应。客户端用 [nextCursor] 续拉，[hasMore] 为 false 即本次
+     * 增量同步完成。空页且 hasMore=false 时 [nextCursor] 回显原 since。
+     */
+    data class SyncChangesResult(
+        val changes: List<SyncChange>,
+        val nextCursor: Long,
+        val hasMore: Boolean
+    )
+
+    /**
+     * /api/sync/usage 响应：当前用户未软删媒体的存储总量与文件数。
+     */
+    data class SyncUsage(val totalBytes: Long, val fileCount: Int)
+
+    /**
+     * 增量拉取媒体变更。
+     *
+     * GET /api/sync/changes?since=<ms>，返回 updated_at 严格晚于 since 的全部 media 行
+     * （含软删墓碑）。since=0 表示从头全量拉取（首次同步）。客户端循环用本页
+     * [nextCursor] 作为下次 since，直至 [hasMore] = false。
+     *
+     * @param since 毫秒游标；0 表示从首条拉取
+     * @param pageSize 单页大小（后端夹到 [1,500]，默认 100）
+     * @return 该页变更 + 下一游标 + 是否还有更多；网络/HTTP 错误返回 null，调用方按
+     *         "同步失败、保留旧游标下次重试" 处理（不前进游标避免丢增量）。
+     */
+    suspend fun getSyncChanges(since: Long, pageSize: Int = 100): SyncChangesResult? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/sync/changes") {
+                parameter("since", since)
+                parameter("page_size", pageSize)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val parsed = parseSyncChanges(body)
+                logger.info("MediaService", "getSyncChanges since=$since count=${parsed.size} hasMore")
+                val obj = Json.parseToJsonElement(body).jsonObject
+                SyncChangesResult(
+                    changes = parsed,
+                    nextCursor = obj["next_cursor"]?.jsonPrimitive?.longOrNull ?: since,
+                    hasMore = obj["has_more"]?.jsonPrimitive?.booleanOrNull ?: false
+                )
+            } else {
+                logger.info("MediaService", "getSyncChanges status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSyncChanges FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** GET /api/sync/usage。失败返回 null，调用方可不展示用量或回退本地计数。 */
+    suspend fun getSyncUsage(): SyncUsage? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/sync/usage")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                SyncUsage(
+                    totalBytes = obj["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    fileCount = obj["file_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSyncUsage FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * POST /api/device/register {device_name, platform} → {device_id}。
+     *
+     * 为当前登录用户登记一台设备，返回后端分配的 device_id（uuid）。同一用户可多设备，
+     * 不去重。客户端应持久化 device_id，避免每次启动重复注册。
+     *
+     * @return 新 device_id；未登录/未配置/网络错误返回 null。
+     */
+    suspend fun registerDevice(deviceName: String, platform: String): String? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/device/register") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("device_name", deviceName)
+                    put("platform", platform)
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["device_id"]?.jsonPrimitive?.contentOrNull
+            } else {
+                logger.info("MediaService", "registerDevice status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "registerDevice FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     // ---- 解析 ----
 
     /**
@@ -650,6 +793,35 @@ object MediaService {
                 live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
                 width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
                 height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * 解析 /api/sync/changes 的 `changes` 数组为 [SyncChange] 列表。
+     *
+     * 与 [parseMediaList] 同口径运行时 JSON 操作；额外取 `deleted` / `sha256` 同步字段，
+     * 缺失时回退安全默认（deleted=false、sha256=""）。`taken_at`/`client_id` 等暂不消费，
+     * 忽略（[Json] 已配置 ignoreUnknownKeys）。
+     */
+    private fun parseSyncChanges(json: String): List<SyncChange> {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        return obj["changes"]?.jsonArray?.map { item ->
+            val m = item.jsonObject
+            SyncChange(
+                id = m["id"]?.jsonPrimitive?.content ?: "",
+                filename = m["filename"]?.jsonPrimitive?.content ?: "",
+                type = parseMediaType(m["type"]?.jsonPrimitive?.content),
+                size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                mimeType = m["mime_type"]?.jsonPrimitive?.content ?: "",
+                createdAt = m["created_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                updatedAt = m["updated_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                height = m["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                deleted = m["deleted"]?.jsonPrimitive?.booleanOrNull ?: false,
+                sha256 = m["sha256"]?.jsonPrimitive?.content ?: "",
+                isLivePhoto = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull ?: false,
+                livePhotoVideoId = m["live_photo_video_id"]?.jsonPrimitive?.content ?: ""
             )
         } ?: emptyList()
     }

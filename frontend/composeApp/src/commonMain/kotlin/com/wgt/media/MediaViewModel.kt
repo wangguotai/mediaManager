@@ -12,16 +12,29 @@ import com.wgt.feature.media.MediaService.MediaSource
 import com.wgt.platform.logger.logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
 import com.wgt.feature.gallery.gallery
+import com.wgt.base.network.platform
 import kotlin.time.Clock
 
 private const val TAG = "MediaViewModel"
 
 /** 一天对应的毫秒数（UTC），用于把 epoch 毫秒折算为"日"边界做分组。 */
 private const val MILLIS_PER_DAY = 86_400_000L
+
+/**
+ * 自动备份轮询间隔（毫秒）。
+ *
+ * 自动备份非实时事件驱动，以固定周期扫描图库差集。30s 在"及时性"与"电量/后端压力"间
+ * 取平衡：用户拍照后最迟 30s 内进入上传流程；同时避免秒级轮询空耗。轮询体本身在
+ * [Dispatchers.Main] 协程内、挂起于网络/IO 调用期间释放主线程，不阻塞 UI。
+ */
+private const val AUTO_BACKUP_INTERVAL_MS = 30_000L
 
 /**
  * 按日期分组后的媒体集合：[title] 为人类可读的组标题（"今天"/"昨天"/"YYYY年MM月DD日"），
@@ -191,6 +204,55 @@ class MediaViewModel {
     private var cachedUploadedMedia: List<MediaMetadata>? = null
     private var cachedCloudMedia: List<MediaMetadata>? = null
 
+    // ---- 增量同步 / 自动备份 ----
+
+    /**
+     * 增量同步游标（毫秒）。初值取自 [SettingsState.syncCursor]（持久化），随
+     * [loadCloudChanges] 每页成功推进并回写。0 表示从未同步过（下次全量拉取）。
+     * 由 App 启动与进入"已上传"Tab 的 [loadCloudChanges] 消费。
+     */
+    var syncCursor: Long = SettingsState.syncCursor
+        private set
+
+    /**
+     * 云端媒体列表 —— [loadCloudChanges] 合并 sync/changes 增量后的产物，直接供"已上传" Tab 渲染。
+     * 与 [mediaList] 区分：mediaList 是当前 Tab 的渲染源（可能指向本地图库/网盘/云端），
+     * [cloudMedia] 始终是云端增量同步累积视图，切换到"已上传"Tab 时拷贝给 mediaList。
+     */
+    var cloudMedia by mutableStateOf<List<MediaMetadata>>(emptyList())
+        private set
+
+    /** 云端增量同步进行中（驱动"已上传"Tab 的 loading 态）。 */
+    var isSyncing by mutableStateOf(false)
+        private set
+
+    /** 云端用量（[loadSyncUsage] 成功后填充，设置页/已上传页可展示）。 */
+    var cloudUsage by mutableStateOf<MediaService.SyncUsage?>(null)
+        private set
+
+    /**
+     * 上传离线队列（弱网失败入队，恢复后重放）。UI 可观察 [UploadQueue.items] 展示待传数。
+     */
+    val uploadQueue = UploadQueue()
+
+    /**
+     * SHA-256 去重集合：增量同步返回的指纹 + 本设备已传指纹，自动备份时据此跳过已传图。
+     */
+    private val dedup = Sha256Dedup(SettingsStorage())
+
+    /**
+     * 自动备份已知本地 id 快照。开启自动备份后首次建立；之后 [checkAndBackupNewLocalMedia]
+     * 比对图库 id 与该快照，新出现的 id 视为本会话新增图，进入上传/离线队列。
+     * 纯内存——进程重启后重新建立快照（避免重启即重传历史图）。
+     */
+    private val knownLocalIds: MutableSet<String> = HashSet()
+
+    /** 自动备份轮询协程句柄，[startAutoBackup]/[stopAutoBackup] 管理其生命周期。 */
+    private var autoBackupJob: Job? = null
+
+    /** 设备注册进行中（去重并发注册）。 */
+    private var isRegisteringDevice = false
+
     /**
      * 本地相册分页加载每页大小上限。
      *
@@ -255,7 +317,308 @@ class MediaViewModel {
         memoryWarningHandle = registerMemoryWarningCallback {
             clearCachesOnMemoryWarning()
         }
+
+        // 冷启动恢复登录态时发起首次增量同步 + 启动自动备份（token 由 App 注入，
+        // 已就绪即可发请求）。App 层在 token 注入/登录后会再调 [onSessionReady] 兜底。
+        if (AuthState.isLoggedIn) {
+            onSessionReady()
+        }
     }
+
+    /**
+     * 登录态就绪后触发：App 启动 token 注入后、登录成功后、401 清会话后重新登录后调用。
+     *
+     * 触发两件事（幂等，重复调用无副作用）：
+     * 1. [loadCloudChanges] —— App 启动增量拉取，用本地 [syncCursor] 续拉云端变更。
+     * 2. 若 [SettingsState.autoBackupEnabled] —— 注册设备（按需）并启动自动备份。
+     *
+     * 不在 [init] 直接发请求：token 由 App 的 LaunchedEffect 异步注入 MediaService，
+     * 启动顺序上无法保证 init 时 token 已就位。
+     */
+    fun onSessionReady() {
+        // 后台拉一次增量（不阻塞 UI；失败静默，游标不前进，下次重试）。
+        loadCloudChanges()
+        // 同步用量供设置页/已上传页展示，失败静默。
+        loadSyncUsage()
+        if (SettingsState.autoBackupEnabled) {
+            startAutoBackup()
+        }
+    }
+
+    /**
+     * 增量拉取云端变更并累积到 [cloudMedia]。
+     *
+     * 以持久化游标 [syncCursor] 为 since 起点循环调 [MediaService.getSyncChanges]，
+     * 逐页 [mergeCloudChanges]（upsert + 软删移除），[hasMore]=false 即完成一轮同步；
+     * 每页成功后推进游标并落盘，失败页提前返回且**不前进游标**（下次重试从原位置续拉，
+     * 避免丢增量）。指纹同步灌入 [dedup]（非删除项），使自动备份能跳过他设备已传图。
+     *
+     * 由 App 启动（[onSessionReady]）与进入"已上传"Tab 时调用。重入安全：
+     * [isSyncing] 置位期间直接返回，避免 Tab 来回切换并发起多次同步。网络/未登录失败静默。
+     */
+    fun loadCloudChanges() {
+        // 非登录态不发请求（sync 端点需鉴权）。
+        if (!AuthState.isLoggedIn) return
+        if (isSyncing) return
+        isSyncing = true
+        viewModelScope.launch {
+            var cursor = syncCursor
+            try {
+                while (true) {
+                    val page = MediaService.getSyncChanges(since = cursor, pageSize = 100)
+                        ?: return@launch // 网络/HTTP 错误：不推进游标，下次重试
+                    // 指纹灌入去重集合（非删除项），覆盖他设备已传内容。
+                    dedup.loadFromSync(page.changes)
+                    // 合并到云端累积视图（upsert + 软删移除）。
+                    cloudMedia = mergeCloudChanges(cloudMedia, page.changes)
+                    cursor = page.nextCursor
+                    // nextCursor 推进后立即落盘，保证中途失败也只丢未拉部分而非已拉进度。
+                    if (cursor > syncCursor) {
+                        SettingsState.saveSyncCursor(cursor)
+                        syncCursor = cursor
+                    }
+                    if (!page.hasMore) break
+                }
+                logger.info(TAG, "loadCloudChanges done, cloud=${cloudMedia.size} cursor=$cursor")
+            } catch (e: Exception) {
+                // 非预期异常（如合并逻辑）：记录，游标已在 try 内按页推进过，下次续拉。
+                logger.error(TAG, "loadCloudChanges failed: ${e::class.simpleName} ${e.message}")
+            } finally {
+                isSyncing = false
+            }
+        }
+    }
+
+    /**
+     * 把一页变更合并进现有云端列表。
+     *
+     * - 删除项（[deleted]=true）：按 id 从列表移除；
+     * - 非 deletion：按 id upsert（存在则替换为新版元数据，否则追加）。
+     * 用 LinkedHashMap 保序：保留既有云端顺序，删除命中项，新增附加到末尾，已存在项就位更新。
+     * 不依赖 java.util.LinkedHashMap 特殊 API，纯 Kotlin MutableMap 即可。
+     */
+    private fun mergeCloudChanges(
+        existing: List<MediaMetadata>,
+        changes: List<MediaService.SyncChange>
+    ): List<MediaMetadata> {
+        if (changes.isEmpty()) return existing
+        // 以 id 为键的有序表：先装入既有项（保序），再按变更 upsert/删除。
+        val byId = LinkedHashMap<String, MediaMetadata>()
+        for (m in existing) byId[m.id] = m
+        // 删除集：一次遍历变更收集被删 id，避免逐条改 map 引入中间态。
+        val deletedIds = HashSet<String>()
+        for (c in changes) {
+            if (c.deleted) deletedIds.add(c.id) else byId[c.id] = c.toMediaMetadata()
+        }
+        if (deletedIds.isNotEmpty()) {
+            val it = byId.entries.iterator()
+            while (it.hasNext()) if (it.next().key in deletedIds) it.remove()
+        }
+        return byId.values.toList()
+    }
+
+    /**
+     * 拉取云端用量并更新 [cloudUsage]（供设置页/已上传页展示)。未登录/失败静默，保留旧值。
+     */
+    fun loadSyncUsage() {
+        if (!AuthState.isLoggedIn) return
+        viewModelScope.launch {
+            val usage = MediaService.getSyncUsage()
+            if (usage != null) cloudUsage = usage
+        }
+    }
+
+    /**
+     * 进入/刷新"已上传"Tab 的云端视图入口。
+     *
+     * 把 [cloudMedia]（增量同步累积视图）立刻拷给 [mediaList] 供网格即时渲染，同时后台
+     * 发起 [loadCloudChanges] 续拉最新增量——已有视图先上屏，同步完成后 [cloudMedia] 更新
+     * 再二次刷新 mediaList，使"秒开 + 增量刷新"二者兼得。配合保留旧 [loadUploadedMediaList]
+     * 作为不具备同步时的回退路径（当前不再被 Tab1 直接调用，留作全量列表兜底）。
+     *
+     * [forceRefresh] 透传给 [loadCloudChanges]——虽游标机制本身只拉增量，force 时附加
+     * 用量刷新并加载，更彻底；不强制重置游标。
+     */
+    fun loadCloudViewForTab(forceRefresh: Boolean = false) {
+        currentSource = MediaSource.BACKEND
+        listLoadError = null
+        // 先用已有云端累积视图上屏（秒开），空也不阻塞。
+        mediaList = cloudMedia
+        loadCloudChanges()
+        if (forceRefresh) loadSyncUsage()
+    }
+
+    /**
+     * 开启自动备份：按需注册设备 + 启动后台轮询。
+     *
+     * 轮询协程周期性 [checkAndBackupNewLocalMedia]：比对图库 id 快照检测本会话新增图，
+     * sha256 去重后上传，失败入离线队列。轮询前先 [replayUploadQueue] 重放历史失败项。
+     * 幂等：重复调用不重复起协程（[autoBackupJob] 非空即返回）。
+     */
+    fun startAutoBackup() {
+        if (!AuthState.isLoggedIn) return
+        if (autoBackupJob?.isActive == true) return
+        // 首次建立已知本地 id 快照（避免把已存在的历史图全判为"新增"瞬时上传）。
+        if (knownLocalIds.isEmpty()) {
+            viewModelScope.launch { seedKnownLocalIdsSnapshot() }
+        }
+        registerDeviceIfNeeded()
+        autoBackupJob = viewModelScope.launch {
+            logger.info(TAG, "auto backup poll started")
+            while (isActive) {
+                retryUploadQueue()
+                checkAndBackupNewLocalMedia()
+                // 固定轮询间隔：频繁轮询耗电、过稀落后；30s 在两者间取平衡。
+                delay(AUTO_BACKUP_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** 停止自动备份轮询。取消协程并清空待传队列（切账号/关开关时调用）。 */
+    fun stopAutoBackup() {
+        autoBackupJob?.cancel()
+        autoBackupJob = null
+        uploadQueue.clear()
+        logger.info(TAG, "auto backup stopped")
+    }
+
+    /**
+     * 按需注册当前设备（首次开启自动备份或 deviceId 为空时）。
+     *
+     * 用 [platform] 作为平台标记（"iOS"/"Android"），设备名取用户名+平台。成功后落地
+     * 到 [SettingsState.deviceId]，避免每次启动重复注册。[isRegisteringDevice] 防并发。
+     */
+    private fun registerDeviceIfNeeded() {
+        if (SettingsState.deviceId.isNotEmpty()) return
+        if (isRegisteringDevice) return
+        if (!AuthState.isLoggedIn) return
+        isRegisteringDevice = true
+        viewModelScope.launch {
+            try {
+                val id = MediaService.registerDevice(
+                    deviceName = "${AuthState.currentUsername}-${platform()}",
+                    platform = platform()
+                )
+                if (!id.isNullOrEmpty()) {
+                    SettingsState.saveDeviceId(id)
+                    logger.info(TAG, "device registered: $id")
+                }
+            } catch (e: Exception) {
+                logger.error(TAG, "registerDevice failed: ${e.message}")
+            } finally {
+                isRegisteringDevice = false
+            }
+        }
+    }
+
+    /**
+     * 建立已知本地 id 快照：把当前图库全部 id 灌入 [knownLocalIds]。
+     *
+     * 只在自动备份首次开启时调用一次。此后 [checkAndBackupNewLocalMedia] 以此为基线，
+     * 新出现（不在此快照内）的 id 视为本会话新增图。进程重启后重新建立——
+     * 避免重启即把全部历史图判为新增而瞬时重传。
+     */
+    private suspend fun seedKnownLocalIdsSnapshot() {
+        if (!galleryFeature.hasPermission()) return
+        try {
+            val all = galleryFeature.getMediaFromGallery()
+            knownLocalIds.addAll(all.map { it.id })
+            logger.info(TAG, "known local snapshot size=${knownLocalIds.size}")
+        } catch (e: Exception) {
+            logger.error(TAG, "seed known local ids failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 检测本地图库新增图片并增量上传（自动备份核心）。
+     *
+     * 比对当前图库全量 id 与 [knownLocalIds]：差集即新增图（含快照建立后用户拍的/导入的）。
+     * 逐项取字节 → 算 sha256 → [dedup] 命中则跳过 → 否则上传：成功登记指纹 + 加入 knownLocalIds；
+     * 失败（弱网）入 [uploadQueue] 待重放。新增 id 无论上传成败都加入快照，避免下轮重复处理。
+     *
+     * 仅处理图片与 Live Photo（视频体积大、备份策略另议）；纯视频跳过。
+     */
+    private suspend fun checkAndBackupNewLocalMedia() {
+        if (!galleryFeature.hasPermission()) return
+        val current: List<MediaMetadata>
+        try {
+            current = galleryFeature.getMediaFromGallery()
+        } catch (e: Exception) {
+            logger.error(TAG, "backup scan failed: ${e.message}")
+            return
+        }
+        val newOnes = current.filter { it.id !in knownLocalIds }
+        if (newOnes.isEmpty()) return
+        for (m in newOnes) {
+            // 无论后续上传成败，先记入快照，避免下轮重复处理同一项。
+            knownLocalIds.add(m.id)
+            // 仅自动备份图片与 Live Photo；视频跳过（体积/策略另有考量）。
+            if (m.type == MediaType.VIDEO) continue
+            try {
+                val bytes = galleryFeature.getMediaData(m.id) ?: continue
+                val hash = computeSha256(bytes)
+                // 去重命中（本设备或他设备已传过）：跳过上传。
+                if (dedup.contains(hash)) continue
+                val ok = MediaService.uploadMedia(bytes, m.filename, m.is_live_photo)
+                if (ok) {
+                    dedup.markUploaded(hash)
+                    // 上传成功后触发一次增量同步，让云端视图即时纳入新图（轻量：仅拉增量）。
+                    loadCloudChanges()
+                } else {
+                    // 上传失败（多半弱网）：入离线队列，网络恢复后 [retryUploadQueue] 重放。
+                    uploadQueue.enqueue(
+                        PendingUpload(
+                            mediaId = m.id,
+                            filename = m.filename,
+                            sha256 = hash,
+                            isLivePhoto = m.is_live_photo,
+                            enqueuedAt = Clock.System.now().toEpochMilliseconds()
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                logger.error(TAG, "backup upload failed id=${m.id}: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 重放离线上传队列。
+     *
+     * 逐条出队 → 重取图库字节（入队时未存字节，进程内仍可取）→ 去重再判断（[dedup] 可能已
+     * 由同步补齐）→ 上传：成功登记指纹并 remove；失败重回队尾重试下一轮。队列空则直接返回。
+     * 串行执行，避免突发打满后端。仅在网络可用语义下有意义，但此处不强检网络——
+     * 失败自然重新入队，与"恢复后重放"等价且更简单。
+     */
+    private suspend fun retryUploadQueue() {
+        if (!uploadQueue.isNotEmpty) return
+        // 出队快照后再逐条处理，避免处理过程中 enqueue 造成无限增长。
+        val snapshot = ArrayList(uploadQueue.items)
+        for (item in snapshot) {
+            // 去重集合可能在同步后被补齐；命中则直接清掉该任务。
+            if (dedup.contains(item.sha256)) {
+                uploadQueue.remove(item.mediaId)
+                continue
+            }
+            try {
+                val bytes = galleryFeature.getMediaData(item.mediaId) ?: run {
+                    // 图库里已取不到（被删）：从队列移除，避免永久重试。
+                    uploadQueue.remove(item.mediaId)
+                    continue
+                }
+                val ok = MediaService.uploadMedia(bytes, item.filename, item.isLivePhoto)
+                if (ok) {
+                    dedup.markUploaded(item.sha256)
+                    uploadQueue.remove(item.mediaId)
+                    loadCloudChanges()
+                }
+                // 失败：保留在队列中，下一轮再试。
+            } catch (e: Exception) {
+                logger.error(TAG, "replay upload failed id=${item.mediaId}: ${e.message}")
+            }
+        }
+    }
+
 
     /**
      * 内存警告时清空图片缓存，释放内存。

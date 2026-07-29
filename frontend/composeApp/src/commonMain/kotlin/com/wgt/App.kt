@@ -91,6 +91,9 @@ fun App() {
     val authToken = AuthState.token
     LaunchedEffect(authToken) {
         MediaService.setAuthToken(authToken)
+        // token 注入/登录成功后触发首次增量同步 + 自动备份幂等兜底。
+        // 登出时 token 为空，onSessionReady 内部按 isLoggedIn 短路，不会发起请求。
+        if (authToken.isNotEmpty()) viewModel.onSessionReady()
     }
 
     var showSplash by remember { mutableStateOf(true) }
@@ -132,7 +135,10 @@ fun App() {
                             onNavigateToSettings = { screen = Screen.SETTINGS },
                             onNavigateToAlbums = { screen = Screen.ALBUM }
                         )
-                        Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
+                        Screen.SETTINGS -> SettingsScreen(
+                            viewModel = viewModel,
+                            onBack = { screen = Screen.MEDIA }
+                        )
                         Screen.ALBUM -> AlbumScreen(
                             viewModel = viewModel,
                             onBack = { screen = Screen.MEDIA }

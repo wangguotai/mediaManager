@@ -67,6 +67,27 @@ object SettingsKeys {
 
     /** 当前登录用户 id（服务端分配），恢复登录态时回填 [AuthState]。 */
     const val AUTH_USER_ID = "auth_user_id"
+
+    /** 自动云备份开关（"true"/"false"）。默认关，用户在设置页主动开启。 */
+    const val AUTO_BACKUP_ENABLED = "auto_backup_enabled"
+
+    /**
+     * 已登记的设备 id（服务端分配，见 [MediaService.registerDevice]）。
+     * 自动备份开启后首次注册获得，持久化以避免每次启动重复注册设备。
+     */
+    const val DEVICE_ID = "device_id"
+
+    /**
+     * 已上传内容的 SHA-256 指纹集合（逗号分隔），供 [Sha256Dedup] 去重。
+     * 冷启动读回，避免重启后自动备份重传全库。
+     */
+    const val UPLOADED_SHA256 = "uploaded_sha256"
+
+    /**
+     * 增量同步游标（毫秒字符串）。记录上次 [MediaService.getSyncChanges] 推进到的
+     * updated_at，冷启动续拉增量；0 表示从未同步。见 [SettingsState.syncCursor]。
+     */
+    const val SYNC_CURSOR = "sync_cursor"
 }
 
 /**

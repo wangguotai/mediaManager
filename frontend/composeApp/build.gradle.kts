@@ -42,6 +42,7 @@ kotlin {
             implementation(projects.shared)
             implementation(projects.featureMedia)
             implementation(projects.featureCommon)
+            implementation(projects.baseNetwork)
             implementation(projects.rnModule)
             implementation(libs.kotlinx.serialization.json)
             // 对应的生成资源强要求，必须有该依赖

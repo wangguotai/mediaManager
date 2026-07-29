@@ -153,7 +153,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         if (selectedTab == 0 && viewModel.canAccessGallery) {
             viewModel.loadMediaFromGallery(forceRefresh = false)
         } else if (selectedTab == 1) {
-            viewModel.loadUploadedMediaList(forceRefresh = false)
+            // "已上传" Tab 现为云端媒体视图：展示 sync/changes 增量同步累积的 cloudMedia，
+            // 进入即触发后台增量续拉。保留 loadCloudViewForTab 的"秒开已有视图 + 增量刷新"语义。
+            viewModel.loadCloudViewForTab(forceRefresh = false)
         } else if (selectedTab == 2) {
             viewModel.loadCloudMediaList(forceRefresh = false)
         }
@@ -169,7 +171,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             // 与加载源（LOCAL vs BACKEND）一致，供详情面板展示。
             val sourceLabel = when (selectedTab) {
                 0 -> "本地相册"
-                1 -> "已上传"
+                1 -> "云端"
                 else -> "网盘图片"
             }
             // 视频项通过 onMediaClick 直接走 VideoPlayer 路径（不设 previewIndex），
@@ -428,6 +430,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 ) { selectedTab ->
                     val isLoading = when (selectedTab) {
                         0 -> viewModel.isGalleryLoading
+                        // "已上传" Tab 的同步态由 isSyncing 驱动（loadCloudViewForTab 先秒开
+                        // 已有视图，isSyncing 期间叠加刷新指示）。
+                        1 -> viewModel.isSyncing
                         2 -> viewModel.isCloudLoading
                         else -> viewModel.isLoading
                     }
@@ -436,7 +441,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     val onRefresh = {
                         when (selectedTab) {
                             0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                            1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                            1 -> viewModel.loadCloudViewForTab(forceRefresh = true)
                             else -> viewModel.loadCloudMediaList(forceRefresh = true)
                         }
                     }
