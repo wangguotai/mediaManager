@@ -110,13 +110,17 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 幻灯片播放状态：非空即渲染全屏 [SlideshowPlayer]，传入当前 filteredList。
     var slideshowActive by remember { mutableStateOf(false) }
 
+    // 选择模式下按返回键退出选择模式（而非退出 App）
+    PlatformBackHandler(enabled = viewModel.hasSelection) {
+        viewModel.deselectAll()
+    }
+
     // 搜索栏展开态：收起时只占一个图标位，展开时显示输入框 + 清除按钮。
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
 
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
-    var contextMenuMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
     // "加入相册"选择对话框：非空时弹出相册列表供用户选择目标相册。
     var addToAlbumMedia by remember { mutableStateOf<MediaMetadata?>(null) }
@@ -231,27 +235,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         }
     }
 
-    // 长按上下文菜单：预览 / 加入相册
-    contextMenuMedia?.let { media ->
-        ContextMenuSheet(
-            media = media,
-            onPreview = {
-                contextMenuMedia = null
-                if (media.type == MediaType.VIDEO) {
-                    videoPlayerMedia = media
-                } else {
-                    previewIndex = viewModel.filteredList.indexOf(media)
-                }
-            },
-            onAddToAlbum = {
-                contextMenuMedia = null
-                addToAlbumMedia = media
-                viewModel.showAddToAlbumDialog(media.id)
-            },
-            onDismiss = { contextMenuMedia = null }
-        )
-    }
-
     // "加入相册"相册选择对话框
     addToAlbumMedia?.let { media ->
         AddToAlbumDialog(
@@ -307,7 +290,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         // MIUI 修复：完全移除 topBar 槽位——MIUI 系统会拦截 Scaffold topBar 区域的触摸事件。
         // 标题 + 搜索图标改放到内容区第一行，确保 y 坐标足够低，绕过状态栏触摸拦截。
         bottomBar = {
-            if (viewModel.hasSelection && selectedTab != 2 && selectedTab != 3) {
+            if (viewModel.hasSelection && selectedTab < 3) {
                 // 选择模式：显示批量操作底栏（替换 NavigationBar）
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
@@ -469,28 +452,24 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                             ) {
                                 val isSearching = viewModel.searchQuery.isNotBlank() ||
                                     viewModel.filterType != MediaFilterType.ALL
+                                // 小米相册交互：单击=预览（选择模式下=选中/取消）
                                 val onMediaClick: (MediaMetadata) -> Unit = { media ->
-                                    if (selectedTab == 2) {
+                                    if (viewModel.hasSelection) {
+                                        viewModel.toggleMediaSelection(media.id)
+                                    } else {
                                         if (media.type == MediaType.VIDEO) {
                                             videoPlayerMedia = media
                                         } else {
                                             previewIndex = filtered.indexOf(media)
                                         }
-                                    } else {
-                                        viewModel.toggleMediaSelection(media.id)
                                     }
                                 }
+                                // 小米相册交互：长按=进入选择模式并选中当前项
                                 val onMediaLongClick: (MediaMetadata) -> Unit = { media ->
-                                    if (selectedTab == 2) {
-                                        contextMenuMedia = media
-                                    } else if (viewModel.hasSelection) {
-                                        if (media.type == MediaType.VIDEO) {
-                                            videoPlayerMedia = media
-                                        } else {
-                                            previewIndex = filtered.indexOf(media)
-                                        }
+                                    if (!viewModel.hasSelection) {
+                                        viewModel.startSelection(media.id)
                                     } else {
-                                        contextMenuMedia = media
+                                        viewModel.toggleMediaSelection(media.id)
                                     }
                                 }
                                 val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
@@ -2358,70 +2337,6 @@ fun UploadFab(
  * 提供两个选项：预览、加入相册。
  * 用 [AlertDialog] 实现，commonMain 全平台兼容。
  */
-@OptIn(ExperimentalResourceApi::class)
-@Composable
-private fun ContextMenuSheet(
-    media: MediaMetadata,
-    onPreview: () -> Unit,
-    onAddToAlbum: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                media.filename,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        },
-        text = {
-            Column {
-                // 预览
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onPreview)
-                        .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        painterResource(Res.drawable.ic_image_placeholder),
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.size(12.dp))
-                    Text("预览", style = MaterialTheme.typography.bodyLarge)
-                }
-                // 加入相册
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onAddToAlbum)
-                        .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        painterResource(Res.drawable.ic_photo),
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.size(12.dp))
-                    Text("加入相册", style = MaterialTheme.typography.bodyLarge)
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消")
-            }
-        }
-    )
-}
 
 /**
  * "加入相册"相册选择对话框。

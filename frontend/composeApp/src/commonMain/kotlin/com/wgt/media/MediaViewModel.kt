@@ -519,6 +519,15 @@ class MediaViewModel {
     }
 
     /**
+     * 开始选择模式并选中指定媒体（长按触发）。
+     */
+    fun startSelection(mediaId: String) {
+        if (!selectedMediaIds.contains(mediaId)) {
+            selectedMediaIds.add(mediaId)
+        }
+    }
+
+    /**
      * 切换媒体选中状态
      */
     fun toggleMediaSelection(mediaId: String) {
