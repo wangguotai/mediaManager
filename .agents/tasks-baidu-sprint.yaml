@@ -1,0 +1,198 @@
+# tasks-baidu-sprint.yaml — PRD-v4 百度网盘+小米相册 Sprint
+# 协调者: OpenClaw | 执行体: claude/codex | QA: reality-checker
+
+tasks:
+  # ── Layer 0: 后端重构（认证 + SQLite + 存储抽象 + 同步 API）──
+
+  - id: backend-auth-sqlite
+    product: claude
+    prompt: |
+      在 backend/ 实现用户认证 + SQLite 元数据存储。
+      
+      1. 引入 modernc.org/sqlite 纯 Go SQLite，建表: user(id,username,password_hash,role,created_at), media(id,user_id,filename,type,size,mime,width,height,created_at,updated_at,sha256,deleted), device(id,user_id,name,platform,created_at)
+      2. JWT 认证: POST /api/auth/login, POST /api/auth/register (受 allow_signup 控制), 中间件解析 Bearer token 注入 user_id
+      3. 所有现有 /api/media/* /api/favorite/* /api/album/* 端点加 user_id 隔离
+      4. 数据目录从 data/uploads/ → data/users/{uid}/uploads/, favorites.json 和 albums.json 加 user_id 维度
+      5. config.yaml 支持: jwt_secret, allow_signup(off/first/open), data_dir, port
+      6. 环境变量 MM_* 覆盖 config.yaml
+      7. 保留 /healthz 和 /api/stats，未带 token 的 /api/* 返回 401
+      
+      不改前端代码。完成后 git add -A && git commit -m "backend-auth-sqlite: user auth + SQLite metadata + multi-user isolation"
+    files: [backend/]
+    depends_on: []
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd backend && go build ./..."
+    clean_commands: []
+
+  - id: backend-sync-api
+    product: claude
+    prompt: |
+      在 backend/ 实现多设备同步 API。
+      
+      1. GET /api/sync/changes?since={cursor_ms}&page=&page_size= → 返回 {changes:[MediaMetadata], next_cursor, has_more}，含软删除墓碑(deleted标记)
+      2. POST /api/media/upload 增加 sha256, client_id, taken_at 字段，服务端按 (user_id, sha256) 去重秒传
+      3. POST /api/device/register {device_name, platform} → {device_id}
+      4. GET /api/device/list → 该用户所有设备
+      5. GET /api/sync/usage → 该用户存储总量+文件数
+      6. 读 .agents/interface-contract.md 了解现有接口契约
+      
+      完成后 git add -A && git commit -m "backend-sync-api: incremental sync + dedup + device registration"
+    files: [backend/]
+    depends_on: [backend-auth-sqlite]
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  - id: backend-docker
+    product: claude
+    prompt: |
+      在 backend/ 添加 Docker 一键部署。
+      
+      1. Dockerfile: Go 多阶段构建，含 ffmpeg
+      2. docker-compose.yml: 服务 + 持久化卷 + 健康检查
+      3. config.example.yaml: 全部配置项注释
+      4. 环境变量 MM_* 覆盖逻辑
+      5. 首次启动输出超管令牌或允许一次性注册
+      
+      完成后 git add -A && git commit -m "backend-docker: one-click deploy with docker-compose"
+    files: [backend/]
+    depends_on: [backend-auth-sqlite]
+    timeout: 300s
+    max_retries: 2
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  # ── Layer 1: 客户端适配（认证 UI + 同步逻辑 + 文件管理）──
+
+  - id: frontend-auth-ui
+    product: claude
+    prompt: |
+      在 frontend/ 实现认证流程 UI + token 持久化。
+      
+      1. 登录页: 服务端地址 + 用户名 + 密码，登录调 POST /api/auth/login 存 token
+      2. token 存 SettingsStorage（Android EncryptedSharedPreferences, iOS Keychain expect/actual）
+      3. Ktor 客户端统一加 Authorization: Bearer header
+      4. 401 拦截: 清 token → 回登录页
+      5. 注册页（如果服务端 allow_signup）
+      6. 设置页显示当前登录用户 + 退出登录
+      
+      现有三 Tab + 预览 + 编辑 + 搜索等全部保留不变。未登录时显示登录页。
+      完成后 git add -A && git commit -m "frontend-auth-ui: login page + token persistence + 401 interceptor"
+    files: [frontend/]
+    depends_on: [backend-auth-sqlite]
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: frontend-sync
+    product: claude
+    prompt: |
+      在 frontend/ 实现自动同步逻辑。
+      
+      1. 增量拉取: App 启动 + 进入"已上传"Tab 时调 GET /api/sync/changes?since=cursor，写入本地缓存索引
+      2. 云相册自动备份: 设置开关，开启后本地相册新增图片/视频后台增量上传
+      3. 上传去重: 上传前算 sha256，命中服务端已存在则跳过
+      4. 离线队列: 弱网时上传入队本地待办表(SQLite)，恢复网络后重放
+      5. "已上传"Tab 升级为按 sync/changes 维护的云端媒体视图
+      
+      完成后 git add -A && git commit -m "frontend-sync: incremental pull + auto backup + dedup + offline queue"
+    files: [frontend/]
+    depends_on: [frontend-auth-ui, backend-sync-api]
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: frontend-file-mgmt
+    product: claude
+    prompt: |
+      在 frontend/ "我的"Tab 下增加"文件管理"入口。
+      
+      1. 列出云端所有媒体（含视频），按类型/时间/大小筛选排序
+      2. 批量下载到本地相册（复用现有下载流 + 写 MediaStore/相册）
+      3. 批量删除云端（调云删除，写墓碑）
+      4. 查看占用空间（调 /api/sync/usage）
+      
+      不做目录/文件夹层级，媒体扁平 + 相册分组。
+      完成后 git add -A && git commit -m "frontend-file-mgmt: cloud file management view"
+    files: [frontend/]
+    depends_on: [frontend-sync]
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  # ── Layer 2: 运营服务端骨架 ──
+
+  - id: ops-server
+    product: claude
+    prompt: |
+      在 ops-server/ 新建运营服务端骨架（独立 Go 项目）。
+      
+      1. 运营账号: POST /op/auth/register|login，自管 op_user 表
+      2. 服务端注册: POST /op/server/register {owner_op_user_id, endpoint, label} → {server_id, server_token}
+      3. 设备发现: 维护 device(server_id, device_id, online, last_seen) 在线表
+      4. WebSocket 长连: 客户端和服务端各自连运营服务端
+      5. 信令交换: 客户端要连存储服务端时，运营服务端做介绍（候选地址互换）
+      6. TCP 中继: 直连失败时走运营服务端 TURN 式转发
+      7. 流量记账: relay_session(id, server_id, device_id, bytes_in, bytes_out)
+      8. SQLite 存储
+      9. Docker 一键部署
+      
+      完成后 git add -A && git commit -m "ops-server: relay signaling + device discovery + traffic accounting"
+    files: [ops-server/]
+    depends_on: [backend-auth-sqlite]
+    timeout: 900s
+    max_retries: 2
+    verify_commands:
+      - "cd ops-server && go build ./..."
+    clean_commands: []
+
+  # ── Layer 3: 运营前端 ──
+
+  - id: ops-frontend
+    product: claude
+    prompt: |
+      在 ops-server/ 内嵌运营管理前端（HTMX 或纯 HTML+JS，不开 SPA 框架）。
+      
+      1. 登录页: 运营管理员登录
+      2. 用户管理: 运营账号列表、禁用/启用
+      3. 服务端监控: 已注册存储服务端列表、在线状态、心跳
+      4. 设备/连接: 当前在线设备、活跃中继会话、主动断开
+      5. 流量统计: 按 server_id/日 聚合图表
+      
+      嵌入运营服务端二进制，/admin/* 路由，独立管理员账号。
+      完成后 git add -A && git commit -m "ops-frontend: admin dashboard embedded in ops-server"
+    files: [ops-server/]
+    depends_on: [ops-server]
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  # ── Layer 4: QA 验收 ──
+
+  - id: qa-acceptance
+    product: claude
+    prompt: |
+      全量 QA 验收，按 PRD-v4.md §7 MVP 验收主线和 §8 全局验收标准逐项检查:
+      
+      1. go build ./... 通过（storage-server + ops-server）
+      2. assembleDebug + compileKotlinIosArm64 通过
+      3. docker compose up -d 一键起存储服务端，/healthz 200
+      4. 未带 token 访问 /api/media/list → 401；带正确 token → 200
+      5. 两设备同步: A 上传 → B sync/changes 可见 → 删除 → B 收到墓碑
+      6. 运营前端可登录、可见已注册服务端
+      7. 现有媒体浏览/编辑/收藏/相册在加 auth 后真机无回归
+      
+      输出报告到 docs/V4-QA-REPORT.md
+      完成后 git add -A && git commit -m "qa: V4 acceptance report"
+    files: [docs/]
+    depends_on: [frontend-file-mgmt, ops-frontend, backend-docker]
+    timeout: 600s
+    max_retries: 1
+    verify_commands: []
