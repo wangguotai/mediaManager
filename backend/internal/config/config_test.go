@@ -42,7 +42,7 @@ func TestLoadParsesValues(t *testing.T) {
 	}
 }
 
-// TestLoadEmptyDBPathDerives 验证 db_path 留空时派生到 <data_dir>/metadata.db。
+// TestLoadEmptyDBPathDerives 验证 db_path 留空时派生到 <data_dir>/media.db。
 func TestLoadEmptyDBPathDerives(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
