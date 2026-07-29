@@ -139,6 +139,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
     // Tab 3 = "我的"，不加载媒体数据。
     LaunchedEffect(selectedTab) {
+        // 切换 Tab 时清空选中状态，避免上一 Tab 的选中项串到新 Tab（选中 ID 不匹配新列表）
+        viewModel.deselectAll()
         if (selectedTab == 3) return@LaunchedEffect
         // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
         // 串到新 Tab 造成“列表为空/对不上”的困惑。
@@ -358,7 +360,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
 
             // 媒体 Tab（0-2）：标题 + 搜索栏 + 筛选条 + 网格列表
             Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-                // 标题行
+                // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -366,11 +368,41 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "图片管理",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
-                    )
+                    AnimatedContent(
+                        targetState = viewModel.hasSelection,
+                        transitionSpec = {
+                            fadeIn(tween(200)).togetherWith(fadeOut(tween(200)))
+                        },
+                        label = "titleTransition"
+                    ) { isSelecting ->
+                        if (isSelecting) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { viewModel.deselectAll() },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        painter = painterResource(Res.drawable.ic_close),
+                                        contentDescription = "退出选择",
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "已选择 ${viewModel.selectedCount} 项",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    modifier = Modifier.animateContentSize(tween(200))
+                                )
+                            }
+                        } else {
+                            Text(
+                                "图片管理",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 20.sp
+                            )
+                        }
+                    }
                 }
                 // 搜索栏：自带 IconButton 展开收起，无需额外图标
                 if (selectedTab < 3) {

@@ -580,6 +580,7 @@ class MediaViewModel {
 
         errorMessage = "分享中..."
         viewModelScope.launch {
+            val shareItems = mutableListOf<ShareMediaItem>()
             for (mediaId in selectedMediaIds) {
                 val media = mediaList.find { it.id == mediaId } ?: continue
                 try {
@@ -596,11 +597,15 @@ class MediaViewModel {
                             MediaType.VIDEO -> "video/mp4"
                             MediaType.IMAGE, MediaType.LIVE_PHOTO -> "image/jpeg"
                         }
-                        shareMedia(bytes, media.filename, mimeType)
+                        shareItems.add(ShareMediaItem(bytes, media.filename, mimeType))
                     }
                 } catch (e: Exception) {
                     errorMessage = "分享失败: ${e.message}"
                 }
+            }
+            // 批量分享：一次系统分享面板处理所有文件，而非逐个弹出
+            if (shareItems.isNotEmpty()) {
+                shareMediaBatch(shareItems)
             }
             errorMessage = "已分享"
             onComplete()

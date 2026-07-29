@@ -14,35 +14,41 @@ import platform.UIKit.UIWindow
 import platform.UIKit.UIWindowScene
 
 /**
- * iOS 平台分享实现 —— 用 UIActivityViewController 弹出系统分享面板。
+ * iOS 平台分享实现。
  *
- * 字节流通过 POSIX fwrite 写入临时文件（避免 NSData interop 签名差异），
- * 再生成 NSURL 传给 UIActivityViewController。
- * 用 connectedScenes 获取当前 window scene 的 rootViewController 做 presenter，
- * 兼容 iOS 13+ 场景 API（keyWindow 已废弃）。
+ * 单个/批量均通过 UIActivityViewController 实现（批量传入多个 NSURL）。
+ * 字节流通过 POSIX fwrite 写入临时文件，再生成 NSURL 传给分享面板。
  */
 @OptIn(ExperimentalForeignApi::class)
 actual fun shareMedia(mediaBytes: ByteArray, filename: String, mimeType: String) {
-    // 写入临时文件（POSIX fwrite，绕过 NSData interop）
-    val tempDir = NSTemporaryDirectory()
-    val filePath = "$tempDir$filename"
+    shareMediaBatch(listOf(ShareMediaItem(mediaBytes, filename, mimeType)))
+}
 
-    val fp = fopen(filePath, "wb")
-    if (fp != null) {
-        mediaBytes.usePinned { pinned ->
-            fwrite(pinned.addressOf(0), 1UL, mediaBytes.size.toULong(), fp)
+/**
+ * iOS 批量分享：UIActivityViewController 传入多个 NSURL 文件 URL。
+ */
+@OptIn(ExperimentalForeignApi::class)
+actual fun shareMediaBatch(items: List<ShareMediaItem>) {
+    if (items.isEmpty()) return
+
+    val tempDir = NSTemporaryDirectory()
+    val urls = items.map { item ->
+        val filePath = "$tempDir${item.filename}"
+        val fp = fopen(filePath, "wb")
+        if (fp != null) {
+            item.bytes.usePinned { pinned ->
+                fwrite(pinned.addressOf(0), 1UL, item.bytes.size.toULong(), fp)
+            }
+            fclose(fp)
         }
-        fclose(fp)
+        NSURL.fileURLWithPath(filePath)
     }
 
-    val fileUrl = NSURL.fileURLWithPath(filePath)
-
     val activityViewController = UIActivityViewController(
-        activityItems = listOf(fileUrl),
+        activityItems = urls,
         applicationActivities = null
     )
 
-    // 兼容 iOS 13+ 场景 API：从 connectedScenes 取 UIWindowScene 的 key window 的 rootViewController
     val window = UIApplication.sharedApplication.connectedScenes
         .filterIsInstance<UIWindowScene>()
         .firstOrNull()

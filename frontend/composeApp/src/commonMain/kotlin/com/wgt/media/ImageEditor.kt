@@ -1,7 +1,11 @@
 package com.wgt.media
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,12 +20,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -46,6 +54,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wgt.platform.architecture.dispatchers.dispatchers
@@ -55,7 +64,9 @@ import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
 import mediamanager.composeapp.generated.resources.ic_check_circle
 import mediamanager.composeapp.generated.resources.ic_close
-import mediamanager.composeapp.generated.resources.ic_refresh
+import mediamanager.composeapp.generated.resources.ic_crop_reset
+import mediamanager.composeapp.generated.resources.ic_rotate_left
+import mediamanager.composeapp.generated.resources.ic_rotate_right
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 
@@ -92,12 +103,6 @@ private val FILTER_OPTIONS = listOf(
         0f, 1.0f, 0f, 0f, 0f,
         0f, 0f, 1.5f, 0f, 0f,
         0f, 0f, 0f, 1f, 0f
-    )),
-    FilterOption("复古", floatArrayOf(
-        0.9f, 0.5f, 0.1f, 0f, 0f,
-        0.3f, 0.8f, 0.1f, 0f, 0f,
-        0.2f, 0.3f, 0.5f, 0f, 0f,
-        0f, 0f, 0f, 1f, 0f
     ))
 )
 
@@ -116,12 +121,25 @@ private val ASPECT_OPTIONS = listOf(
 )
 
 /**
+ * 保存状态。
+ */
+private enum class SaveState { IDLE, SAVING, SUCCESS, FAILED }
+
+/**
  * 图片编辑器全屏对话框：裁剪（宽高比 + 拖拽裁剪框）+ 旋转（90°）+ 滤镜 + 保存到本地相册。
  *
  * 底部用 FilterChip 切换 裁剪/旋转/滤镜 三个模式：
- * - 裁剪：宽高比选择条 + 拖拽裁剪框
- * - 旋转：90° 旋转按钮（点触即转）
- * - 滤镜：原图/黑白/暖色/冷色/复古 5 种，用 ColorFilter.colorMatrix 实现
+ * - 裁剪：宽高比选择条 + 拖拽裁剪框 + 重置按钮
+ * - 旋转：左转90° / 右转90° 两个大按钮，点触即转
+ * - 滤镜：原图/黑白/暖色/冷色 4 种，用 ColorFilter.colorMatrix 实现
+ *
+ * 保存流程：
+ * 1. 用户点保存 → 进入 SAVING 状态，显示加载动画
+ * 2. 异步执行 cropAndRotateImageBitmap + saveImageBitmapToGallery
+ * 3. 成功 → SUCCESS 状态，短暂显示成功提示后关闭
+ * 4. 失败 → FAILED 状态，显示错误提示，允许重试
+ *
+ * 取消编辑（点返回）不修改原文件。
  *
  * @param media 被编辑的媒体（取 filename 作保存名、id 作加载键）
  * @param useBackendLoader true 走 [BackendImageLoader]（后端 HTTP），false 走平台相册加载器
@@ -154,6 +172,10 @@ fun ImageEditor(
     // 裁剪框（显示像素坐标）。nullable 表示尚未初始化。
     var cropRect by remember(media.id) { mutableStateOf<Rect?>(null) }
 
+    // 保存状态
+    var saveState by remember { mutableStateOf(SaveState.IDLE) }
+    var saveError by remember { mutableStateOf<String?>(null) }
+
     // 原图加载状态：编辑器独立持有一份 bitmap。
     var sourceBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(media.id) { mutableStateOf(true) }
@@ -168,8 +190,19 @@ fun ImageEditor(
         isLoading = false
     }
 
+    // 保存成功后自动关闭
+    LaunchedEffect(saveState) {
+        if (saveState == SaveState.SUCCESS) {
+            kotlinx.coroutines.delay(800)
+            onDismiss()
+        }
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            // 保存中不允许关闭
+            if (saveState != SaveState.SAVING) onDismiss()
+        },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
@@ -187,26 +220,47 @@ fun ImageEditor(
                 }
             }
 
-            // 顶部工具栏：返回 / 旋转 / 保存。
+            // 顶部工具栏：返回 / 重置裁剪 / 保存。
             TopToolbar(
-                onBack = onDismiss,
-                onRotate = { if (src != null) rotation = (rotation + 90) % 360 },
+                onBack = {
+                    if (saveState != SaveState.SAVING) onDismiss()
+                },
+                onResetCrop = {
+                    // 重置裁剪框到全画面
+                    val vp = viewport
+                    if (vp.width > 0 && vp.height > 0) {
+                        cropRect = Rect(0f, 0f, vp.width.toFloat(), vp.height.toFloat())
+                    }
+                },
                 onSave = {
                     val displayRect = cropRect
                     val src2 = src
-                    if (src2 == null) return@TopToolbar
+                    if (src2 == null || saveState == SaveState.SAVING) return@TopToolbar
+                    saveState = SaveState.SAVING
+                    saveError = null
                     scope.launch(dispatchers.io) {
-                        val sourceRect = displayRect?.let {
-                            mapDisplayRectToSource(it, viewport, src2.width, src2.height, rotation)
+                        try {
+                            val sourceRect = displayRect?.let {
+                                mapDisplayRectToSource(it, viewport, src2.width, src2.height, rotation)
+                            }
+                            val processed = cropAndRotateImageBitmap(
+                                src2, sourceRect, rotation.toFloat(), filterMatrix
+                            )
+                            val result = saveImageBitmapToGallery(processed, media.filename)
+                            if (result != null) {
+                                saveState = SaveState.SUCCESS
+                            } else {
+                                saveState = SaveState.FAILED
+                                saveError = "保存失败，请检查相册权限"
+                            }
+                        } catch (e: Exception) {
+                            saveState = SaveState.FAILED
+                            saveError = e.message ?: "保存失败"
                         }
-                        val processed = cropAndRotateImageBitmap(
-                            src2, sourceRect, rotation.toFloat(), filterMatrix
-                        )
-                        saveImageBitmapToGallery(processed, media.filename)
                     }
-                    onDismiss()
                 },
-                actionsEnabled = src != null
+                actionsEnabled = src != null && saveState != SaveState.SAVING,
+                saveState = saveState
             )
 
             when {
@@ -237,8 +291,100 @@ fun ImageEditor(
                 onAspectChange = { aspectIndex = it },
                 filterIndex = filterIndex,
                 onFilterChange = { filterIndex = it },
+                onRotateLeft = { if (src != null) rotation = (rotation - 90 + 360) % 360 },
+                onRotateRight = { if (src != null) rotation = (rotation + 90) % 360 },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
+
+            // 保存中遮罩
+            AnimatedVisibility(
+                visible = saveState == SaveState.SAVING,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.6f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Color.White)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            "正在保存…",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                }
+            }
+
+            // 保存成功提示
+            AnimatedVisibility(
+                visible = saveState == SaveState.SUCCESS,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.4f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_check_circle),
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(56.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "已保存到相册",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            // 保存失败提示
+            AnimatedVisibility(
+                visible = saveState == SaveState.FAILED,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.4f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_close),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            saveError ?: "保存失败",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        TextButton(onClick = { saveState = SaveState.IDLE }) {
+                            Text("重试", color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -349,16 +495,18 @@ private fun ErrorState(onDismiss: () -> Unit) {
 }
 
 /**
- * 顶部工具栏：返回 / 旋转 / 保存。浮于黑底之上，左中右三段。
- * [actionsEnabled] 为 false（图未加载）时旋转与保存不可用。
+ * 顶部工具栏：返回 / 重置裁剪 / 保存。浮于黑底之上，左中右三段。
+ * [actionsEnabled] 为 false（图未加载或保存中）时旋转与保存不可用。
+ * [saveState] 控制保存按钮的显示状态。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun TopToolbar(
     onBack: () -> Unit,
-    onRotate: () -> Unit,
+    onResetCrop: () -> Unit,
     onSave: () -> Unit,
-    actionsEnabled: Boolean
+    actionsEnabled: Boolean,
+    saveState: SaveState
 ) {
     Row(
         modifier = Modifier
@@ -374,29 +522,46 @@ private fun TopToolbar(
                 tint = Color.White
             )
         }
-        Spacer(modifier = Modifier.weight(1f))
-        IconButton(onClick = onRotate, enabled = actionsEnabled) {
+        // 重置裁剪按钮（仅在非保存状态可用）
+        IconButton(onClick = onResetCrop, enabled = actionsEnabled) {
             Icon(
-                painter = painterResource(Res.drawable.ic_refresh),
-                contentDescription = "旋转90度",
+                painter = painterResource(Res.drawable.ic_crop_reset),
+                contentDescription = "重置裁剪",
                 tint = Color.White
             )
         }
         Spacer(modifier = Modifier.weight(1f))
         TextButton(onClick = onSave, enabled = actionsEnabled, modifier = Modifier.padding(end = 8.dp)) {
-            Icon(
-                painter = painterResource(Res.drawable.ic_check_circle),
-                contentDescription = "保存",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                "保存",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            when (saveState) {
+                SaveState.SAVING -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        "保存中",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+                else -> {
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_check_circle),
+                        contentDescription = "保存",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        "保存",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
         }
     }
 }
@@ -404,8 +569,12 @@ private fun TopToolbar(
 /**
  * 底部栏：两行结构。
  * 第一行：模式切换 FilterChip（裁剪/旋转/滤镜）。
- * 第二行：根据当前模式显示对应选项（宽高比 / 旋转提示 / 滤镜选择）。
+ * 第二行：根据当前模式显示对应选项：
+ * - CROP: 宽高比选择条
+ * - ROTATE: 左转90° / 右转90° 大按钮
+ * - FILTER: 滤镜选择
  */
+@OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun BottomBar(
     editMode: EditMode,
@@ -414,6 +583,8 @@ private fun BottomBar(
     onAspectChange: (Int) -> Unit,
     filterIndex: Int,
     onFilterChange: (Int) -> Unit,
+    onRotateLeft: () -> Unit,
+    onRotateRight: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -461,12 +632,21 @@ private fun BottomBar(
             }
             EditMode.ROTATE -> Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "点击顶部旋转按钮调整方向",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall
+                // 左转90° 按钮
+                RotateButton(
+                    iconRes = Res.drawable.ic_rotate_left,
+                    label = "左转 90°",
+                    onClick = onRotateLeft
+                )
+                Spacer(modifier = Modifier.width(32.dp))
+                // 右转90° 按钮
+                RotateButton(
+                    iconRes = Res.drawable.ic_rotate_right,
+                    label = "右转 90°",
+                    onClick = onRotateRight
                 )
             }
             EditMode.FILTER -> LazyRow(
@@ -484,6 +664,43 @@ private fun BottomBar(
                 }
             }
         }
+    }
+}
+
+/**
+ * 旋转按钮：圆形可点击，图标+文字垂直排列，参考小米相册风格。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun RotateButton(
+    iconRes: org.jetbrains.compose.resources.DrawableResource,
+    label: String,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick)
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = Color.White.copy(alpha = 0.15f),
+            modifier = Modifier.size(48.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    painter = painterResource(iconRes),
+                    contentDescription = label,
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            label,
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 12.sp
+        )
     }
 }
 
