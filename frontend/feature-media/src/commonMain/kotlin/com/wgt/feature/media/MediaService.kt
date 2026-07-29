@@ -3,10 +3,12 @@ package com.wgt.feature.media
 import media.MediaMetadata
 import media.MediaType
 import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.plugins.*
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
-import io.ktor.client.call.*
-import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.*
@@ -29,6 +31,23 @@ import kotlin.time.Clock
 @Volatile
 private var backendUrl: String = DEFAULT_BACKEND_URL
 
+/**
+ * 当前 JWT token —— 运行时可变，由 composeApp 的 [com.wgt.media.AuthState] 经
+ * [MediaService.setAuthToken] 推入。`@Volatile` 保证请求协程与 UI 线程并发读写可见性。
+ *
+ * [jsonClient] 的 `defaultRequest` 块在每次请求执行时读取本变量，非空则附加
+ * `Authorization: Bearer <token>` 头。空串时不附加，使登录/注册等豁免端点正常工作。
+ */
+@Volatile
+private var authToken: String = ""
+
+/**
+ * 401 响应回调 —— 由 composeApp 注册（接到 [com.wgt.media.AuthState.clearSession]，
+ * 进而触发 App 路由守卫回登录页）。仅记录指针，由 [MediaService.setUnauthorizedHandler] 设置。
+ */
+@Volatile
+private var onUnauthorized: (() -> Unit)? = null
+
 /** 后端地址默认值——本机回环，配合 adb reverse 可在真机访问开发机后端。 */
 private const val DEFAULT_BACKEND_URL = "http://localhost:8080"
 
@@ -41,9 +60,44 @@ private fun backendBaseUrl(): String {
     return trimmed.ifEmpty { DEFAULT_BACKEND_URL }
 }
 
+/**
+ * 统一 HTTP 客户端。
+ *
+ * 装三样关键能力：
+ * 1. [ContentNegotiation] + kotlinx.json —— 既有 JSON 解析。
+ * 2. `defaultRequest` —— 闭包运行时读取 [authToken]，非空时给每个请求加
+ *    `Authorization: Bearer` 头。这是"Ktor 统一加 token"的注入点；token 变更无需重建 client。
+ * 3. [HttpCallValidator] `validateResponse` —— 捕获 401 Unauthorized：token 失效/被撤时，
+ *    触发 [onUnauthorized] 回调，由上层清 token 并回登录页。注意此处**不抛异常**，
+ *    仅触发副作用并放行响应——让原调用方按既有路径收到 401 状态自行降级（如返回空列表），
+ *    避免 401 被包装成异常打断现有 catch 逻辑。
+ *
+ * `expectSuccess = false`（默认）保证 401 不被 [BadResponseStatus] 异常吞掉，
+ * 而是按响应状态流经 validateResponse，便于稳定拦截。
+ *
+ * 注：Ktor 3.x 移除了 2.x 的 `handleResponse`；响应校验入口为 `validateResponse`，
+ * 其 receiver 即 [HttpResponse]。见 [HttpCallValidatorConfig.validateResponse]。
+ */
 private val jsonClient = HttpClient {
+    expectSuccess = false
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; isLenient = true })
+    }
+    defaultRequest {
+        val t = authToken
+        if (t.isNotEmpty()) {
+            header(HttpHeaders.Authorization, "Bearer $t")
+        }
+    }
+    install(HttpCallValidator) {
+        // 响应到达后检查状态：401 → 清会话。不抛异常，放行响应由调用方按状态降级。
+        validateResponse { response ->
+            if (response.status == HttpStatusCode.Unauthorized) {
+                logger.info("MediaService", "401 received — invoking unauthorized handler")
+                // 防递归：若 handler 内部又发请求（clearSession 本不发请求，安全）
+                onUnauthorized?.invoke()
+            }
+        }
     }
 }
 
@@ -70,11 +124,152 @@ object MediaService {
     }
 
     /**
+     * 由上层注入当前 token（来自 [com.wgt.media.AuthState]）。`@Volatile` 保证跨线程可见，
+     * [jsonClient] 的 defaultRequest 闭包会读取最新值作 Bearer 头。空串即"未登录"，
+     * 请求不发 Authorization（登录/注册本身也走此 client 但无需 token）。
+     */
+    fun setAuthToken(token: String) {
+        if (token == authToken) return
+        authToken = token
+        logger.info("MediaService", "auth token updated (len=${token.length})")
+    }
+
+    /**
+     * 注册 401 处理器。App 启动时由 [com.wgt.App] 调用（`LaunchedEffect(Unit)` 内），
+     * 传入 AuthState.clearSession——token 失效时清会话 → isLoggedIn 转 false → 回登录页。
+     */
+    fun setUnauthorizedHandler(handler: () -> Unit) {
+        onUnauthorized = handler
+    }
+
+    /**
      * 媒体来源 —— 用于前端区分缩略图/原图该走本地相册还是后端 HTTP。
      * 网盘图片与已上传图片都来自后端，缩略图/原图需通过 REST 端点加载；
      * 本地图片来自设备相册，走平台 MediaStore/PHAsset。
      */
     enum class MediaSource { LOCAL, BACKEND }
+
+    // ============ 认证 ============
+
+    /**
+     * 登录/注册成功响应（与后端 [auth.AuthResult] JSON 对齐）。
+     *
+     * 后端结构：`{ "token","expires_at","user":{"id","username","role","created_at"} }`。
+     * 用普通 data class 承载——解析走运行时 [Json.parseToJsonElement]（与既有
+     * [parseMediaList] 同款），不依赖 kotlinx.serialization 编译器插件（feature-media
+     * 未启用该插件）。`expires_at` 是后端 time.Time 的 RFC3339 字符串，前端仅透传不解析。
+     */
+    data class AuthUser(
+        val id: String = "",
+        val username: String = ""
+    )
+
+    /** 登录/注册响应体。 */
+    data class AuthResult(
+        val token: String = "",
+        val user: AuthUser = AuthUser()
+    )
+
+    /**
+     * 登录/注册调用的包装结果。区分"网络/HTTP 错误"与"成功"，前者带可读 [error]，
+     * 后者带 [result]。这样 UI 侧无需捕获异常，直接按 [success] 分支展示。
+     *
+     * @param success 是否成功
+     * @param result 成功时的认证结果（token 等）
+     * @param error 失败时的描述：后端返回的 `{error}` 或本地异常信息
+     * @param httpStatus 失败时的 HTTP 状态码（成功为 0）；用于注册被关(403)/用户名占用(409)等区分
+     */
+    data class AuthOutcome(
+        val success: Boolean,
+        val result: AuthResult? = null,
+        val error: String? = null,
+        val httpStatus: Int = 0
+    )
+
+    /**
+     * 登录。POST /api/auth/login `{username,password}` → 200 `{token,expires_at,user}`。
+     *
+     * 不依赖 [authToken]（登录端点豁免鉴权）；调用方拿到 [AuthOutcome]，成功时自行
+     * 存 token（见 [com.wgt.media.AuthState.saveSession]）。
+     *
+     * 错误映射（后端 [writeAuthError]）：
+     * - 400 凭据错误/空字段 → "用户名或密码错误"
+     * - 其余 → 后端 `{error}` 文本或异常摘要
+     */
+    suspend fun login(username: String, password: String): AuthOutcome =
+        authRequest("/api/auth/login", username, password)
+
+    /**
+     * 注册。POST /api/auth/register `{username,password}` → 201 同结构。
+     *
+     * allow_signup 由后端配置控制（off/first/open），**不通过任何端点暴露**，故前端无法
+     * 预判是否可注册——直接尝试，错误时按状态码提示：403→"注册已关闭"、409→"用户名已存在"。
+     */
+    suspend fun register(username: String, password: String): AuthOutcome =
+        authRequest("/api/auth/register", username, password)
+
+    /**
+     * login/register 共用请求体。两者结构一致，仅路径不同。
+     *
+     * 成功：解析 [AuthResult]（运行时 JSON 操作，无编译器插件）。失败：尝试从响应体读
+     * `{error}` 文本，回退异常摘要。网络异常（连接失败）单列为可读提示，便于登录页
+     * 区分"地址不通"与"密码错"。
+     */
+    private suspend fun authRequest(path: String, username: String, password: String): AuthOutcome {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}$path") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("username", username)
+                    put("password", password)
+                })
+            }
+            val code = response.status.value
+            if (response.status == HttpStatusCode.OK || response.status == HttpStatusCode.Created) {
+                val body: String = response.body()
+                val parsed = parseAuthResult(body)
+                logger.info("MediaService", "auth $path OK user=${parsed.user.username}")
+                AuthOutcome(success = true, result = parsed, httpStatus = code)
+            } else {
+                val err = readErrorBody(response)
+                logger.info("MediaService", "auth $path failed status=$code err=$err")
+                AuthOutcome(success = false, error = err ?: "请求失败（$code）", httpStatus = code)
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "auth $path exception: ${e::class.simpleName} ${e.message}")
+            AuthOutcome(success = false, error = "无法连接服务器：${e.message ?: e::class.simpleName}")
+        }
+    }
+
+    /**
+     * 解析登录/注册成功响应为 [AuthResult]。
+     *
+     * 后端 `{token,expires_at,user{id,username,role,created_at}}`，前端仅取 token +
+     * user.id + user.username。字段缺失回退空串（[contentOrNull]），保证宽容。
+     */
+    private fun parseAuthResult(json: String): AuthResult {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        val userObj = obj["user"]?.jsonObject
+        return AuthResult(
+            token = obj["token"]?.jsonPrimitive?.contentOrNull ?: "",
+            user = AuthUser(
+                id = userObj?.get("id")?.jsonPrimitive?.contentOrNull ?: "",
+                username = userObj?.get("username")?.jsonPrimitive?.contentOrNull ?: ""
+            )
+        )
+    }
+
+    /**
+     * 从失败响应体读 `{ "error": "..." }` 文本。后端错误统一此结构。
+     * 解析失败或无 error 字段时返回 null，由调用方兜底。
+     */
+    private suspend fun readErrorBody(response: HttpResponse): String? = try {
+        val body: String = response.body()
+        val obj = Json.parseToJsonElement(body).jsonObject
+        obj["error"]?.jsonPrimitive?.contentOrNull
+    } catch (e: Exception) {
+        null
+    }
 
     /**
      * 从后端获取媒体列表（分页）。

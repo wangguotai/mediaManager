@@ -17,8 +17,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
 import com.wgt.feature.media.MediaService
 import com.wgt.media.AlbumScreen
+import com.wgt.media.AuthState
+import com.wgt.media.LoginScreen
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
+import com.wgt.media.RegisterScreen
 import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
 import com.wgt.media.SplashScreen
@@ -40,7 +43,12 @@ private val viewModel = MediaViewModel()
  *   DARK   → 强制暗色
  *
  * 启动时先展示 [SplashScreen]（App 名称居中淡入，约 2s），完成后通过
- * [AnimatedContent] 交叉淡入淡出过渡到 [MediaListScreen]，避免主界面突入。
+ * [AnimatedContent] 交叉淡入淡出过渡到主界面，避免主界面突入。
+ *
+ * **认证路由**：未登录（[AuthState.isLoggedIn] == false）时显示登录/注册页；
+ * 已登录则进入三 Tab 主界面（MEDIA/SETTINGS/ALBUM），与既有结构一致、不改动。
+ * 401 拦截在 [MediaService] 内触发 [AuthState.clearSession] → [isLoggedIn] 翻转 →
+ * 本 Composable 重组自动切回登录页，形成"401 → 清 token → 回登录"闭环。
  */
 @Composable
 @Preview
@@ -67,16 +75,32 @@ fun App() {
     // 故用推模型）。直接读 SettingsState.backendUrl —— 它本身是 mutableStateOf 委托属性，
     // 在 @Composable 体内读取会建立 snapshot 订阅：设置页保存后值变化触发本 Composable
     // 重组，LaunchedEffect 的 key 随之改变并重新推送，保证运行时可变、即时生效（P0-1）。
-    //
-    // 注意：此前误用 `remember { mutableStateOf(SettingsState.backendUrl) }`，那只
-    // 在首次组合时拍一张快照、之后与 SettingsState 脱钩，地址变更永不传导，等于 P0-1 未解。
     val backendUrl = SettingsState.backendUrl
     LaunchedEffect(backendUrl) {
         MediaService.setBackendUrl(backendUrl)
     }
 
+    // 把当前 token 注入网络层（推模型，与 backendUrl 同款）。
+    // 1) 注册 401 处理器：token 失效 → AuthState.clearSession → isLoggedIn 翻转 → 回登录页。
+    // 2) 监听 AuthState.token 变化（登录/登出/401 清除都会改它），即时把首/最新 token 推给
+    //    MediaService，使已登录用户首请求即带 Bearer、登出后请求不再带 token。
+    // 启动时执行一次保证恢复的登录态生效（key 固定，块内读 AuthState.token 自动覆盖初始与变更）。
+    LaunchedEffect(Unit) {
+        MediaService.setUnauthorizedHandler { AuthState.clearSession() }
+    }
+    val authToken = AuthState.token
+    LaunchedEffect(authToken) {
+        MediaService.setAuthToken(authToken)
+    }
+
     var showSplash by remember { mutableStateOf(true) }
     var screen by remember { mutableStateOf(Screen.MEDIA) }
+    // 登录页内的二级视图：登录 ↔ 注册切替。未登录时展示此视图。
+    var authView by remember { mutableStateOf(AuthView.LOGIN) }
+
+    // 登录态：直接读 AuthState.isLoggedIn（基于 token 非空）。它由 mutableStateOf 委托，
+    // 登录/登出/401 变更触发本 Composable 重组，从而在登录页与主界面间切换。
+    val isLoggedIn = AuthState.isLoggedIn
 
     MaterialTheme(colorScheme = colors) {
         AnimatedContent(
@@ -87,22 +111,41 @@ fun App() {
             if (splash) {
                 SplashScreen(onFinish = { showSplash = false })
             } else {
-                when (screen) {
-                    Screen.MEDIA -> MediaListScreen(
-                        viewModel = viewModel,
-                        onNavigateToSettings = { screen = Screen.SETTINGS },
-                        onNavigateToAlbums = { screen = Screen.ALBUM }
-                    )
-                    Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
-                    Screen.ALBUM -> AlbumScreen(
-                        viewModel = viewModel,
-                        onBack = { screen = Screen.MEDIA }
-                    )
+                if (!isLoggedIn) {
+                    // 未登录：登录/注册页，互斥切替。
+                    when (authView) {
+                        AuthView.LOGIN -> LoginScreen(
+                            onLoggedIn = { authView = AuthView.LOGIN },
+                            onSwitchToRegister = { authView = AuthView.REGISTER }
+                        )
+                        AuthView.REGISTER -> RegisterScreen(
+                            onRegistered = { authView = AuthView.LOGIN },
+                            onSwitchToLogin = { authView = AuthView.LOGIN },
+                            onBack = { authView = AuthView.LOGIN }
+                        )
+                    }
+                } else {
+                    // 已登录：保留既有三 Tab 结构不变。
+                    when (screen) {
+                        Screen.MEDIA -> MediaListScreen(
+                            viewModel = viewModel,
+                            onNavigateToSettings = { screen = Screen.SETTINGS },
+                            onNavigateToAlbums = { screen = Screen.ALBUM }
+                        )
+                        Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MEDIA })
+                        Screen.ALBUM -> AlbumScreen(
+                            viewModel = viewModel,
+                            onBack = { screen = Screen.MEDIA }
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/** 顶层屏幕路由。 */
+/** 顶层屏幕路由（已登录态）。 */
 private enum class Screen { MEDIA, SETTINGS, ALBUM }
+
+/** 未登录态的二级视图：登录 / 注册切替。 */
+private enum class AuthView { LOGIN, REGISTER }
