@@ -903,6 +903,18 @@ class MediaViewModel {
     }
 
     /**
+     * 把当前媒体来源切到云端（BACKEND），不触发任何网络请求。
+     *
+     * 仅供"文件管理"页等独立云端列表复用 [deleteSelectedMedia] 时使用：该方法内部按
+     * [currentSource] 分流，LOCAL 走系统相册删除、BACKEND 走 [MediaService.deleteMedia]。
+     * 文件管理页的条目来自 [SyncManager.pullChanges]，删除必须命中云端分支，故删除前
+     * 先调用本方法把来源固定为 BACKEND，避免把云端 id 误当作本地相册 id 处理。
+     */
+    fun setCurrentSourceBackend() {
+        currentSource = MediaSource.BACKEND
+    }
+
+    /**
      * 开始选择模式并选中指定媒体（长按触发）。
      */
     fun startSelection(mediaId: String) {

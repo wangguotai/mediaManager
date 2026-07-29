@@ -93,7 +93,12 @@ import org.jetbrains.compose.resources.painterResource
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
 @Composable
-fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit = {}, onNavigateToAlbums: () -> Unit = {}) {
+fun MediaListScreen(
+    viewModel: MediaViewModel,
+    onNavigateToSettings: () -> Unit = {},
+    onNavigateToAlbums: () -> Unit = {},
+    onNavigateToFileManagement: () -> Unit = {}
+) {
     val snackbarHostState = remember { SnackbarHostState() }
     // TopAppBar 滚动行为：列表滚动时 TopAppBar elevation 动画升高，增强层次感。
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
@@ -351,7 +356,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
             if (selectedTab == 3) {
                 MyTabContent(
                     onNavigateToSettings = onNavigateToSettings,
-                    onNavigateToAlbums = onNavigateToAlbums
+                    onNavigateToAlbums = onNavigateToAlbums,
+                    onNavigateToFileManagement = onNavigateToFileManagement
                 )
                 return@Box
             }
@@ -560,7 +566,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
 @Composable
 private fun MyTabContent(
     onNavigateToSettings: () -> Unit,
-    onNavigateToAlbums: () -> Unit
+    onNavigateToAlbums: () -> Unit,
+    onNavigateToFileManagement: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -580,6 +587,12 @@ private fun MyTabContent(
             title = "相册管理",
             subtitle = "查看和管理相册",
             onClick = onNavigateToAlbums
+        )
+        MyTabItem(
+            iconRes = Res.drawable.ic_cloud,
+            title = "文件管理",
+            subtitle = "云端媒体 · 筛选排序 · 批量删除 · 占用空间",
+            onClick = onNavigateToFileManagement
         )
         MyTabItem(
             iconRes = Res.drawable.ic_settings,
