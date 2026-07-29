@@ -6,6 +6,6 @@
 data_dir: ./data
 
 # SQLite 元数据数据库文件路径。
-# 留空时自动派生为 <data_dir>/metadata.db（与代码默认一致）。
-# 可指定为绝对路径以放到独立位置，如 /var/lib/media-manager/metadata.db。
-db_path: ./data/metadata.db
+# 留空时自动派生为 <data_dir>/media.db（与代码默认一致）。
+# 可指定为绝对路径以放到独立位置，如 /var/lib/media-manager/media.db。
+db_path: ./data/media.db
