@@ -3,14 +3,9 @@ package com.wgt.media
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -110,138 +105,128 @@ fun SearchBar(
         }
     }
 
-    // 用 Column 包裹搜索栏 + 搜索历史，避免历史标签叠加在输入框上
+    // 用 Column 自上而下垂直堆叠"搜索框"与"搜索历史"，历史永远在搜索框下方，
+    // 不会因 align/Box 叠层遮盖输入框。
     Column(modifier = modifier.fillMaxWidth()) {
-        // 宽度动画：展开时填满父宽，收起时收窄到图标+提示文案宽度
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val maxW = maxWidth
-        val animatedWidth by animateDpAsState(
-            targetValue = if (expanded) maxW else 120.dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioNoBouncy,
-                stiffness = Spring.StiffnessMediumLow
-            ),
-            label = "searchBarWidth"
-        )
-
+        // 搜索框：始终填满父宽，避免收起态 CenterEnd 偏移造成的历史标签错位。
         Surface(
-            modifier = Modifier
-                .width(animatedWidth)
-                .align(Alignment.CenterEnd),
+            modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp
         ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 收起态：搜索图标按钮，点击展开。
-            // 展开态：返回箭头，点击收起并清空查询（收起即退出搜索，恢复完整列表）。
-            IconButton(
-                onClick = {
-                    if (expanded) {
-                        // 收起：清空输入与去抖查询，恢复无过滤态。
-                        queryText = ""
-                        queryVisible = false
-                        onDebouncedQueryChange("")
-                        onExpandedChange(false)
-                    } else {
-                        onExpandedChange(true)
-                    }
-                }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    painter = painterResource(
-                        if (expanded) Res.drawable.ic_arrow_back else Res.drawable.ic_search
-                    ),
-                    contentDescription = if (expanded) "收起搜索" else "搜索",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-
-            if (expanded) {
-                Spacer(modifier = Modifier.width(4.dp))
-
-                // 输入框：BasicTextField 自定义样式，与动态色调协调。
-                BasicTextField(
-                    value = queryText,
-                    onValueChange = { queryText = it },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester)
-                        .onFocusChanged { state ->
-                            // 仅清空查询，不自动收起——收起由 IconButton 返回箭头控制
-                            if (!state.isFocused && queryText.isEmpty()) {
-                                onDebouncedQueryChange("")
-                            }
-                        },
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = {
-                        onSearchSubmit()
-                    }),
-                    decorationBox = { innerTextField ->
-                        // placeholder：无文案时显示灰色提示。
-                        if (queryText.isEmpty()) {
-                            Text(
-                                "搜索媒体名称",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                fontSize = 15.sp
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-
-                // 清除按钮：仅在有文案时淡入显示；点击清空输入并立即上抛空串。
-                AnimatedVisibility(
-                    visible = queryVisible,
-                    enter = fadeIn(tween(150)),
-                    exit = fadeOut(tween(120))
-                ) {
-                    IconButton(
-                        onClick = {
+                // 收起态：搜索图标按钮，点击展开。
+                // 展开态：返回箭头，点击收起并清空查询（收起即退出搜索，恢复完整列表）。
+                IconButton(
+                    onClick = {
+                        if (expanded) {
+                            // 收起：清空输入与去抖查询，恢复无过滤态。
                             queryText = ""
                             queryVisible = false
                             onDebouncedQueryChange("")
+                            onExpandedChange(false)
+                        } else {
+                            onExpandedChange(true)
                         }
-                    ) {
-                        Icon(
-                            painter = painterResource(Res.drawable.ic_close),
-                            contentDescription = "清除",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
+                ) {
+                    Icon(
+                        painter = painterResource(
+                            if (expanded) Res.drawable.ic_arrow_back else Res.drawable.ic_search
+                        ),
+                        contentDescription = if (expanded) "收起搜索" else "搜索",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
                 }
-            } else {
-                // 收起态占位文案：提示可点击搜索图标开始过滤。
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    "搜索",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
+
+                if (expanded) {
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    // 输入框：BasicTextField 自定义样式，与动态色调协调。
+                    BasicTextField(
+                        value = queryText,
+                        onValueChange = { queryText = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { state ->
+                                // 仅清空查询，不自动收起——收起由 IconButton 返回箭头控制
+                                if (!state.isFocused && queryText.isEmpty()) {
+                                    onDebouncedQueryChange("")
+                                }
+                            },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = {
+                            onSearchSubmit()
+                        }),
+                        decorationBox = { innerTextField ->
+                            // placeholder：无文案时显示灰色提示。
+                            if (queryText.isEmpty()) {
+                                Text(
+                                    "搜索媒体名称",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    fontSize = 15.sp
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+
+                    // 清除按钮：仅在有文案时淡入显示；点击清空输入并立即上抛空串。
+                    AnimatedVisibility(
+                        visible = queryVisible,
+                        enter = fadeIn(tween(150)),
+                        exit = fadeOut(tween(120))
+                    ) {
+                        IconButton(
+                            onClick = {
+                                queryText = ""
+                                queryVisible = false
+                                onDebouncedQueryChange("")
+                            }
+                        ) {
+                            Icon(
+                                painter = painterResource(Res.drawable.ic_close),
+                                contentDescription = "清除",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    // 收起态占位文案：提示可点击搜索图标开始过滤。
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "搜索",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
             }
         }
-        } // end BoxWithConstraints
 
-        // 搜索历史：展开态且输入为空时显示最近搜索词标签（在搜索框下方，不叠加）
+        // 搜索历史：仅展开态且输入为空时显示，位于搜索框正下方，用 Spacer 明确分隔。
+        // remember 缓存避免每次重组都重读 SettingsStorage。
         if (expanded && queryText.isEmpty()) {
-            val history = SearchHistory.load()
+            val history = remember { SearchHistory.load() }
             if (history.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(2.dp))
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                        .padding(horizontal = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(history.size) { index ->
@@ -262,6 +247,5 @@ fun SearchBar(
                 }
             }
         }
-    } // end Column
     }
 }

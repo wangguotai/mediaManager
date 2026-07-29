@@ -772,14 +772,19 @@ fun ImagePreviewDialog(
                                         filename = m.filename
                                     )
                                 } else {
-                                    // 本地 Live Photo: 提取嵌入视频到临时文件
-                                    livePhotoVideoMedia = m.copy(
-                                        id = m.live_photo_video_id,
-                                        type = MediaType.VIDEO,
-                                        filename = m.filename
-                                    )
+                                    // 本地 Live Photo：先提取嵌入视频到临时 file:// URI，
+                                    // 成功后再渲染 VideoPlayer，避免播放器在 URL 就绪前用
+                                    // 错误的后端流地址初始化导致无法播放。
                                     scope.launch {
-                                        livePhotoVideoUrl = extractLocalLivePhotoVideo(m.id)
+                                        val url = extractLocalLivePhotoVideo(m.id)
+                                        if (url != null) {
+                                            livePhotoVideoUrl = url
+                                            livePhotoVideoMedia = m.copy(
+                                                id = m.live_photo_video_id,
+                                                type = MediaType.VIDEO,
+                                                filename = m.filename
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -897,14 +902,25 @@ fun ImagePreviewDialog(
                                     iconRes = Res.drawable.ic_play_arrow,
                                     label = "动态照片",
                                     onClick = {
-                                        livePhotoVideoMedia = currentMedia.copy(
-                                            id = currentMedia.live_photo_video_id,
-                                            type = MediaType.VIDEO,
-                                            filename = currentMedia.filename
-                                        )
-                                        if (!useBackendLoader) {
+                                        if (useBackendLoader) {
+                                            livePhotoVideoMedia = currentMedia.copy(
+                                                id = currentMedia.live_photo_video_id,
+                                                type = MediaType.VIDEO,
+                                                filename = currentMedia.filename
+                                            )
+                                        } else {
+                                            // 本地 Live Photo：先提取视频到 file:// URI，
+                                            // 成功后再渲染播放器，避免竞态导致播错源。
                                             scope.launch {
-                                                livePhotoVideoUrl = extractLocalLivePhotoVideo(currentMedia.id)
+                                                val url = extractLocalLivePhotoVideo(currentMedia.id)
+                                                if (url != null) {
+                                                    livePhotoVideoUrl = url
+                                                    livePhotoVideoMedia = currentMedia.copy(
+                                                        id = currentMedia.live_photo_video_id,
+                                                        type = MediaType.VIDEO,
+                                                        filename = currentMedia.filename
+                                                    )
+                                                }
                                             }
                                         }
                                     }

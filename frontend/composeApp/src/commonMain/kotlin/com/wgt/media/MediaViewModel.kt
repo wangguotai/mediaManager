@@ -643,14 +643,20 @@ class MediaViewModel {
     fun deleteSingleMedia(mediaId: String) {
         viewModelScope.launch {
             try {
-                val success = if (currentSource == MediaSource.LOCAL) {
-                    galleryFeature.deleteMedia(listOf(mediaId)) > 0
+                if (currentSource == MediaSource.LOCAL) {
+                    val deleted = galleryFeature.deleteMedia(listOf(mediaId))
+                    if (deleted > 0) {
+                        // 本地删除经系统授权（Android 10+ recoverable deletion），
+                        // 以 MediaStore 为准重新加载，保证列表与系统一致；同时清理选中态。
+                        selectedMediaIds.remove(mediaId)
+                        loadMediaFromGallery(forceRefresh = true)
+                    }
                 } else {
-                    MediaService.deleteMedia(listOf(mediaId))
-                }
-                if (success) {
-                    mediaList = mediaList.filter { it.id != mediaId }
-                    selectedMediaIds.remove(mediaId)
+                    val success = MediaService.deleteMedia(listOf(mediaId))
+                    if (success) {
+                        mediaList = mediaList.filter { it.id != mediaId }
+                        selectedMediaIds.remove(mediaId)
+                    }
                 }
             } catch (e: Exception) {
                 errorMessage = "删除媒体失败: ${e.message}"
@@ -671,16 +677,25 @@ class MediaViewModel {
 
         viewModelScope.launch {
             try {
-                val success = if (currentSource == MediaSource.LOCAL) {
-                    galleryFeature.deleteMedia(selectedMediaIds.toList()) > 0
+                if (currentSource == MediaSource.LOCAL) {
+                    val idsToDelete = selectedMediaIds.toList()
+                    val deleted = galleryFeature.deleteMedia(idsToDelete)
+                    if (deleted > 0) {
+                        // 本地批量删除经系统授权后，以 MediaStore 为准重新加载。
+                        selectedMediaIds.clear()
+                        errorMessage = "已删除 $deleted 项"
+                        loadMediaFromGallery(forceRefresh = true)
+                    } else {
+                        errorMessage = "删除失败，可能需要授权"
+                    }
                 } else {
-                    MediaService.deleteMedia(selectedMediaIds.toList())
-                }
-                if (success) {
-                    // 删除成功后更新列表
-                    mediaList = mediaList.filter { it.id !in selectedMediaIds }
-                    selectedMediaIds.clear()
-                    errorMessage = "已删除 $deleteCount 项"
+                    val success = MediaService.deleteMedia(selectedMediaIds.toList())
+                    if (success) {
+                        // 删除成功后更新列表
+                        mediaList = mediaList.filter { it.id !in selectedMediaIds }
+                        selectedMediaIds.clear()
+                        errorMessage = "已删除 $deleteCount 项"
+                    }
                 }
             } catch (e: Exception) {
                 errorMessage = "删除媒体失败: ${e.message}"

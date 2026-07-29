@@ -76,8 +76,9 @@ internal actual fun VideoPlayer(
     // 用户拖拽进度条时暂时停止回写，避免手俱与播放进度互相抢占。
     var seeking by remember { mutableStateOf(false) }
 
-    // 仅初始化一次：挂监听 + 设置视频源。VideoView 自带 prepare/播放。
-    LaunchedEffect(media.id) {
+    // 挂监听 + 设置视频源。key 含 videoUrl：本地 Live Photo 的 file:// URL 异步就绪时
+    // 重新 setVideoURI，避免首次用尚未就绪的占位源初始化后无法切换到真实文件。
+    LaunchedEffect(media.id, videoUrl) {
         videoView.setOnPreparedListener { mp ->
             isPrepared = true
             if (durationMs <= 0f) durationMs = mp.duration.toFloat().coerceAtLeast(0f)
