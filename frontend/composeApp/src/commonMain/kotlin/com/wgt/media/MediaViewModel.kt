@@ -240,12 +240,33 @@ class MediaViewModel {
         private set
 
 
+    /** 内存警告回调句柄，ViewModel 销毁时需释放。 */
+    private var memoryWarningHandle: MemoryWarningHandle? = null
+
     init {
         // 从本地持久化加载收藏 id 集合，让星标状态在重启后保持。
         favoriteIds = FavoriteStore.loadFavoriteIds()
         logger.info(TAG, "init favoriteIds=${favoriteIds.size}")
 //        loadUploadedMediaList()
         loadMediaFromGallery()
+
+        // 注册内存警告回调：系统内存压力时清空缓存，避免 OOM crash。
+        // commonMain 无法直接使用 android/java API，通过 expect/actual 桥接。
+        memoryWarningHandle = registerMemoryWarningCallback {
+            clearCachesOnMemoryWarning()
+        }
+    }
+
+    /**
+     * 内存警告时清空图片缓存，释放内存。
+     *
+     * 清空 [BackendImageLoader] 的缩略图 LRU 缓存与原图缓存，
+     * 避免系统内存压力下 OOM crash。清空后网格滚动 / 预览回滑会重新加载，
+     * 以短暂的加载闪动换取内存安全。
+     */
+    private fun clearCachesOnMemoryWarning() {
+        logger.info(TAG, "Memory warning: clearing image caches")
+        BackendImageLoader.clearCaches()
     }
 
     /**
@@ -908,7 +929,8 @@ class MediaViewModel {
     /**
      * 加载相册详情内的媒体列表。
      *
-     * 相册详情的数据暂用 albumDetailMedia 独立持有，不涉入主 Tab 用的 mediaList / 缓存。
+     * 通过 [MediaService.getAlbumDetail] 获取相册的 media_ids，
+     * 再从后端全量媒体列表中筛选对应条目，保证只显示属于该相册的媒体。
      */
     fun loadAlbumDetail(albumId: String) {
         if (isAlbumDetailLoading) return
@@ -916,12 +938,15 @@ class MediaViewModel {
         albumDetailMedia = emptyList()
         viewModelScope.launch {
             try {
-                // 复用 getMediaList 获取该相册下媒体——后端按 album_id 过滤
-                albumDetailMedia = MediaService.getMediaList(source = MediaSource.BACKEND)
-                    .let { list ->
-                        // 若后端不支持按相册过滤则全量返回，前端按需展示
-                        list
-                    }
+                val detail = MediaService.getAlbumDetail(albumId)
+                if (detail != null && detail.mediaIds.isNotEmpty()) {
+                    // 从后端拉取全量列表，再按相册 mediaIds 过滤
+                    val allMedia = MediaService.getMediaList(source = MediaSource.BACKEND, pageSize = 200)
+                    val idSet = detail.mediaIds.toSet()
+                    albumDetailMedia = allMedia.filter { it.id in idSet }
+                } else {
+                    albumDetailMedia = emptyList()
+                }
             } catch (e: Exception) {
                 errorMessage = "加载相册内容失败: ${e.message}"
             } finally {

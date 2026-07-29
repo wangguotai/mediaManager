@@ -35,6 +35,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -43,6 +44,8 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.*
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -75,6 +78,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wgt.common.util.formatBytesToMB
 import com.wgt.platform.architecture.dispatchers.dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
@@ -239,11 +244,17 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
 
     // "加入相册"相册选择对话框
     addToAlbumMedia?.let { media ->
+        // 若处于选择模式，批量加入所有选中项；否则只加单张
+        val mediaIdsToAdd = if (viewModel.hasSelection && viewModel.selectedMediaIds.isNotEmpty()) {
+            viewModel.selectedMediaIds.toList()
+        } else {
+            listOf(media.id)
+        }
         AddToAlbumDialog(
             albums = viewModel.albumList,
             isLoading = viewModel.isAlbumLoading,
             onPick = { album ->
-                viewModel.addMediaToAlbum(album.id, media.id)
+                mediaIdsToAdd.forEach { id -> viewModel.addMediaToAlbum(album.id, id) }
                 addToAlbumMedia = null
                 viewModel.dismissAddToAlbumDialog()
             },
@@ -302,9 +313,20 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     onShare = { viewModel.shareSelectedMedia() },
                     onSelectAll = { viewModel.selectAll() },
                     onDeselectAll = { viewModel.deselectAll() },
+                    onAddToAlbum = {
+                        // 以选中项中第一个媒体作为 dialog 标识；
+                        // 实际添加时在 ViewModel 中对全部选中项批量加入。
+                        val firstId = viewModel.selectedMediaIds.firstOrNull()
+                        val firstMedia = viewModel.filteredList.find { it.id == firstId }
+                        if (firstMedia != null) {
+                            addToAlbumMedia = firstMedia
+                            viewModel.showAddToAlbumDialog(firstMedia.id)
+                        }
+                    },
                     isDeleting = viewModel.isDeleting,
                     isUploading = viewModel.isUploading,
-                    showUploadButton = selectedTab == 0
+                    showUploadButton = selectedTab == 0,
+                    showAddToAlbumButton = selectedTab != 0 // 后端源（已上传/网盘）才显示
                 )
             } else {
                 // 正常模式：底部导航栏（MIUI 风格）
@@ -519,6 +541,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 } else {
@@ -532,6 +555,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
@@ -1138,6 +1162,13 @@ private fun ZoomableImage(
 }
 
 /**
+ * 预加载触发阈值：当最后一个可见 item 距离列表末尾 ≤ 此值时触发加载下一页。
+ *
+ * 与 [DateGroupedGrid] 共用同一阈值，保证搜索态与非搜索态预加载体验一致。
+ */
+private const val PRELOAD_THRESHOLD = 10
+
+/**
  * 媒体网格布局
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalResourceApi::class)
@@ -1152,9 +1183,31 @@ fun MediaGrid(
     searchQuery: String = "",
     favoriteIds: Set<String> = emptySet(),
     onFavoriteToggle: (String) -> Unit = {},
+    onLoadMore: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val gridState = rememberLazyStaggeredGridState()
+
+    // 预加载：滚动接近底部时自动触发加载下一页。
+    // snapshotFlow 监听布局信息变化，当剩余可见距离 ≤ 阈值时触发 onLoadMore。
+    // distinctUntilChanged 确保同一批次只触发一次，避免重复加载。
+    if (onLoadMore != null) {
+        val currentOnLoadMore by rememberUpdatedState(onLoadMore)
+        LaunchedEffect(gridState) {
+            snapshotFlow {
+                val layoutInfo = gridState.layoutInfo
+                val total = layoutInfo.totalItemsCount
+                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                total - lastVisible
+            }
+                .filter { it in 1..PRELOAD_THRESHOLD }
+                .distinctUntilChanged()
+                .collect { currentOnLoadMore() }
+        }
+    }
+
     LazyVerticalStaggeredGrid(
+        state = gridState,
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
         // 外边距 8dp，项间横向 4dp 纵向 6dp：更紧凑的瀑布流布局。
         contentPadding = PaddingValues(8.dp),
@@ -2295,9 +2348,11 @@ fun SelectionBottomBar(
     onShare: () -> Unit,
     onSelectAll: () -> Unit,
     onDeselectAll: () -> Unit,
+    onAddToAlbum: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
-    showUploadButton: Boolean
+    showUploadButton: Boolean,
+    showAddToAlbumButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -2322,6 +2377,16 @@ fun SelectionBottomBar(
                 .animateContentSize(animationSpec = tween(200)),
             fontWeight = FontWeight.Medium
         )
+
+        // 加入相册（仅后端源显示）
+        if (showAddToAlbumButton) {
+            IconButton(onClick = onAddToAlbum) {
+                Icon(
+                    painterResource(Res.drawable.ic_photo),
+                    contentDescription = "加入相册"
+                )
+            }
+        }
 
         // 批量分享
         IconButton(onClick = onShare) {

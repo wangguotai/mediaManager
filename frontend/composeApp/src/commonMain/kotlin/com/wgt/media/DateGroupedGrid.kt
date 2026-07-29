@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
 import androidx.compose.foundation.lazy.staggeredgrid.items
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,17 +16,30 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import media.MediaMetadata
+
+/**
+ * 预加载触发阈值：当最后一个可见 item 距离列表末尾 ≤ 此值时触发加载下一页。
+ *
+ * 每页 50 项，阈值 10 意味着用户还有约 1/5 页可滚动时就预加载，
+ * 通常在用户滑到底部前新页已合并完成，实现无缝滚动体验。
+ */
+private const val PRELOAD_THRESHOLD = 10
 
 /**
  * 按日期分组展示媒体的网格列表。
@@ -60,9 +74,31 @@ fun DateGroupedGrid(
     searchQuery: String = "",
     favoriteIds: Set<String> = emptySet(),
     onFavoriteToggle: (String) -> Unit = {},
+    onLoadMore: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val gridState = rememberLazyStaggeredGridState()
+
+    // 预加载：滚动接近底部时自动触发加载下一页。
+    // snapshotFlow 监听布局信息变化，当剩余可见距离 ≤ 阈值时触发 onLoadMore。
+    // distinctUntilChanged 确保同一批次只触发一次，避免重复加载。
+    if (onLoadMore != null) {
+        val currentOnLoadMore by rememberUpdatedState(onLoadMore)
+        LaunchedEffect(gridState) {
+            snapshotFlow {
+                val layoutInfo = gridState.layoutInfo
+                val total = layoutInfo.totalItemsCount
+                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                total - lastVisible
+            }
+                .filter { it in 1..PRELOAD_THRESHOLD }
+                .distinctUntilChanged()
+                .collect { currentOnLoadMore() }
+        }
+    }
+
     LazyVerticalStaggeredGrid(
+        state = gridState,
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
         // 与 MediaGrid 保持一致的外边距与间距，分组视觉与原网格无缝衔接。
         contentPadding = PaddingValues(8.dp),

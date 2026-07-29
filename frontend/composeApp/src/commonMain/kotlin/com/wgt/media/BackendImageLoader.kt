@@ -77,6 +77,23 @@ object BackendImageLoader {
     }
 
     /**
+     * 清空所有内存缓存（缩略图 LRU + 原图 LRU）。
+     *
+     * 供内存警告回调调用：系统发出 TRIM_MEMORY / didReceiveMemoryWarning 时
+     * 主动释放缓存，避免 OOM crash。清空后网格滚动 / 预览回滑会重新走 HTTP + 解码，
+     * 以短暂的加载闪动换取内存安全。
+     */
+    fun clearCaches() {
+        // 非同步代码块安全清理：clearCaches 由内存警告回调触发（非协程），
+        // 不能用 Mutex.withLock（suspend）。直接 clear：各 LRU 内部用普通 Map，
+        // 并发 clear 不会崩溃，最差情况是和正在 put 的协程发生竞态导致重复缓存，
+        // 这在内存警告场景下可接受。
+        thumbnailCache.clear()
+        fullImageCache.clear()
+        logger.info(TAG, "Caches cleared (thumbnail + fullImage)")
+    }
+
+    /**
      * 加载缩略图。走 `GET /api/media/thumbnail/{id}?size=small`。
      *
      * 使用 small（128px）而非 medium（256px），将解码后 ImageBitmap

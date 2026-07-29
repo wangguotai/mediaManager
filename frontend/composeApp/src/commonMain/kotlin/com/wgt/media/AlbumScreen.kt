@@ -90,6 +90,8 @@ fun AlbumScreen(
     // null=列表页；非空=详情页（值为相册 id）
     var detailAlbumId by remember { mutableStateOf<String?>(null) }
     var detailAlbumName by remember { mutableStateOf("") }
+    // 长按删除确认：非空时弹出确认对话框
+    var pendingDeleteAlbum by remember { mutableStateOf<MediaService.Album?>(null) }
 
     // 监听错误信息
     LaunchedEffect(viewModel.errorMessage) {
@@ -115,6 +117,30 @@ fun AlbumScreen(
         )
     }
 
+    // 删除相册确认对话框
+    pendingDeleteAlbum?.let { album ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteAlbum = null },
+            title = { Text("删除相册", fontWeight = FontWeight.Bold) },
+            text = { Text("确定删除相册「${album.name}」吗？相册内的媒体不会被删除。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteAlbum(album.id)
+                        pendingDeleteAlbum = null
+                    }
+                ) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteAlbum = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
     Crossfade(
         targetState = detailAlbumId,
         animationSpec = tween(280),
@@ -131,7 +157,8 @@ fun AlbumScreen(
                     detailAlbumId = album.id
                     detailAlbumName = album.name
                     viewModel.loadAlbumDetail(album.id)
-                }
+                },
+                onAlbumLongClick = { album -> pendingDeleteAlbum = album }
             )
         } else {
             // ---- 相册详情页 ----
@@ -157,7 +184,8 @@ private fun AlbumListPage(
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
     onCreateAlbum: () -> Unit,
-    onAlbumClick: (MediaService.Album) -> Unit
+    onAlbumClick: (MediaService.Album) -> Unit,
+    onAlbumLongClick: (MediaService.Album) -> Unit
 ) {
     val albums = viewModel.albumList
     val isLoading = viewModel.isAlbumLoading
@@ -247,7 +275,7 @@ private fun AlbumListPage(
                             AlbumCard(
                                 album = album,
                                 onClick = { onAlbumClick(album) },
-                                onLongClick = { viewModel.deleteAlbum(album.id) }
+                                onLongClick = { onAlbumLongClick(album) }
                             )
                         }
                     }

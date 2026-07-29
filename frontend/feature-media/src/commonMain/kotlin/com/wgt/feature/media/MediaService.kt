@@ -267,6 +267,16 @@ object MediaService {
     )
 
     /**
+     * 相册详情（含 media_ids 列表，用于详情页加载相册内媒体）。
+     */
+    data class AlbumDetail(
+        val id: String,
+        val name: String,
+        val mediaIds: List<String>,
+        val createdAt: Long = 0L
+    )
+
+    /**
      * 创建相册。
      *
      * POST /api/media/album  {"name":"xxx"}
@@ -295,27 +305,56 @@ object MediaService {
     /**
      * 获取相册列表。
      *
-     * GET /api/media/albums → 后端返回 [{"id","name","cover_media_id","media_count"}, ...]
+     * GET /api/media/albums → 后端返回 {"albums":[{"id","name","media_ids",...}]}
      */
     suspend fun getAlbums(): List<Album> {
         return try {
             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/albums")
             if (response.status == HttpStatusCode.OK) {
                 val body: String = response.body()
-                val arr = Json.parseToJsonElement(body).jsonArray
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["albums"]?.jsonArray ?: JsonArray(emptyList())
                 arr.map { item ->
                     val o = item.jsonObject
+                    val mediaIds = o["media_ids"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
                     Album(
                         id = o["id"]?.jsonPrimitive?.content ?: "",
                         name = o["name"]?.jsonPrimitive?.content ?: "",
-                        coverMediaId = o["cover_media_id"]?.let { it.jsonPrimitive.content },
-                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                        coverMediaId = mediaIds.firstOrNull(),
+                        mediaCount = mediaIds.size
                     )
                 }
             } else emptyList()
         } catch (e: Exception) {
             logger.error("MediaService", "getAlbums FAILED: ${e::class.simpleName} ${e.message}")
             emptyList()
+        }
+    }
+
+    /**
+     * 获取相册详情（含 media_ids 列表）。
+     *
+     * GET /api/media/album/{id} → 后端返回 {"id","name","media_ids":[...],"created_at"}
+     *
+     * @return 相册详情对象；失败返回 null
+     */
+    suspend fun getAlbumDetail(albumId: String): AlbumDetail? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/$albumId")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val o = Json.parseToJsonElement(body).jsonObject
+                val mediaIds = o["media_ids"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+                AlbumDetail(
+                    id = o["id"]?.jsonPrimitive?.content ?: "",
+                    name = o["name"]?.jsonPrimitive?.content ?: "",
+                    mediaIds = mediaIds,
+                    createdAt = o["created_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumDetail FAILED: ${e::class.simpleName} ${e.message}")
+            null
         }
     }
 
