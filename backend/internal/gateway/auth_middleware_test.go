@@ -62,7 +62,9 @@ func newAuthedGateway(t *testing.T) (*Server, string, string) {
 	if err != nil {
 		t.Fatalf("seed register: %v", err)
 	}
-	srv := NewServer(":0", OpenClawConfig{}, nil, t.TempDir(), authSvc)
+	// 这些测试只断言 auth 中间件/登录/注册行为，mediaSvc 为 nil 且 probe handler 不
+	// 触达文件路径，故 userDirs 传 nil 即可（NewServer 接受 *service.UserDirs）。
+	srv := NewServer(":0", OpenClawConfig{}, nil, nil, authSvc)
 	return srv, res.Token, res.User.ID
 }
 
@@ -164,7 +166,7 @@ func TestMiddlewareValidTokenInjectsUserID(t *testing.T) {
 
 func TestMiddlewareNilAuthSvcPassThrough(t *testing.T) {
 	// authSvc 为 nil 时中间件直接放行（开发/测试场景）。
-	srv := NewServer(":0", OpenClawConfig{}, nil, t.TempDir(), nil)
+	srv := NewServer(":0", OpenClawConfig{}, nil, nil, nil)
 	called := false
 	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true })
 	req := httptest.NewRequest(http.MethodGet, "/api/media/list", nil)
@@ -209,7 +211,7 @@ func TestRegisterEndpointWeakPasswordReturns400(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(":0", OpenClawConfig{}, nil, t.TempDir(), authSvc)
+	srv := NewServer(":0", OpenClawConfig{}, nil, nil, authSvc)
 	body := `{"username":"weak","password":"ab"}`
 	req := newReq(http.MethodPost, "/api/auth/register", "", body)
 	rec := httptest.NewRecorder()
@@ -226,7 +228,7 @@ func TestRegisterEndpointSignupDisabledReturns403(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(":0", OpenClawConfig{}, nil, t.TempDir(), authSvcOff)
+	srv := NewServer(":0", OpenClawConfig{}, nil, nil, authSvcOff)
 	body := `{"username":"n","password":"pw1234"}`
 	req := newReq(http.MethodPost, "/api/auth/register", "", body)
 	rec := httptest.NewRecorder()
@@ -243,7 +245,7 @@ func TestRegisterEndpointDuplicateReturns409(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv2 := NewServer(":0", OpenClawConfig{}, nil, t.TempDir(), authSvc)
+	srv2 := NewServer(":0", OpenClawConfig{}, nil, nil, authSvc)
 	// 先注册一次。
 	req1 := newReq(http.MethodPost, "/api/auth/register", "", `{"username":"dup","password":"pw1234"}`)
 	srv2.mux.ServeHTTP(httptest.NewRecorder(), req1)

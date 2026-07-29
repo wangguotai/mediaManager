@@ -134,10 +134,14 @@ type metadataSidecar struct {
 	MimeType  string `json:"mime_type"`
 }
 
-// readMetadataSidecar reads data/metadata/{id}.json. Returns nil if the file
-// doesn't exist or can't be parsed — callers fall back to file mtime.
-func (s *MediaService) readMetadataSidecar(mediaID string) *metadataSidecar {
-	metaDir := filepath.Join(filepath.Dir(s.uploadsDir), "metadata")
+// readMetadataSidecar reads <user metadata dir>/{id}.json for the given user.
+// Returns nil if the file doesn't exist, can't be parsed, or the user_id is
+// invalid — callers fall back to file mtime.
+func (s *MediaService) readMetadataSidecar(uid, mediaID string) *metadataSidecar {
+	metaDir, err := s.userDirs.MetadataDir(uid)
+	if err != nil {
+		return nil
+	}
 	metaPath := filepath.Join(metaDir, mediaID+".json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -431,20 +435,24 @@ var thumbnailLongEdge = map[gen.ThumbnailSize]int{
 
 type MediaService struct {
 	gen.UnimplementedMediaServiceServer
-	uploadsDir  string
-	thumbsDir   string
-	cloudSource CloudImageSource
-	favStore    *FavoriteStore
-	albumStore  *AlbumStore
-	thumbCache  *ThumbCache
-	videoMetaDir string
+	// per-user 目录解析：uploads/thumbnails/metadata/video-meta 均挂在
+	// data/users/{uid}/ 下，由 userDirs 按 user_id 解析。cloudImagesRoot 为
+	// 全局共享的网盘图片源（语义上是公共源，不按用户隔离）。
+	userDirs       *UserDirs
+	cloudImagesRoot string
+	cloudSource    CloudImageSource
+	favStore       *FavoriteStore
+	albumStore     *AlbumStore
+	thumbCache     *ThumbCache
 
-	// listCache caches GetMediaList results to avoid repeated directory scans.
+	// listCache 按 user_id 分桶缓存 GetMediaList 结果，避免跨用户串读。
+	// 改造前是单条缓存，多用户会互相污染命中，故改为 map[uid]*entry。
 	listCacheMu sync.Mutex
-	listCache   *listCacheEntry
+	listCache   map[string]*listCacheEntry
 
 	// cloudCache caches the sorted result of GetCloudImages() to avoid
 	// re-scanning the cloud directory and re-sorting on every request.
+	// 网盘源是全局共享的公共源，缓存不按用户分桶。
 	cloudCacheMu    sync.Mutex
 	cloudCache      []*gen.MediaMetadata
 	cloudCacheAt    time.Time
@@ -469,12 +477,19 @@ type listCacheEntry struct {
 // listCacheTTL is the duration for which GetMediaList results are cached.
 const listCacheTTL = 30 * time.Second
 
-func NewMediaService(uploadsDir, thumbsDir string) *MediaService {
+// NewMediaService 构造按 user_id 隔离的 MediaService。
+//   - userDirs: per-user 目录解析器，决定 data/users/{uid}/ 下的子目录布局。为 nil
+//     时服务无法定位任何用户数据（仅可用于无数据的占位场景）。
+//   - cloudImagesRoot: 全局共享的网盘图片源根目录；为空表示未配置网盘源。
+//
+// 缩略图内存 LRU 的 cache key 会带 user_id 前缀（见 GetThumbnail），故全局共享
+// 单个 ThumbCache 也不会跨用户串读，同时节省多用户下的重复缓存。
+func NewMediaService(userDirs *UserDirs, cloudImagesRoot string) *MediaService {
 	return &MediaService{
-		uploadsDir:   uploadsDir,
-		thumbsDir:    thumbsDir,
-		thumbCache:   NewThumbCache(100, 16*1024*1024, 512*1024), // 100 items / 16 MiB total / 512 KiB per item
-		videoMetaDir: filepath.Join(filepath.Dir(uploadsDir), "video-meta"),
+		userDirs:        userDirs,
+		cloudImagesRoot: cloudImagesRoot,
+		thumbCache:      NewThumbCache(100, 16*1024*1024, 512*1024), // 100 items / 16 MiB total / 512 KiB per item
+		listCache:       make(map[string]*listCacheEntry),
 	}
 }
 
@@ -493,84 +508,94 @@ func (s *MediaService) SetAlbumStore(as *AlbumStore) {
 	s.albumStore = as
 }
 
-// IsFavorite 返回 mediaId 是否被收藏。favStore 未配置时返回 false。
-func (s *MediaService) IsFavorite(mediaId string) bool {
+// IsFavorite 返回 mediaId 是否被 user_id 收藏。favStore 未配置或 uid 非法时返回 false。
+func (s *MediaService) IsFavorite(uid, mediaId string) bool {
 	if s.favStore == nil {
 		return false
 	}
-	return s.favStore.IsFavorite(mediaId)
+	return s.favStore.IsFavorite(uid, mediaId)
 }
 
-// ListFavorites 返回所有收藏的 mediaId 列表。favStore 未配置时返回空切片。
-func (s *MediaService) ListFavorites() []string {
+// ListFavorites 返回 user_id 的所有收藏 mediaId 列表。favStore 未配置时返回空切片。
+func (s *MediaService) ListFavorites(uid string) []string {
 	if s.favStore == nil {
 		return []string{}
 	}
-	return s.favStore.ListFavorites()
+	return s.favStore.ListFavorites(uid)
 }
 
-// AddFavorite 收藏 mediaId。
-func (s *MediaService) AddFavorite(mediaId string) error {
+// TotalFavorites 返回所有已加载用户的收藏总数聚合，供 /healthz 这类无单一用户上下文
+// 的端点展示全局收藏规模。favStore 未配置时返回 0。注意这是跨用户聚合指标，
+// 只暴露总数而非任何具体用户的收藏内容。
+func (s *MediaService) TotalFavorites() int {
+	if s.favStore == nil {
+		return 0
+	}
+	return s.favStore.TotalCount()
+}
+
+// AddFavorite 收藏 mediaId（属于 user_id）。
+func (s *MediaService) AddFavorite(uid, mediaId string) error {
 	if s.favStore == nil {
 		return fmt.Errorf("favorite store is not configured")
 	}
-	return s.favStore.AddFavorite(mediaId)
+	return s.favStore.AddFavorite(uid, mediaId)
 }
 
-// RemoveFavorite 取消收藏 mediaId。
-func (s *MediaService) RemoveFavorite(mediaId string) error {
+// RemoveFavorite 取消收藏 mediaId（属于 user_id）。
+func (s *MediaService) RemoveFavorite(uid, mediaId string) error {
 	if s.favStore == nil {
 		return fmt.Errorf("favorite store is not configured")
 	}
-	return s.favStore.RemoveFavorite(mediaId)
+	return s.favStore.RemoveFavorite(uid, mediaId)
 }
 
-// CreateAlbum 创建新相册。
-func (s *MediaService) CreateAlbum(name string) (*Album, error) {
+// CreateAlbum 在 user_id 名下创建新相册。
+func (s *MediaService) CreateAlbum(uid, name string) (*Album, error) {
 	if s.albumStore == nil {
 		return nil, fmt.Errorf("album store is not configured")
 	}
-	return s.albumStore.CreateAlbum(name)
+	return s.albumStore.CreateAlbum(uid, name)
 }
 
-// AddToAlbum 将媒体加入相册。
-func (s *MediaService) AddToAlbum(albumID, mediaID string) error {
+// AddToAlbum 将媒体加入 user_id 名下相册。
+func (s *MediaService) AddToAlbum(uid, albumID, mediaID string) error {
 	if s.albumStore == nil {
 		return fmt.Errorf("album store is not configured")
 	}
-	return s.albumStore.AddToAlbum(albumID, mediaID)
+	return s.albumStore.AddToAlbum(uid, albumID, mediaID)
 }
 
-// RemoveFromAlbum 将媒体从相册中移除。
-func (s *MediaService) RemoveFromAlbum(albumID, mediaID string) error {
+// RemoveFromAlbum 将媒体从 user_id 名下相册中移除。
+func (s *MediaService) RemoveFromAlbum(uid, albumID, mediaID string) error {
 	if s.albumStore == nil {
 		return fmt.Errorf("album store is not configured")
 	}
-	return s.albumStore.RemoveFromAlbum(albumID, mediaID)
+	return s.albumStore.RemoveFromAlbum(uid, albumID, mediaID)
 }
 
-// ListAlbums 返回所有相册列表。
-func (s *MediaService) ListAlbums() []*Album {
+// ListAlbums 返回 user_id 名下所有相册列表。
+func (s *MediaService) ListAlbums(uid string) []*Album {
 	if s.albumStore == nil {
 		return []*Album{}
 	}
-	return s.albumStore.ListAlbums()
+	return s.albumStore.ListAlbums(uid)
 }
 
-// GetAlbum 返回指定相册详情。
-func (s *MediaService) GetAlbum(albumID string) *Album {
+// GetAlbum 返回 user_id 名下指定相册详情。
+func (s *MediaService) GetAlbum(uid, albumID string) *Album {
 	if s.albumStore == nil {
 		return nil
 	}
-	return s.albumStore.GetAlbum(albumID)
+	return s.albumStore.GetAlbum(uid, albumID)
 }
 
-// DeleteAlbum 删除指定相册。
-func (s *MediaService) DeleteAlbum(albumID string) error {
+// DeleteAlbum 删除 user_id 名下指定相册。
+func (s *MediaService) DeleteAlbum(uid, albumID string) error {
 	if s.albumStore == nil {
 		return fmt.Errorf("album store is not configured")
 	}
-	return s.albumStore.DeleteAlbum(albumID)
+	return s.albumStore.DeleteAlbum(uid, albumID)
 }
 
 // favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。
@@ -592,16 +617,19 @@ func (s *MediaService) ThumbCacheStats() ThumbCacheStats {
 	return s.thumbCache.Stats()
 }
 
-// resolveMediaPath 按 mediaID 查找源文件的磁盘路径：先在 uploads 目录按
-// "mediaID.*" 匹配，未命中再回退到网盘图片源根目录（data/cloud-images）。
+// resolveMediaPath 按 user_id + mediaID 查找源文件的磁盘路径：先在该用户的 uploads
+// 目录按 "mediaID.*" 匹配，未命中再回退到全局共享的网盘图片源根目录（data/cloud-images）。
 // 网盘图片的 id 是去扩展名的文件名（如 test-cloud-image），与 uploads 的 uuid id
-// 同样适用 "id+.*" glob。返回空串表示未找到。
-func (s *MediaService) resolveMediaPath(mediaID string) string {
+// 同样适用 "id+.*" glob。uid 非法或 mediaID 非法时返回空串（视为未找到，不回退全局，
+// 以免跨用户串读）。返回空串表示未找到。
+func (s *MediaService) resolveMediaPath(uid, mediaID string) string {
 	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
 		return ""
 	}
-	if files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*")); err == nil && len(files) > 0 {
-		return files[0]
+	if uploadsDir, err := s.userDirs.UploadsDir(uid); err == nil {
+		if files, err := filepath.Glob(filepath.Join(uploadsDir, mediaID+".*")); err == nil && len(files) > 0 {
+			return files[0]
+		}
 	}
 	if root := s.CloudImagesDir(); root != "" {
 		if files, err := filepath.Glob(filepath.Join(root, mediaID+".*")); err == nil && len(files) > 0 {
@@ -612,6 +640,14 @@ func (s *MediaService) resolveMediaPath(mediaID string) string {
 }
 
 func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) error {
+	// 认证用户由 gRPC 拦截器或 REST 上传侧注入 context；取出 user_id 决定落盘到谁的
+	// uploads 目录。未带 user_id 时拒绝（与 REST /api/* 强制 401 的策略一致）。
+	uid := UserIDFromContext(stream.Context())
+	uploadsDir, err := s.userDirs.UploadsDir(uid)
+	if err != nil {
+		return fmt.Errorf("upload rejected: %v", err)
+	}
+
 	var currentMediaID string
 	var currentFile *os.File
 	var totalSize int64
@@ -631,7 +667,7 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 			// Start new file upload
 			metadata = data.Metadata
 			currentMediaID = uuid.New().String()
-			filename := filepath.Join(s.uploadsDir, currentMediaID+getFileExtension(metadata.Filename))
+			filename := filepath.Join(uploadsDir, currentMediaID+getFileExtension(metadata.Filename))
 
 			file, err := os.Create(filename)
 			if err != nil {
@@ -668,7 +704,7 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 	}
 
 	// Invalidate list cache so the newly uploaded file appears immediately.
-	s.invalidateListCache()
+	s.invalidateListCache(uid)
 
 	return stream.SendAndClose(&gen.UploadMediaResponse{
 		MediaId: currentMediaID,
@@ -678,30 +714,39 @@ func (s *MediaService) UploadMedia(stream gen.MediaService_UploadMediaServer) er
 }
 
 func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRequest) (*gen.GetMediaListResponse, error) {
+	// user_id 决定遍历哪个用户的 uploads 目录；未认证（uid 为空）视为无权访问，
+	// 返回空列表而非回退到某个全局目录，避免跨用户串读。
+	uid := UserIDFromContext(ctx)
+	uploadsDir, err := s.userDirs.UploadsDir(uid)
+	if err != nil {
+		// uid 非法：返回空列表（与目录不存在一致），不报错以保持接口幂等。
+		return s.emptyListResp(req), nil
+	}
+
 	// 解析 searchQuery 中的 favorite=true 过滤标记，剩余部分作为关键字。
 	query, favOnly := parseFavoriteQuery(req.SearchQuery)
 
 	// 当 searchQuery 以 "source=cloud" 开头时，改用网盘图片源返回图片。
 	if strings.HasPrefix(query, cloudSearchPrefix) {
 		req.SearchQuery = query
-		return s.getCloudMediaList(req, favOnly)
+		return s.getCloudMediaList(uid, req, favOnly)
 	}
 
-	// Check cache: if we have a valid cached entry for the same request params
-	// and the uploads directory mtime hasn't changed, return cached result.
-	if cached, hit := s.tryGetListCache(req, query, favOnly); hit {
+	// Check cache: if we have a valid cached entry for the same user + request params
+	// and the user's uploads directory mtime hasn't changed, return cached result.
+	if cached, hit := s.tryGetListCache(uid, uploadsDir, req, query, favOnly); hit {
 		return cached, nil
 	}
 
 	// Scan uploads directory for media files
-	files, err := os.ReadDir(s.uploadsDir)
+	files, err := os.ReadDir(uploadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read uploads directory: %v", err)
 	}
 
 	// Capture directory mtime for caching.
 	var dirMtime time.Time
-	if info, err := os.Stat(s.uploadsDir); err == nil {
+	if info, err := os.Stat(uploadsDir); err == nil {
 		dirMtime = info.ModTime()
 	}
 
@@ -733,9 +778,9 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 			MimeType:  s.getMimeType(file.Name()),
 		}
 
-		// Enrich from metadata sidecar: prefer created_at from data/metadata/{id}.json,
+		// Enrich from metadata sidecar: prefer created_at from <user metadata>/{id}.json,
 		// fall back to file mtime (already set above).
-		if sidecar := s.readMetadataSidecar(mediaId); sidecar != nil {
+		if sidecar := s.readMetadataSidecar(uid, mediaId); sidecar != nil {
 			if sidecar.CreatedAt > 0 {
 				metadata.CreatedAt = sidecar.CreatedAt
 			}
@@ -748,7 +793,7 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 		}
 
 		// P1-1: 填充 width/height/exif。读文件头或 ffprobe；失败置零不阻断列表。
-		fillDimensions(metadata, filepath.Join(s.uploadsDir, file.Name()))
+		fillDimensions(metadata, filepath.Join(uploadsDir, file.Name()))
 
 		// Apply filters
 		if req.FilterType != gen.MediaType_IMAGE && req.FilterType != mediaType {
@@ -759,8 +804,8 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 			continue
 		}
 
-		// favorite=true 过滤：仅保留收藏的媒体。
-		if favOnly && !s.IsFavorite(mediaId) {
+		// favorite=true 过滤：仅保留该用户收藏的媒体。
+		if favOnly && !s.IsFavorite(uid, mediaId) {
 			continue
 		}
 
@@ -776,13 +821,9 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 	startIndex := int(req.Page-1) * int(req.PageSize)
 	endIndex := startIndex + int(req.PageSize)
 	if startIndex >= len(mediaList) {
-		resp := &gen.GetMediaListResponse{
-			MediaList:  []*gen.MediaMetadata{},
-			TotalCount: int32(len(mediaList)),
-			Page:       req.Page,
-			PageSize:   req.PageSize,
-		}
-		s.storeListCache(resp, req, query, favOnly, dirMtime)
+		resp := s.emptyListResp(req)
+		resp.TotalCount = int32(len(mediaList))
+		s.storeListCache(uid, resp, req, query, favOnly, dirMtime)
 		return resp, nil
 	}
 
@@ -796,16 +837,25 @@ func (s *MediaService) GetMediaList(ctx context.Context, req *gen.GetMediaListRe
 		Page:       req.Page,
 		PageSize:   req.PageSize,
 	}
-	s.storeListCache(resp, req, query, favOnly, dirMtime)
+	s.storeListCache(uid, resp, req, query, favOnly, dirMtime)
 	return resp, nil
 }
 
-// tryGetListCache checks whether a valid cached GetMediaList result exists
-// for the given request parameters. Returns (cached_response, true) on cache hit,
-// (nil, false) on miss or invalidation.
-func (s *MediaService) tryGetListCache(req *gen.GetMediaListRequest, query string, favOnly bool) (*gen.GetMediaListResponse, bool) {
+// emptyListResp 返回一个空媒体列表响应，供无权访问/空目录场景统一构造。
+func (s *MediaService) emptyListResp(req *gen.GetMediaListRequest) *gen.GetMediaListResponse {
+	return &gen.GetMediaListResponse{
+		MediaList:  []*gen.MediaMetadata{},
+		TotalCount: 0,
+		Page:       req.Page,
+		PageSize:   req.PageSize,
+	}
+}
+
+// tryGetListCache 按 user_id 分桶检查是否有有效缓存。命中返回 (cached, true)。
+// 缓存键含 uid，故不同用户的同参数请求互不串读。
+func (s *MediaService) tryGetListCache(uid, uploadsDir string, req *gen.GetMediaListRequest, query string, favOnly bool) (*gen.GetMediaListResponse, bool) {
 	s.listCacheMu.Lock()
-	entry := s.listCache
+	entry := s.listCache[uid]
 	s.listCacheMu.Unlock()
 
 	if entry == nil {
@@ -825,7 +875,7 @@ func (s *MediaService) tryGetListCache(req *gen.GetMediaListRequest, query strin
 		return nil, false
 	}
 	// Check directory mtime: if files were added/removed, mtime changes → invalidate.
-	if info, err := os.Stat(s.uploadsDir); err == nil {
+	if info, err := os.Stat(uploadsDir); err == nil {
 		if !info.ModTime().Equal(entry.dirMtime) {
 			atomic.AddInt64(&listCacheMisses, 1)
 			return nil, false
@@ -835,11 +885,11 @@ func (s *MediaService) tryGetListCache(req *gen.GetMediaListRequest, query strin
 	return entry.response, true
 }
 
-// storeListCache caches a GetMediaList response keyed by request parameters.
-func (s *MediaService) storeListCache(resp *gen.GetMediaListResponse, req *gen.GetMediaListRequest, query string, favOnly bool, dirMtime time.Time) {
+// storeListCache 按 user_id 分桶缓存 GetMediaList 响应。
+func (s *MediaService) storeListCache(uid string, resp *gen.GetMediaListResponse, req *gen.GetMediaListRequest, query string, favOnly bool, dirMtime time.Time) {
 	s.listCacheMu.Lock()
 	defer s.listCacheMu.Unlock()
-	s.listCache = &listCacheEntry{
+	s.listCache[uid] = &listCacheEntry{
 		response:    resp,
 		expiresAt:   time.Now().Add(listCacheTTL),
 		dirMtime:    dirMtime,
@@ -851,12 +901,12 @@ func (s *MediaService) storeListCache(resp *gen.GetMediaListResponse, req *gen.G
 	}
 }
 
-// invalidateListCache clears the cached GetMediaList result.
+// invalidateListCache clears the cached GetMediaList result for a single user.
 // Called after file additions or deletions to ensure fresh results.
-func (s *MediaService) invalidateListCache() {
+func (s *MediaService) invalidateListCache(uid string) {
 	s.listCacheMu.Lock()
 	defer s.listCacheMu.Unlock()
-	s.listCache = nil
+	delete(s.listCache, uid)
 }
 // cloudCacheTTL is the duration for which the sorted cloud image list is cached.
 const cloudCacheTTL = 30 * time.Second
@@ -906,8 +956,9 @@ func (s *MediaService) getSortedCloudImages() ([]*gen.MediaMetadata, error) {
 	return images, nil
 }
 
-// favOnly 为 true 时仅返回收藏的媒体。
-func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly bool) (*gen.GetMediaListResponse, error) {
+// getCloudMediaList 从全局共享的网盘图片源返回媒体列表。网盘源本身按用户共享，
+// 但 favorite=true 过滤仍按 uid 判定该用户的收藏。uid 由调用方传入。
+func (s *MediaService) getCloudMediaList(uid string, req *gen.GetMediaListRequest, favOnly bool) (*gen.GetMediaListResponse, error) {
 	if s.cloudSource == nil {
 		return nil, fmt.Errorf("cloud source is not configured")
 	}
@@ -932,8 +983,8 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly b
 			continue
 		}
 
-		// favorite=true 过滤：仅保留收藏的媒体。
-		if favOnly && !s.IsFavorite(meta.Id) {
+		// favorite=true 过滤：仅保留该用户收藏的媒体。
+		if favOnly && !s.IsFavorite(uid, meta.Id) {
 			continue
 		}
 
@@ -966,6 +1017,10 @@ func (s *MediaService) getCloudMediaList(req *gen.GetMediaListRequest, favOnly b
 }
 
 func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequest) (*gen.DeleteMediaResponse, error) {
+	uid := UserIDFromContext(ctx)
+	uploadsDir, upErr := s.userDirs.UploadsDir(uid)
+	thumbsDir, thErr := s.userDirs.ThumbnailsDir(uid)
+
 	deletedCount := 0
 	notFoundCount := 0
 
@@ -978,18 +1033,20 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 
 		found := false
 
-		// 先在 uploads 目录查找并删除。
-		files, err := filepath.Glob(filepath.Join(s.uploadsDir, mediaID+".*"))
-		if err == nil {
-			for _, file := range files {
-				if err := os.Remove(file); err == nil {
-					deletedCount++
-					found = true
+		// 先在该用户的 uploads 目录查找并删除。
+		if upErr == nil {
+			files, err := filepath.Glob(filepath.Join(uploadsDir, mediaID+".*"))
+			if err == nil {
+				for _, file := range files {
+					if err := os.Remove(file); err == nil {
+						deletedCount++
+						found = true
+					}
 				}
 			}
 		}
 
-		// 回退到网盘图片源目录（data/cloud-images），支持删除网盘文件。
+		// 回退到网盘图片源目录（data/cloud-images，全局共享），支持删除网盘文件。
 		if root := s.CloudImagesDir(); root != "" {
 			cloudFiles, err := filepath.Glob(filepath.Join(root, mediaID+".*"))
 			if err == nil {
@@ -1006,26 +1063,30 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 			notFoundCount++
 		}
 
-		// 删除关联的缩略图（best-effort，不计数）。
-		thumbs, _ := filepath.Glob(filepath.Join(s.thumbsDir, mediaID+"_*"))
-		for _, t := range thumbs {
-			_ = os.Remove(t)
+		// 删除关联的缩略图（best-effort，不计数）。仅清理该用户目录下的缩略图。
+		if thErr == nil {
+			thumbs, _ := filepath.Glob(filepath.Join(thumbsDir, mediaID+"_*"))
+			for _, t := range thumbs {
+				_ = os.Remove(t)
+			}
 		}
 
-		// 取消收藏（best-effort）。
+		// 取消该用户的收藏（best-effort）。
 		if s.favStore != nil {
-			_ = s.favStore.RemoveFavorite(mediaID)
+			_ = s.favStore.RemoveFavorite(uid, mediaID)
 		}
 	}
 	// File deletions change directory contents — invalidate caches.
 	if deletedCount > 0 {
-		// Best-effort: remove cached video metadata files for deleted media.
-		for _, mediaID := range req.MediaIds {
-			metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
-			_ = os.Remove(metaPath)
+		// Best-effort: remove cached video metadata files for deleted media (per-user).
+		if videoMetaDir, err := s.userDirs.VideoMetaDir(uid); err == nil {
+			for _, mediaID := range req.MediaIds {
+				metaPath := filepath.Join(videoMetaDir, mediaID+".json")
+				_ = os.Remove(metaPath)
+			}
 		}
 		// Invalidate list cache so the remaining list is fresh.
-		defer s.invalidateListCache()
+		defer s.invalidateListCache(uid)
 	}
 
 	// 如实反映删除结果：全部命中并删除 → success；部分未找到 → partial；
@@ -1045,8 +1106,13 @@ func (s *MediaService) DeleteMedia(ctx context.Context, req *gen.DeleteMediaRequ
 }
 
 func (s *MediaService) GetMediaMetadata(ctx context.Context, req *gen.GetMediaMetadataRequest) (*gen.GetMediaMetadataResponse, error) {
-	// Find the file with the given media ID
-	files, err := filepath.Glob(filepath.Join(s.uploadsDir, req.MediaId+".*"))
+	uid := UserIDFromContext(ctx)
+	uploadsDir, err := s.userDirs.UploadsDir(uid)
+	if err != nil {
+		return nil, fmt.Errorf("media not found: %s", req.MediaId)
+	}
+	// Find the file with the given media ID in this user's uploads directory.
+	files, err := filepath.Glob(filepath.Join(uploadsDir, req.MediaId+".*"))
 	if err != nil || len(files) == 0 {
 		return nil, fmt.Errorf("media not found: %s", req.MediaId)
 	}
@@ -1077,9 +1143,10 @@ func (s *MediaService) GetMediaMetadata(ctx context.Context, req *gen.GetMediaMe
 
 func (s *MediaService) GetMediaStream(req *gen.GetMediaStreamRequest, stream gen.MediaService_GetMediaStreamServer) error {
 	ctx := stream.Context()
+	uid := UserIDFromContext(ctx)
 
-	// resolveMediaPath 同时覆盖 uploads 与网盘图片目录，使网盘原图也能通过 gRPC 流式获取。
-	path := s.resolveMediaPath(req.MediaId)
+	// resolveMediaPath 覆盖该用户的 uploads 与全局网盘图片目录，使网盘原图也能通过 gRPC 流式获取。
+	path := s.resolveMediaPath(uid, req.MediaId)
 	if path == "" {
 		return fmt.Errorf("media not found: %s", req.MediaId)
 	}
@@ -1166,9 +1233,16 @@ func (s *MediaService) GetMediaStream(req *gen.GetMediaStreamRequest, stream gen
 }
 
 func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRequest) (*gen.GetThumbnailResponse, error) {
-	// resolveMediaPath 同时覆盖 uploads 与网盘图片目录，使网盘图片也能生成缩略图。
-	path := s.resolveMediaPath(req.MediaId)
+	uid := UserIDFromContext(ctx)
+	// resolveMediaPath 覆盖该用户的 uploads 与全局网盘图片目录，使网盘图片也能生成缩略图。
+	path := s.resolveMediaPath(uid, req.MediaId)
 	if path == "" {
+		return nil, fmt.Errorf("media not found: %s", req.MediaId)
+	}
+
+	// 缩略图落盘到该用户专属目录；内存 LRU 的 key 带 uid 前缀，避免不同用户同名媒体串读。
+	thumbsDir, err := s.userDirs.ThumbnailsDir(uid)
+	if err != nil {
 		return nil, fmt.Errorf("media not found: %s", req.MediaId)
 	}
 
@@ -1176,7 +1250,7 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 
 	// 视频缩略图：用 ffmpeg 抽取第 1s 的第一帧并缩放，缓存为 jpg。
 	if mediaType == gen.MediaType_VIDEO {
-		return s.getVideoThumbnail(ctx, req.MediaId, path, req.Size)
+		return s.getVideoThumbnail(ctx, uid, thumbsDir, req.MediaId, path, req.Size)
 	}
 
 	if mediaType != gen.MediaType_IMAGE {
@@ -1188,14 +1262,10 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 		return nil, fmt.Errorf("unknown thumbnail size: %v", req.Size)
 	}
 
-	if err := os.MkdirAll(s.thumbsDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to ensure thumbs dir: %v", err)
-	}
-
 	ext := strings.ToLower(filepath.Ext(path))
 	thumbName := fmt.Sprintf("%s_%d%s", req.MediaId, longEdge, ext)
-	thumbPath := filepath.Join(s.thumbsDir, thumbName)
-	cacheKey := thumbName
+	thumbPath := filepath.Join(thumbsDir, thumbName)
+	cacheKey := uid + "/" + thumbName
 
 	// In-memory LRU cache hit: skip disk entirely.
 	if data, mime, w, h, ok := s.thumbCache.Get(cacheKey); ok {
@@ -1255,19 +1325,16 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 }
 
 // getVideoThumbnail 用 ffmpeg 从视频第 1s 抽取一帧，按 longEdge 缩放后缓存为 jpg。
-// 缩略图文件名固定为 {mediaID}_{longEdge}.jpg，命中缓存则直接读取返回。
-func (s *MediaService) getVideoThumbnail(ctx context.Context, mediaID, srcPath string, size gen.ThumbnailSize) (*gen.GetThumbnailResponse, error) {
+// 缩略图落在 thumbsDir（该用户专属目录），文件名固定为 {mediaID}_{longEdge}.jpg；
+// 内存 LRU key 带 uid 前缀以防跨用户串读。
+func (s *MediaService) getVideoThumbnail(ctx context.Context, uid, thumbsDir, mediaID, srcPath string, size gen.ThumbnailSize) (*gen.GetThumbnailResponse, error) {
 	longEdge, ok := thumbnailLongEdge[size]
 	if !ok {
 		return nil, fmt.Errorf("unknown thumbnail size: %v", size)
 	}
 
-	if err := os.MkdirAll(s.thumbsDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to ensure thumbs dir: %v", err)
-	}
-
-	thumbPath := filepath.Join(s.thumbsDir, fmt.Sprintf("%s_%d.jpg", mediaID, longEdge))
-	cacheKey := fmt.Sprintf("%s_%d.jpg", mediaID, longEdge)
+	thumbPath := filepath.Join(thumbsDir, fmt.Sprintf("%s_%d.jpg", mediaID, longEdge))
+	cacheKey := uid + "/" + fmt.Sprintf("%s_%d.jpg", mediaID, longEdge)
 
 	// In-memory LRU cache hit.
 	if data, mime, w, h, ok := s.thumbCache.Get(cacheKey); ok {
@@ -1360,13 +1427,14 @@ type VideoInfoResponse struct {
 	Container string `json:"container,omitempty"`
 }
 
-// GetVideoInfo 用 ffprobe 解析视频时长与分辨率。支持 uploads 与网盘图片源目录。
+// GetVideoInfo 用 ffprobe 解析视频时长与分辨率。支持该用户 uploads 与全局网盘图片源目录。
 // 非 VIDEO 类型文件返回错误，避免误用 ffprobe 解析图片。
 func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) (*VideoInfoResponse, error) {
 	if req == nil || req.MediaId == "" {
 		return nil, fmt.Errorf("media_id is required")
 	}
-	path := s.resolveMediaPath(req.MediaId)
+	uid := UserIDFromContext(ctx)
+	path := s.resolveMediaPath(uid, req.MediaId)
 	if path == "" {
 		return nil, fmt.Errorf("media not found: %s", req.MediaId)
 	}
@@ -1374,8 +1442,8 @@ func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) 
 		return nil, fmt.Errorf("media %s is not a video", req.MediaId)
 	}
 
-	// Try cached metadata first.
-	if cached, err := s.loadVideoMeta(req.MediaId); err == nil {
+	// Try cached metadata first (per-user video-meta dir).
+	if cached, err := s.loadVideoMeta(uid, req.MediaId); err == nil {
 		return cached, nil
 	}
 
@@ -1396,7 +1464,7 @@ func (s *MediaService) GetVideoInfo(ctx context.Context, req *VideoInfoRequest) 
 		return nil, err
 	}
 	// Persist to metadata file for future requests.
-	_ = s.saveVideoMeta(req.MediaId, resp)
+	_ = s.saveVideoMeta(uid, req.MediaId, resp)
 	return resp, nil
 }
 
@@ -1442,13 +1510,17 @@ func parseFFProbeJSON(raw []byte) (*VideoInfoResponse, error) {
 	return resp, nil
 }
 
-// loadVideoMeta reads cached ffprobe results from data/video-meta/{id}.json.
-// Returns an error if the file doesn't exist or can't be parsed.
-func (s *MediaService) loadVideoMeta(mediaID string) (*VideoInfoResponse, error) {
+// loadVideoMeta reads cached ffprobe results from <user video-meta>/{id}.json.
+// Returns an error if the file doesn't exist, can't be parsed, or uid 非法。
+func (s *MediaService) loadVideoMeta(uid, mediaID string) (*VideoInfoResponse, error) {
 	if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
 		return nil, fmt.Errorf("invalid mediaID")
 	}
-	metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+	videoMetaDir, err := s.userDirs.VideoMetaDir(uid)
+	if err != nil {
+		return nil, err
+	}
+	metaPath := filepath.Join(videoMetaDir, mediaID+".json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, err
@@ -1460,16 +1532,20 @@ func (s *MediaService) loadVideoMeta(mediaID string) (*VideoInfoResponse, error)
 	return &resp, nil
 }
 
-// saveVideoMeta persists ffprobe results to data/video-meta/{id}.json.
-// Best-effort: directory creation failures are ignored.
-func (s *MediaService) saveVideoMeta(mediaID string, resp *VideoInfoResponse) error {
+// saveVideoMeta persists ffprobe results to <user video-meta>/{id}.json.
+// Best-effort: directory creation failures are ignored. uid 非法返回错误。
+func (s *MediaService) saveVideoMeta(uid, mediaID string, resp *VideoInfoResponse) error {
 	if strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
 		return fmt.Errorf("invalid mediaID")
 	}
-	if err := os.MkdirAll(s.videoMetaDir, 0755); err != nil {
+	videoMetaDir, err := s.userDirs.VideoMetaDir(uid)
+	if err != nil {
 		return err
 	}
-	metaPath := filepath.Join(s.videoMetaDir, mediaID+".json")
+	if err := os.MkdirAll(videoMetaDir, 0755); err != nil {
+		return err
+	}
+	metaPath := filepath.Join(videoMetaDir, mediaID+".json")
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return err
