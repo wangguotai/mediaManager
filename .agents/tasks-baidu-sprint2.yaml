@@ -1,0 +1,182 @@
+# tasks-baidu-sprint2.yaml — V4 拆细版
+
+tasks:
+  # ── Layer 0: 后端认证基础（拆细）──
+
+
+  - id: be-jwt-auth
+    product: claude
+    prompt: |
+      在 backend/ 实现 JWT 用户认证。
+      1. POST /api/auth/login {username,password} → {token,expires_at,user}
+      2. POST /api/auth/register 受 allow_signup 控制(off/first/open)
+      3. JWT HS256，密钥来自 config.yaml jwt_secret
+      4. 认证中间件：除 /api/auth/* /healthz 外，解析 Bearer token 注入 user_id
+      5. 密码用 bcrypt
+      6. 读 .agents/interface-contract.md 了解现有端点
+      完成后 git add -A && git commit -m "be-jwt-auth: login/register + JWT middleware"
+    files: [backend/]
+    depends_on: []
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  - id: be-user-isolation
+    product: claude
+    prompt: |
+      在 backend/ 给所有现有端点加 user_id 隔离。
+      1. 数据目录 data/uploads/ → data/users/{uid}/uploads/
+      2. favorites.json 和 albums.json 加 user_id 维度（改用 SQLite 或 per-user 文件）
+      3. 所有 /api/media/* /api/favorite/* /api/album/* 端点从中间件拿 user_id 过滤
+      4. 未带 token 访问 /api/* 返回 401
+      5. 缩略图目录也按 user_id 隔离
+      完成后 git add -A && git commit -m "be-user-isolation: per-user data dirs + auth on all endpoints"
+    files: [backend/]
+    depends_on: [be-jwt-auth]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  - id: be-config-docker
+    product: claude
+    prompt: |
+      在 backend/ 添加配置文件 + Docker 部署。
+      1. config.example.yaml: port, data_dir, db_path, jwt_secret, allow_signup, ops_server_url(可选)
+      2. 环境变量 MM_* 覆盖 config.yaml
+      3. Dockerfile: Go 多阶段构建，含 ffmpeg
+      4. docker-compose.yml: 服务+持久化卷+健康检查
+      5. 首次启动输出超管令牌
+      完成后 git add -A && git commit -m "be-config-docker: config file + docker one-click deploy"
+    files: [backend/]
+    depends_on: [be-jwt-auth]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  # ── Layer 1: 同步API + 前端认证UI + 运营服务端 ──
+
+  - id: be-sync-api
+    product: claude
+    prompt: |
+      在 backend/ 实现多设备同步 API。
+      1. GET /api/sync/changes?since={cursor_ms}&page=&page_size= → {changes:[MediaMetadata], next_cursor, has_more}，含软删除墓碑
+      2. POST /api/media/upload 增加 sha256,client_id,taken_at，按 (user_id,sha256) 去重秒传
+      3. POST /api/device/register {device_name,platform} → {device_id}
+      4. GET /api/device/list
+      5. GET /api/sync/usage → 用户存储总量+文件数
+      完成后 git add -A && git commit -m "be-sync-api: incremental sync + dedup + device reg"
+    files: [backend/]
+    depends_on: [be-user-isolation]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd backend && go build ./..."
+
+  - id: fe-auth-ui
+    product: claude
+    prompt: |
+      在 frontend/ 实现认证流程 UI。
+      1. 登录页: 服务端地址+用户名+密码，调 POST /api/auth/login 存 token
+      2. token 存 SettingsStorage（Android EncryptedSharedPreferences / iOS Keychain expect/actual）
+      3. Ktor 客户端统一加 Authorization: Bearer
+      4. 401 拦截: 清 token → 回登录页
+      5. 注册页（如果服务端 allow_signup）
+      6. 设置页显示当前用户+退出登录
+      7. 未登录显示登录页，现有三Tab等保留不变
+      完成后 git add -A && git commit -m "fe-auth-ui: login + token persistence + 401 interceptor"
+    files: [frontend/]
+    depends_on: [be-jwt-auth]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: ops-server-skeleton
+    product: claude
+    prompt: |
+      新建 ops-server/ 目录，实现运营服务端骨架。
+      1. 独立 Go module，SQLite 存储
+      2. 运营账号: POST /op/auth/register|login
+      3. 服务端注册: POST /op/server/register → {server_id,server_token}
+      4. 设备发现: device(server_id,device_id,online,last_seen) 在线表
+      5. WebSocket 长连: 客户端和服务端各自连运营服务端
+      6. 信令交换: 介绍双方候选地址
+      7. TCP 中继: 直连失败时 TURN 式转发
+      8. 流量记账: relay_session 表
+      9. Docker 部署
+      完成后 git add -A && git commit -m "ops-server-skeleton: relay + discovery + traffic"
+    files: [ops-server/]
+    depends_on: [be-jwt-auth]
+    timeout: 1200s
+    max_retries: 2
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  # ── Layer 2: 前端同步 + 运营前端 ──
+
+  - id: fe-sync
+    product: claude
+    prompt: |
+      在 frontend/ 实现自动同步。
+      1. 增量拉取: App启动+进入"已上传"Tab调 GET /api/sync/changes?since=cursor
+      2. 云相册自动备份: 设置开关，本地新增图片后台增量上传
+      3. 上传去重: 算 sha256 命中跳过
+      4. 离线队列: 弱网入队 SQLite，恢复重放
+      5. "已上传"Tab升级为云端媒体视图
+      完成后 git add -A && git commit -m "fe-sync: incremental pull + auto backup + dedup"
+    files: [frontend/]
+    depends_on: [fe-auth-ui, be-sync-api]
+    timeout: 900s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: ops-frontend
+    product: claude
+    prompt: |
+      在 ops-server/ 内嵌运营管理前端（HTMX 或纯 HTML+JS）。
+      1. 登录页 2. 用户管理 3. 服务端监控 4. 设备/连接 5. 流量统计
+      /admin/* 路由，嵌入二进制，独立管理员账号。
+      完成后 git add -A && git commit -m "ops-frontend: admin dashboard"
+    files: [ops-server/]
+    depends_on: [ops-server-skeleton]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  # ── Layer 3: 文件管理 + QA ──
+
+  - id: fe-file-mgmt
+    product: claude
+    prompt: |
+      在 frontend/ "我的"Tab 下增加"文件管理"入口。
+      1. 列出云端所有媒体，按类型/时间/大小筛选排序
+      2. 批量下载到本地相册
+      3. 批量删除云端（写墓碑）
+      4. 查看占用空间（/api/sync/usage）
+      不做目录层级，媒体扁平+相册分组。
+      完成后 git add -A && git commit -m "fe-file-mgmt: cloud file management"
+    files: [frontend/]
+    depends_on: [fe-sync]
+    timeout: 1200s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: qa-v4
+    product: claude
+    prompt: |
+      全量 QA 验收，按 docs/PRD-v4.md §7 §8 逐项检查。
+      1. go build ./... 通过 2. assembleDebug+compileKotlinIosArm64 通过
+      3. docker compose up -d /healthz 200 4. 401 隔离 5. 同步 6. 运营前端
+      输出报告到 docs/V4-QA-REPORT.md
+      完成后 git add -A && git commit -m "qa: V4 acceptance report"
+    files: [docs/]
+    depends_on: [fe-file-mgmt, ops-frontend, be-config-docker]
+    timeout: 1200s
+    max_retries: 1
+    verify_commands: []
