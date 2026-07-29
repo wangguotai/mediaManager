@@ -166,9 +166,9 @@ fun SearchBar(
                         .fillMaxWidth()
                         .focusRequester(focusRequester)
                         .onFocusChanged { state ->
+                            // 仅清空查询，不自动收起——收起由 IconButton 返回箭头控制
                             if (!state.isFocused && queryText.isEmpty()) {
                                 onDebouncedQueryChange("")
-                                onExpandedChange(false)
                             }
                         },
                     singleLine = true,

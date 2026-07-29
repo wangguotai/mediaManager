@@ -304,39 +304,8 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     }
 
     Scaffold(
-        // MIUI-style: 顶部只留标题 + 搜索图标，操作按钮全部移到底部 NavigationBar / 内容区。
-        // padding(top = 48.dp) 确保在状态栏下方，避免 MIUI 状态栏触摸拦截。
-        topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 48.dp, bottom = 8.dp, start = 16.dp, end = 16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "图片管理",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp
-                )
-                // 搜索图标仅在媒体 Tab（0-2）显示，"我的" Tab 无需搜索
-                if (selectedTab < 3) {
-                    Box(
-                        modifier = Modifier
-                            .clickable {
-                                searchExpanded = !searchExpanded
-                            }
-                            .padding(8.dp)
-                            .semantics {
-                                role = Role.Button
-                                contentDescription = "搜索"
-                            }
-                    ) {
-                        Icon(painterResource(Res.drawable.ic_search), contentDescription = "搜索")
-                    }
-                }
-            }
-        },
+        // MIUI 修复：完全移除 topBar 槽位——MIUI 系统会拦截 Scaffold topBar 区域的触摸事件。
+        // 标题 + 搜索图标改放到内容区第一行，确保 y 坐标足够低，绕过状态栏触摸拦截。
         bottomBar = {
             if (viewModel.hasSelection && selectedTab != 2 && selectedTab != 3) {
                 // 选择模式：显示批量操作底栏（替换 NavigationBar）
@@ -404,21 +373,37 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 return@Box
             }
 
-            // 媒体 Tab（0-2）：搜索栏 + 筛选条 + 网格列表
-            Column(modifier = Modifier.fillMaxSize()) {
-                // 搜索栏：从顶部区域移到内容区首行，确保 y > 150dp，避免 MIUI 状态栏拦截
-                SearchBar(
-                    expanded = searchExpanded,
-                    onExpandedChange = { searchExpanded = it },
+            // 媒体 Tab（0-2）：标题 + 搜索栏 + 筛选条 + 网格列表
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+                // 标题行
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp, bottom = 4.dp, start = 16.dp, end = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "图片管理",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp
+                    )
+                }
+                // 搜索栏：自带 IconButton 展开收起，无需额外图标
+                if (selectedTab < 3) {
+                    SearchBar(
+                        expanded = searchExpanded,
+                        onExpandedChange = { searchExpanded = it },
                     onDebouncedQueryChange = { query -> viewModel.applySearchQuery(query) },
                     onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
                 )
 
-                // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效
-                FilterChipsRow(
-                    selected = viewModel.filterType,
-                    onSelect = { type -> viewModel.applyFilterType(type) }
-                )
+                    // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效
+                    FilterChipsRow(
+                        selected = viewModel.filterType,
+                        onSelect = { type -> viewModel.applyFilterType(type) }
+                    )
+                } // end if (selectedTab < 3)
 
                 // Tab 切换整体淡入淡出
                 Crossfade(
