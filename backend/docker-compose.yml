@@ -1,0 +1,67 @@
+# Media Manager 一键 Docker 部署。
+#
+# 本文件位于 backend/，build context 为当前目录（.），Dockerfile 即 ./Dockerfile。
+#
+# 启动：  cd backend && docker compose up -d --build
+# 查看引导凭据（首次启动会在日志中打印一次性超管账号 + token）：
+#   docker compose logs media-server | grep -A8 "INITIAL ADMIN"
+# 健康检查：GET http://localhost:8080/healthz
+#
+# 数据持久化：命名卷 media-data 挂载到容器 /app/data，含上传文件、缩略图、
+# cloud-images、SQLite 库（media.db）、favorites.json、albums.json。
+#
+# 覆盖优先级：代码默认 < config.yaml < MM_* 环境变量。此处用 environment 注入 MM_*，
+# 任何字段都可在此临时覆盖而无需改 config.yaml。
+
+services:
+  media-server:
+    # build context 为 backend/（Dockerfile 内 COPY 以此为根）。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: media-manager:latest
+    container_name: media-server
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"   # REST gateway（含 /api/* 与 /healthz）
+
+    environment:
+      # ---- 运行配置（覆盖 config.yaml）----
+      MM_PORT: "8080"
+      MM_DATA_DIR: /app/data
+      MM_DB_PATH: /app/data/media.db
+
+      # ---- JWT ----
+      # 生产部署前必须替换为一段足够随机的长字符串；留空时会用进程级随机密钥（重启失效）。
+      MM_JWT_SECRET: "change-me-to-a-long-random-secret"
+      MM_JWT_TTL_SECONDS: "604800"
+      # off（默认）：禁止自助注册，靠首次启动自动引导的超管账号登录。
+      # 可选 first（首位注册者自动 admin，其后关闭）/ open（任意人可注册为 user）。
+      MM_ALLOW_SIGNUP: "off"
+
+      # ---- 运维面（可选）----
+      # OpenClaw 网关地址，供 POST /api/openclaw/command 转发。留空回退本地默认。
+      # MM_OPS_SERVER_URL: "http://host.docker.internal:18789"
+
+      # ---- 首次启动超管引导（可选）----
+      # 留空时用户名默认 admin、密码自动生成一次性随机串（见启动日志）。
+      # 显式指定则用给定凭据创建超管；仅库为空时生效，之后重启幂等跳过。
+      # MM_BOOTSTRAP_ADMIN_USERNAME: "admin"
+      # MM_BOOTSTRAP_ADMIN_PASSWORD: "change-me-too"
+
+    volumes:
+      - media-data:/app/data
+
+    # 健康检查：REST /healthz 已豁免认证。与镜像内 HEALTHCHECK 一致；compose 显式
+    # 声明以保证 compose 自包含可读，并覆盖镜像默认以便调参。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 7s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+
+volumes:
+  media-data:
+    name: media-data

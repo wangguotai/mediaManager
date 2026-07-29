@@ -1,0 +1,27 @@
+# build context 瘦身：把无需进镜像的本地产物与备份排除，减小传输体积、加速缓存命中。
+# Dockerfile 仅 COPY go.mod/go.sum/gen/cmd/internal/config.example.yaml，其余皆可忽略。
+
+# 本地运行数据与 SQLite 库（容器内用挂载卷，不 baked-in）。
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 本地构建产物。
+server
+media-server
+*.test
+*.out
+
+# 旧版生成代码备份，不参与镜像构建。
+gen_backup/
+
+# IDE/OS 杂物。
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# 不把本地 config.yaml 烤进镜像（容器靠 MM_* 注入；镜像仅带 config.example.yaml）。
+config.yaml

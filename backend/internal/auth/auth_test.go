@@ -273,3 +273,77 @@ func TestIsUniqueViolationHelper(t *testing.T) {
 		t.Fatalf("expected unique violation match")
 	}
 }
+
+// TestBootstrapEmptyCreatesAdmin 验证库空时 BootstrapAdmin 创建 admin 账号、签发可用 token。
+func TestBootstrapEmptyCreatesAdmin(t *testing.T) {
+	a, store := newTestAuth(t, "off")
+	res, err := a.BootstrapAdmin(context.Background(), "root", "strongpw1")
+	if err != nil {
+		t.Fatalf("BootstrapAdmin: %v", err)
+	}
+	if res == nil {
+		t.Fatalf("BootstrapAdmin on empty store should return result, got nil")
+	}
+	if res.Username != "root" || res.Password != "strongpw1" || res.Token == "" {
+		t.Fatalf("bootstrap result mismatch: %+v", res)
+	}
+	// 角色应为 admin。
+	if len(store.users) != 1 || store.users[0].Role != "admin" {
+		t.Fatalf("expected one admin user, got %+v", store.users)
+	}
+	// token 可解析回新建 user_id。
+	uid, err := a.ParseToken(res.Token)
+	if err != nil || uid != res.UserID {
+		t.Fatalf("ParseToken: uid=%q err=%v", uid, err)
+	}
+	// 用生成的凭据能登录。
+	if _, err := a.Login(context.Background(), LoginRequest{Username: "root", Password: "strongpw1"}); err != nil {
+		t.Fatalf("Login with bootstrap creds: %v", err)
+	}
+}
+
+// TestBootstrapNonEmptyReturnsNil 验证库非空时 BootstrapAdmin 返回 nil（已引导过，不重复）。
+func TestBootstrapNonEmptyReturnsNil(t *testing.T) {
+	a, _ := newTestAuth(t, "open")
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "someone", Password: "pw1234"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	res, err := a.BootstrapAdmin(context.Background(), "admin", "pw1234")
+	if err != nil {
+		t.Fatalf("BootstrapAdmin on non-empty: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("BootstrapAdmin on non-empty store should return nil, got %+v", res)
+	}
+}
+
+// TestBootstrapDefaultsUsernamePassword 验证空用户名用默认 "admin"，空密码生成一次性随机密码。
+func TestBootstrapDefaultsUsernamePassword(t *testing.T) {
+	a, _ := newTestAuth(t, "off")
+	res, err := a.BootstrapAdmin(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("BootstrapAdmin: %v", err)
+	}
+	if res == nil {
+		t.Fatalf("expected result")
+	}
+	if res.Username != "admin" {
+		t.Fatalf("default username: got %q want admin", res.Username)
+	}
+	if res.Password == "" || len(res.Password) < 16 {
+		t.Fatalf("generated password should be non-empty and reasonably long, got %q", res.Password)
+	}
+	// 生成的随机密码仍可用于登录（证明落库哈希与原文一致）。
+	if _, err := a.Login(context.Background(), LoginRequest{Username: "admin", Password: res.Password}); err != nil {
+		t.Fatalf("Login with generated password: %v", err)
+	}
+}
+
+// TestBootstrapShortExplicitPasswordRejected 验证显式传入过短密码被拒（一次性随机密码不受影响）。
+func TestBootstrapShortExplicitPasswordRejected(t *testing.T) {
+	a, _ := newTestAuth(t, "off")
+	_, err := a.BootstrapAdmin(context.Background(), "admin", "ab")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("short explicit password: want ErrInvalidCredentials, got %v", err)
+	}
+}

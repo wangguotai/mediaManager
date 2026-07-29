@@ -29,6 +29,13 @@ type Config struct {
 	// DBPath 是 SQLite 数据库文件路径。为空时默认 <DataDir>/media.db
 	//（与 config.example.yaml 的默认口径一致）。
 	DBPath string `yaml:"db_path"`
+	// Port 是 REST gateway 监听端口（仅端口号，如 "8080"）。为空默认 8080。
+	// main.go 据此拼成 ":8080" 监听地址。gRPC 端口(:50051)暂不此间配置——
+	// 容器内仅暴露 REST，gRPC 仅供后端进程内部，不对外。
+	Port string `yaml:"port"`
+	// OpsServerURL 是运维管理面（OpenClaw 网关）地址，供 /api/openclaw/command 转发。
+	// 可选：留空时沿用 main.go 中 OPENCLAW_GATEWAY_URL 环境变量或默认本地地址。
+	OpsServerURL string `yaml:"ops_server_url"`
 
 	// JWTSecret 是 JWT HS256 签名密钥。为空时服务启动会生成一份内存随机密钥
 	//（重启后失效、已签发的 token 全部作废），仅适合开发；生产必须显式配置。
@@ -40,13 +47,17 @@ type Config struct {
 	AllowSignup string `yaml:"allow_signup"`
 }
 
+// defaultPort 是 REST gateway 的默认端口。容器与本地直跑均沿用此值。
+const defaultPort = "8080"
+
 // Default 返回填入默认值的 Config：DataDir=./data，DBPath=./data/media.db，
-// AllowSignup=off（最安全默认，阻止自助注册）。
+// Port=8080，AllowSignup=off（最安全默认，阻止自助注册）。
 func Default() *Config {
 	dataDir := "./data"
 	return &Config{
 		DataDir:     dataDir,
 		DBPath:      filepath.Join(dataDir, "media.db"),
+		Port:        defaultPort,
 		AllowSignup: SignupOff,
 	}
 }
@@ -82,11 +93,80 @@ func Load(path string) (*Config, error) {
 		// DBPath 未指定时落在 DataDir 下，与 Default() 口径一致（media.db）。
 		cfg.DBPath = filepath.Join(cfg.DataDir, "media.db")
 	}
+	// Port：显式空串/省略保持默认 8080；非空透传（去掉可能的前导冒号，统一为纯端口号）。
+	if p := normalizePort(parsed.Port); p != "" {
+		cfg.Port = p
+	}
+	if parsed.OpsServerURL != "" {
+		cfg.OpsServerURL = parsed.OpsServerURL
+	}
 	// JWT 字段透传；allow_signup 归一化为合法三态之一，便于下游直接比较。
 	cfg.JWTSecret = parsed.JWTSecret
 	cfg.JWTTTLSeconds = parsed.JWTTTLSeconds
 	cfg.AllowSignup = normalizeSignup(parsed.AllowSignup)
 	return cfg, nil
+}
+
+// normalizePort 去掉监听地址形态（如 ":8080"）中的前导冒号，统一成纯端口号字符串。
+// 空串原样返回（由调用方决定是否回退默认）。非数字字符保留不强制校验，交由 net.Listen 兜底。
+func normalizePort(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.TrimPrefix(p, ":")
+	return p
+}
+
+// ApplyEnv 用 MM_* 前缀的环境变量覆盖已加载的配置，返回新的覆盖后 Config（不修改接收者外的状态）。
+//
+// 约定：每个字段对应一个环境变量，存在且非空即覆盖；未设置或空串保持文件/默认值。
+//   - MM_PORT              -> Port
+//   - MM_DATA_DIR          -> DataDir（同时据此重算 DBPath 默认，仅当 DBPath 未被显式覆盖时）
+//   - MM_DB_PATH           -> DBPath
+//   - MM_JWT_SECRET        -> JWTSecret
+//   - MM_JWT_TTL_SECONDS   -> JWTTTLSeconds（解析失败忽略，保留原值）
+//   - MM_ALLOW_SIGNUP      -> AllowSignup（经 normalizeSignup 归一化）
+//   - MM_OPS_SERVER_URL    -> OpsServerURL
+//
+// 该函数在 config.yaml 加载完成后调用，是"文件 < 环境变量"覆盖链的最后一环，
+// 既支持 compose/k8s 注入，也支持本地 `MM_PORT=9000 ./server` 临时覆盖。
+func (c *Config) ApplyEnv() {
+	if v := os.Getenv("MM_PORT"); v != "" {
+		if p := normalizePort(v); p != "" {
+			c.Port = p
+		}
+	}
+	if v := os.Getenv("MM_DATA_DIR"); v != "" {
+		c.DataDir = v
+		// DataDir 变更后，若 DBPath 未被独立设置，重新派生为 <DataDir>/media.db。
+		// 注意：此时无法区分"DBPath 是默认派生"还是"文件显式设了同值"，故当
+		// MM_DB_PATH 未提供时一律重算——对绝大多数"只改 data_dir"的部署足够且符合直觉。
+		if os.Getenv("MM_DB_PATH") == "" {
+			c.DBPath = filepath.Join(c.DataDir, "media.db")
+		}
+	}
+	if v := os.Getenv("MM_DB_PATH"); v != "" {
+		c.DBPath = v
+	}
+	if v := os.Getenv("MM_JWT_SECRET"); v != "" {
+		c.JWTSecret = v
+	}
+	if v := os.Getenv("MM_JWT_TTL_SECONDS"); v != "" {
+		if n, err := parseIntStrict(v); err == nil {
+			c.JWTTTLSeconds = n
+		}
+	}
+	if v := os.Getenv("MM_ALLOW_SIGNUP"); v != "" {
+		c.AllowSignup = normalizeSignup(v)
+	}
+	if v := os.Getenv("MM_OPS_SERVER_URL"); v != "" {
+		c.OpsServerURL = v
+	}
+}
+
+// parseIntStrict 把字符串解析为 int；非法返回错误。os 没有直接提供，此处小封装。
+func parseIntStrict(s string) (int, error) {
+	var n int
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
 }
 
 // normalizeSignup 把配置值归一为合法的 signup 模式之一。
