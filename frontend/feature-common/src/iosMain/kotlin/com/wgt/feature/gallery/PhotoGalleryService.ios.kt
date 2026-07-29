@@ -81,6 +81,11 @@ internal class IOSPhotoGalleryService : PhotoGalleryService {
         getLivePhotoVideoDataFromAsset(asset)
     }
 
+    override suspend fun deleteMedia(mediaIds: List<String>): Int = withContext(Dispatchers.Default) {
+        // iOS: 需要 PHAssetDeleteRequest，暂返回 0
+        0
+    }
+
     private suspend fun requestPhotoLibraryAuthorization(): Boolean = suspendCancellableCoroutine { continuation ->
         val currentStatus = PHPhotoLibrary.authorizationStatus()
 

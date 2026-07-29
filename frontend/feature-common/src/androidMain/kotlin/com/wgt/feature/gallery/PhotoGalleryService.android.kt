@@ -144,14 +144,23 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
             val offset = extractMicroVideoOffset(id)
             if (offset == null) return@withContext null
 
-            // 3. 从偏移量开始读取嵌入的 MP4 视频数据
+            // 3. 从偏移量开始读取嵌入的视频数据
             val raf = java.io.RandomAccessFile(file, "r")
             raf.seek(offset.toLong())
-            val videoLength = file.length() - offset
-            val videoBytes = ByteArray(videoLength.toInt())
-            raf.readFully(videoBytes)
+            val rawVideoLength = file.length() - offset
+            val rawVideoBytes = ByteArray(rawVideoLength.toInt())
+            raf.readFully(rawVideoBytes)
             raf.close()
-            videoBytes
+
+            // MicroVideoOffset 指向视频媒体区域近似起点，不一定是 MP4 ftyp box 起始。
+            // 在提取的数据中搜索 ftyp box（4 字节 size 在前），从 ftyp-4 开始截取完整 MP4。
+            val ftypPos = findFtypBox(rawVideoBytes)
+            if (ftypPos >= 0) {
+                rawVideoBytes.copyOfRange(ftypPos, rawVideoBytes.size)
+            } else {
+                // 没找到 ftyp box，返回原始数据（某些格式视频不含标准 MP4 头）
+                rawVideoBytes
+            }
         } catch (e: Exception) {
             null
         }
@@ -180,7 +189,7 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
             if (!file.exists()) return null
 
             val raf = java.io.RandomAccessFile(file, "r")
-            val headerSize = minOf(65536, file.length().toInt())
+            val headerSize = minOf(131072, file.length().toInt())
             val header = ByteArray(headerSize)
             raf.readFully(header)
             raf.close()
@@ -206,6 +215,39 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
         } catch (e: Exception) {
             null
         }
+    }
+
+    override suspend fun deleteMedia(mediaIds: List<String>): Int = withContext(Dispatchers.IO) {
+        var deleted = 0
+        for (mediaId in mediaIds) {
+            try {
+                val id = mediaId.toLong()
+                val contentUri = ContentUris.withAppendedId(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
+                )
+                val rows = context.contentResolver.delete(contentUri, null, null)
+                if (rows > 0) deleted++
+            } catch (e: Exception) {
+                // SecurityException on Android 10+ if not owner
+            }
+        }
+        deleted
+    }
+
+    /**
+     * 在视频数据块中搜索 MP4 ftyp box。
+     */
+    private fun findFtypBox(data: ByteArray): Int {
+        val ftyp = byteArrayOf(0x66, 0x74, 0x79, 0x70) // "ftyp"
+        var pos = 0
+        while (pos < data.size - 8) {
+            if (data[pos] == ftyp[0] && data[pos+1] == ftyp[1] &&
+                data[pos+2] == ftyp[2] && data[pos+3] == ftyp[3]) {
+                return (pos - 4).coerceAtLeast(0)
+            }
+            pos++
+        }
+        return -1
     }
 }
 

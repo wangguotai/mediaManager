@@ -33,6 +33,11 @@ class GalleryFeature() : Feature() {
      * 获取Live Photo的视频数据（如果存在）
      */
     suspend fun getLivePhotoVideoData(mediaId: String): ByteArray? = photoGalleryService.getLivePhotoVideoData(mediaId)
+
+    /**
+     * 删除本地照片图库中的媒体文件
+     */
+    suspend fun deleteMedia(mediaIds: List<String>): Int = photoGalleryService.deleteMedia(mediaIds)
 }
 
 /**

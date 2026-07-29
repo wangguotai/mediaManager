@@ -643,7 +643,11 @@ class MediaViewModel {
     fun deleteSingleMedia(mediaId: String) {
         viewModelScope.launch {
             try {
-                val success = MediaService.deleteMedia(listOf(mediaId))
+                val success = if (currentSource == MediaSource.LOCAL) {
+                    galleryFeature.deleteMedia(listOf(mediaId)) > 0
+                } else {
+                    MediaService.deleteMedia(listOf(mediaId))
+                }
                 if (success) {
                     mediaList = mediaList.filter { it.id != mediaId }
                     selectedMediaIds.remove(mediaId)
@@ -667,7 +671,11 @@ class MediaViewModel {
 
         viewModelScope.launch {
             try {
-                val success = MediaService.deleteMedia(selectedMediaIds.toList())
+                val success = if (currentSource == MediaSource.LOCAL) {
+                    galleryFeature.deleteMedia(selectedMediaIds.toList()) > 0
+                } else {
+                    MediaService.deleteMedia(selectedMediaIds.toList())
+                }
                 if (success) {
                     // 删除成功后更新列表
                     mediaList = mediaList.filter { it.id !in selectedMediaIds }

@@ -9,6 +9,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -109,8 +110,10 @@ fun SearchBar(
         }
     }
 
-    // 宽度动画：展开时填满父宽，收起时收窄到图标+提示文案宽度，spring 过渡更丝滑。
-    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+    // 用 Column 包裹搜索栏 + 搜索历史，避免历史标签叠加在输入框上
+    Column(modifier = modifier.fillMaxWidth()) {
+        // 宽度动画：展开时填满父宽，收起时收窄到图标+提示文案宽度
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxW = maxWidth
         val animatedWidth by animateDpAsState(
             targetValue = if (expanded) maxW else 120.dp,
@@ -229,8 +232,9 @@ fun SearchBar(
                 )
             }
         }
+        } // end BoxWithConstraints
 
-        // 搜索历史：展开态且输入为空时显示最近搜索词标签
+        // 搜索历史：展开态且输入为空时显示最近搜索词标签（在搜索框下方，不叠加）
         if (expanded && queryText.isEmpty()) {
             val history = SearchHistory.load()
             if (history.isNotEmpty()) {
@@ -258,6 +262,6 @@ fun SearchBar(
                 }
             }
         }
-    }
+    } // end Column
     }
 }

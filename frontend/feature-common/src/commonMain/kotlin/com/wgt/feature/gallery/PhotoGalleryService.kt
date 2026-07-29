@@ -42,6 +42,13 @@ internal interface PhotoGalleryService {
      * 获取Live Photo的视频数据（如果存在）
      */
     suspend fun getLivePhotoVideoData(mediaId: String): ByteArray?
+
+    /**
+     * 删除本地照片图库中的媒体文件。
+     * Android 通过 MediaStore 删除，iOS 通过 PHAsset 删除。
+     * @return 成功删除的数量
+     */
+    suspend fun deleteMedia(mediaIds: List<String>): Int
 }
 
 /**
