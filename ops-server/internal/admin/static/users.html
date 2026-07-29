@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运营管理 · 用户</title>
+<style>
+  :root{--bg:#0f1216;--card:#1a1f26;--fg:#e6e9ef;--muted:#8b93a3;--accent:#4f9cf9;--ok:#3ec77a;--err:#ef5b5b;--bd:#2c333d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--bd);background:#14181e;position:sticky;top:0}
+  .top .brand{font-weight:600}
+  .top nav a{color:var(--muted);text-decoration:none;margin-left:18px;font-size:13px}
+  .top nav a:hover,.top nav a.cur{color:var(--accent)}
+  .wrap{max-width:1040px;margin:22px auto;padding:0 18px}
+  h2{margin:0 0 6px;font-size:16px;font-weight:600}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 16px}
+  .card{background:var(--card);border-radius:8px;padding:16px}
+  .bar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .bar input,.bar select{padding:8px 10px;border-radius:6px;border:1px solid #2c333d;background:#12161c;color:var(--fg);font-size:13px}
+  .bar input{flex:1;min-width:180px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--bd);vertical-align:middle}
+  th{color:var(--muted);font-weight:500;font-size:12px}
+  td.mono,th.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px}
+  .pill.ok{background:rgba(62,199,122,.15);color:var(--ok)}
+  .pill.off{background:rgba(239,91,91,.15);color:var(--err)}
+  .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  .err{color:var(--err);font-size:13px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand">📡 运营管理后台</div>
+  <nav>
+    <a href="dashboard.html">看板</a>
+    <a href="users.html" class="cur">用户</a>
+    <a href="servers.html">服务端</a>
+    <a href="traffic.html">流量</a>
+    <a href="#" id="logout">退出</a>
+  </nav>
+</div>
+<div class="wrap">
+  <h2>终端用户（设备）</h2>
+  <p class="sub">受管服务端名下登记的设备。按 server 隔离，online 由心跳/WS 连接态驱动。</p>
+  <div class="err" id="err"></div>
+  <div class="card">
+    <div class="bar">
+      <select id="fServer"><option value="">全部服务端</option></select>
+      <select id="fOnline">
+        <option value="">全部状态</option>
+        <option value="1">在线</option>
+        <option value="0">离线</option>
+      </select>
+      <input id="q" type="search" placeholder="搜索 device_id / server_id…">
+      <button id="btnRefresh" style="padding:8px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;cursor:pointer">刷新</button>
+    </div>
+    <div id="table"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var tok = localStorage.getItem("ops_token");
+  if (!tok) { location.href = "index.html"; return; }
+  document.getElementById("logout").addEventListener("click", function(e){
+    e.preventDefault(); localStorage.removeItem("ops_token"); location.href="index.html";
+  });
+  var errEl = document.getElementById("err");
+  function api(path){
+    return fetch(path,{headers:{"Authorization":"Bearer "+tok}})
+      .then(function(r){ if(r.status===401){location.href="index.html";throw new Error("unauth");} return r.json(); });
+  }
+  function fmtTime(s){ if(!s) return "—"; var d=new Date(s); return isNaN(d)?s:d.toLocaleString(); }
+
+  var all = [];
+  function render(){
+    var sid = document.getElementById("fServer").value;
+    var onl = document.getElementById("fOnline").value;
+    var q = document.getElementById("q").value.trim().toLowerCase();
+    var rows = all.filter(function(d){
+      if (sid && d.server_id !== sid) return false;
+      if (onl==="1" && !d.online) return false;
+      if (onl==="0" && d.online) return false;
+      if (q && (String(d.device_id||"").toLowerCase().indexOf(q)<0) && (String(d.server_id||"").toLowerCase().indexOf(q)<0)) return false;
+      return true;
+    });
+    var box = document.getElementById("table");
+    if (!rows.length){ box.innerHTML = '<div class="empty">无匹配设备</div>'; return; }
+    var body = rows.map(function(d){
+      var p = d.online ? '<span class="pill ok">在线</span>' : '<span class="pill off">离线</span>';
+      return '<tr><td class="mono">'+escapeHtml(d.server_id)+'</td>'+
+        '<td class="mono">'+escapeHtml(d.device_id)+'</td>'+
+        '<td>'+p+'</td>'+
+        '<td>'+fmtTime(d.last_seen)+'</td>'+
+        '<td class="mono" style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escapeHtml(d.meta||"")+'</td></tr>';
+    }).join("");
+    box.innerHTML = '<table><thead><tr><th class="mono">Server ID</th><th class="mono">Device ID</th><th>状态</th><th>最近心跳</th><th>元信息</th></tr></thead><tbody>'+body+'</tbody></table>';
+  }
+  function escapeHtml(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+
+  function load(){
+    errEl.textContent = "";
+    api("api/users").then(function(j){
+      all = j.users || [];
+      // 填充 server 过滤下拉（去重）。
+      var seen = {}; var opts = '<option value="">全部服务端</option>';
+      all.forEach(function(d){ if(!seen[d.server_id]){ seen[d.server_id]=1; opts += '<option value="'+escapeHtml(d.server_id)+'">'+escapeHtml(d.server_id.slice(0,12))+'</option>'; } });
+      document.getElementById("fServer").innerHTML = opts;
+      render();
+    }).catch(function(e){ if(e.message!=="unauth") errEl.textContent="加载失败："+e.message; });
+  }
+  ["fServer","fOnline","q"].forEach(function(id){ document.getElementById(id).addEventListener("input", render); document.getElementById(id).addEventListener("change", render); });
+  document.getElementById("btnRefresh").addEventListener("click", load);
+  load();
+})();
+</script>
+</body>
+</html>

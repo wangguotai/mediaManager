@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运营管理 · 登录</title>
+<style>
+  :root { --bg:#0f1216; --card:#1a1f26; --fg:#e6e9ef; --muted:#8b93a3; --accent:#4f9cf9; --err:#ef5b5b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .card { background:var(--card); padding:28px 26px; border-radius:10px;
+    width:320px; box-shadow:0 6px 28px rgba(0,0,0,.35); }
+  h1 { margin:0 0 4px; font-size:18px; }
+  .sub { margin:0 0 20px; color:var(--muted); font-size:12px; }
+  label { display:block; margin:14px 0 4px; color:var(--muted); font-size:12px; }
+  input { width:100%; padding:9px 10px; border-radius:6px; border:1px solid #2c333d;
+    background:#12161c; color:var(--fg); font-size:14px; }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { width:100%; margin-top:18px; padding:10px; border:0; border-radius:6px;
+    background:var(--accent); color:#fff; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .err { color:var(--err); font-size:12px; min-height:16px; margin-top:10px; }
+  .hint { margin-top:16px; color:var(--muted); font-size:11px; border-top:1px solid #2c333d; padding-top:12px; }
+</style>
+</head>
+<body>
+  <form class="card" id="loginForm">
+    <h1>运营管理后台</h1>
+    <p class="sub">Media Manager Ops Console</p>
+    <label for="username">用户名</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit" id="btn">登录</button>
+    <div class="err" id="err"></div>
+    <div class="hint">运营账号独立于终端用户。若无账号，请联系管理员或通过首次注册创建首位 admin。</div>
+  </form>
+<script>
+(function(){
+  // 已登录则直接进看板，避免重复登录。
+  var tok = localStorage.getItem("ops_token");
+  if (tok) { location.href = "dashboard.html"; return; }
+
+  var f = document.getElementById("loginForm");
+  var btn = document.getElementById("btn");
+  var err = document.getElementById("err");
+
+  f.addEventListener("submit", function(e){
+    e.preventDefault();
+    err.textContent = "";
+    btn.disabled = true; btn.textContent = "登录中…";
+    var body = {
+      username: document.getElementById("username").value.trim(),
+      password: document.getElementById("password").value
+    };
+    fetch("api/login", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        if (res.ok && res.j.token) {
+          localStorage.setItem("ops_token", res.j.token);
+          localStorage.setItem("ops_account", JSON.stringify(res.j.account || {}));
+          location.href = "dashboard.html";
+        } else {
+          err.textContent = (res.j && res.j.error) ? res.j.error : "登录失败";
+          btn.disabled = false; btn.textContent = "登录";
+        }
+      })
+      .catch(function(){
+        err.textContent = "网络错误，请稍后重试";
+        btn.disabled = false; btn.textContent = "登录";
+      });
+  });
+})();
+</script>
+</body>
+</html>
