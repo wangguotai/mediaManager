@@ -73,9 +73,10 @@ import org.jetbrains.compose.resources.painterResource
 internal actual fun VideoPlayer(
     media: MediaMetadata,
     initialDurationSeconds: Double?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    videoUrl: String?
 ) {
-    val player = remember { AVPlayer(uRL = NSURL.URLWithString(backendStreamUrl(media.id))!!) }
+    val player = remember { AVPlayer(uRL = NSURL.URLWithString(videoUrl ?: backendStreamUrl(media.id))!!) }
     val playerLayer = remember { AVPlayerLayer() }
 
     var isReady by remember { mutableStateOf(false) }

@@ -61,7 +61,8 @@ private const val TAG = "VideoPlayer"
 internal actual fun VideoPlayer(
     media: MediaMetadata,
     initialDurationSeconds: Double?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    videoUrl: String?
 ) {
     val context = LocalContext.current
     val videoView = remember { VideoView(context) }
@@ -92,7 +93,7 @@ internal actual fun VideoPlayer(
             isPrepared = false
             true // 已处理，避免弹原生错误框
         }
-        videoView.setVideoURI(Uri.parse(backendStreamUrl(media.id)))
+        videoView.setVideoURI(Uri.parse(videoUrl ?: backendStreamUrl(media.id)))
     }
 
     // 进度轮询：每 200ms 取当前位置更新进度条，拖拽中暂停回写。

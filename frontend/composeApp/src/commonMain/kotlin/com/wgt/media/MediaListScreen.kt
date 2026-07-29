@@ -648,6 +648,8 @@ fun ImagePreviewDialog(
     // Live Photo 视频播放状态：非空时在预览上层渲染 VideoPlayer 播放关联视频。
     // 点击"动态照片"按钮或长按图片时设置，播放器关闭后清空。
     var livePhotoVideoMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+    // 本地 Live Photo 视频的 file:// URI（仅 LOCAL 源使用，后端源走 backendStreamUrl）
+    var livePhotoVideoUrl by remember { mutableStateOf<String?>(null) }
 
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
@@ -704,11 +706,23 @@ fun ImagePreviewDialog(
                             // 长按图片：如果是 Live Photo，播放关联视频
                             val m = mediaList[page]
                             if (m.is_live_photo && m.live_photo_video_id.isNotEmpty()) {
-                                livePhotoVideoMedia = m.copy(
-                                    id = m.live_photo_video_id,
-                                    type = MediaType.VIDEO,
-                                    filename = m.filename
-                                )
+                                if (useBackendLoader) {
+                                    livePhotoVideoMedia = m.copy(
+                                        id = m.live_photo_video_id,
+                                        type = MediaType.VIDEO,
+                                        filename = m.filename
+                                    )
+                                } else {
+                                    // 本地 Live Photo: 提取嵌入视频到临时文件
+                                    livePhotoVideoMedia = m.copy(
+                                        id = m.live_photo_video_id,
+                                        type = MediaType.VIDEO,
+                                        filename = m.filename
+                                    )
+                                    scope.launch {
+                                        livePhotoVideoUrl = extractLocalLivePhotoVideo(m.id)
+                                    }
+                                }
                             }
                         }
                     )
@@ -829,6 +843,11 @@ fun ImagePreviewDialog(
                                             type = MediaType.VIDEO,
                                             filename = currentMedia.filename
                                         )
+                                        if (!useBackendLoader) {
+                                            scope.launch {
+                                                livePhotoVideoUrl = extractLocalLivePhotoVideo(currentMedia.id)
+                                            }
+                                        }
                                     }
                                 )
                             }
@@ -870,7 +889,11 @@ fun ImagePreviewDialog(
                     VideoPlayer(
                         media = videoMedia,
                         initialDurationSeconds = null,
-                        onDismiss = { livePhotoVideoMedia = null }
+                        onDismiss = {
+                            livePhotoVideoMedia = null
+                            livePhotoVideoUrl = null
+                        },
+                        videoUrl = livePhotoVideoUrl
                     )
                 }
             } // AnimatedVisibility inner Box

@@ -99,5 +99,6 @@ private fun Long.pad2(): String = if (this < 10) "0$this" else this.toString()
 internal expect fun VideoPlayer(
     media: MediaMetadata,
     initialDurationSeconds: Double?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    videoUrl: String? = null
 )

@@ -34,3 +34,9 @@ class GalleryFeature() : Feature() {
      */
     suspend fun getLivePhotoVideoData(mediaId: String): ByteArray? = photoGalleryService.getLivePhotoVideoData(mediaId)
 }
+
+/**
+ * 全局入口：提取本地 Live Photo 嵌入的视频数据。
+ * 在 commonMain 声明，各平台实现委托给 PhotoGalleryService。
+ */
+suspend fun getLocalLivePhotoVideoData(mediaId: String): ByteArray? = photoGalleryService.getLivePhotoVideoData(mediaId)
