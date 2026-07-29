@@ -201,6 +201,7 @@ func (a *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 //   - off: 任何注册一律 ErrSignupDisabled。
 //   - first: 仅当 store 中尚无任何用户时允许；首位注册者授予 admin 角色。否则 ErrSignupDisabled。
 //   - open: 任意人可注册，角色固定 user。
+//
 // 用户名已存在（唯一约束冲突）返回 ErrUsernameTaken。
 func (a *AuthService) Register(ctx context.Context, req RegisterRequest) (*LoginResult, error) {
 	if req.Username == "" || req.Password == "" {
