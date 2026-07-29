@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"media-manager/backend/gen"
+	"media-manager/backend/internal/auth"
+	"media-manager/backend/internal/config"
 	"media-manager/backend/internal/gateway"
 	"media-manager/backend/internal/service"
+	"media-manager/backend/internal/storage"
 
 	"google.golang.org/grpc"
 )
@@ -18,13 +21,21 @@ import (
 const (
 	grpcPort = ":50051"
 	restPort = ":8080"
+	// configPath 是后端配置文件路径，相对 cwd（通常为 backend/）。缺失时回退默认值。
+	configPath = "config.yaml"
 )
 
 func main() {
-	// Create data directory if it doesn't exist
-	dataDir := "./data"
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		log.Fatalf("Failed to create data directory: %v", err)
+	// 加载配置：文件缺失视为正常（沿用默认），其余错误直接 fatal。
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config %s: %v", configPath, err)
+	}
+
+	// 解析并创建数据目录（uploads / thumbnails / cloud-images 等子目录的父目录）。
+	dataDir, err := cfg.ResolveDataDir()
+	if err != nil {
+		log.Fatalf("Failed to resolve data_dir: %v", err)
 	}
 
 	uploadsDir := filepath.Join(dataDir, "uploads")
@@ -41,6 +52,33 @@ func main() {
 	if err := os.MkdirAll(cloudImagesDir, 0755); err != nil {
 		log.Fatalf("Failed to create cloud-images directory: %v", err)
 	}
+
+	// 打开 SQLite 元数据库（user/media/device 表 + 外键级联）。
+	dbPath, err := cfg.ResolveDBPath()
+	if err != nil {
+		log.Fatalf("Failed to resolve db_path: %v", err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to open storage: %v", err)
+	}
+	defer store.Close()
+
+	// 构造认证服务：JWT HS256 + bcrypt，用户持久化经适配器接入 storage.Store。
+	// jwt_secret 为空时 auth.New 生成进程级随机密钥（重启失效），此处给出醒目警告。
+	if cfg.JWTSecret == "" {
+		log.Printf("WARNING: jwt_secret is empty; using an ephemeral random key (tokens invalidate on restart). Set jwt_secret in config.yaml for production.")
+	}
+	authSvc, err := auth.New(
+		auth.NewStoreBridge(store),
+		cfg.JWTSecret,
+		cfg.JWTTTLSeconds,
+		cfg.AllowSignup,
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize auth service: %v", err)
+	}
+	log.Printf("Auth ready: allow_signup=%s", authSvc.AllowSignup())
 
 	favoritesPath := filepath.Join(dataDir, "favorites.json")
 	favStore, err := service.NewFavoriteStore(favoritesPath)
@@ -75,12 +113,12 @@ func main() {
 		}
 	}()
 
-	// Start REST gateway (OpenClaw bridge + future HTTP endpoints)
+	// Start REST gateway (OpenClaw bridge + media REST + auth)
 	restAddr := envOr("REST_PORT", restPort)
 	restSrv := gateway.NewServer(restAddr, gateway.OpenClawConfig{
 		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
 		Timeout: 10 * time.Second,
-	}, mediaService, uploadsDir)
+	}, mediaService, uploadsDir, authSvc)
 	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
 	restSrv.SetCloudDir(cloudImagesDir)
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())

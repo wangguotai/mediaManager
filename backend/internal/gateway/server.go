@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"media-manager/backend/gen"
+	"media-manager/backend/internal/auth"
 	"media-manager/backend/internal/service"
 )
 
@@ -39,6 +40,7 @@ type Server struct {
 	uploadsDir string
 	cloudDir   string // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
 	startTime  time.Time
+	authSvc    *auth.AuthService // 为 nil 时认证中间件放行所有请求（仅开发/测试用）
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -46,7 +48,8 @@ type Server struct {
 // cloudDir 为网盘图片源根目录（data/cloud-images），供 /api/media/stream 在 uploads
 // 目录找不到时回退查找网盘原图；传空串则禁用回退。mediaSvc 若实现了 service.MediaService，
 // 会自动取其 CloudImagesDir() 填充，调用方也可直接通过 cloudDir 覆盖。
-func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer, uploadsDir string) *Server {
+// authSvc 为认证服务，非空时启用 JWT 中间件（/api/auth/* 与 /healthz 豁免）。
+func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer, uploadsDir string, authSvc *auth.AuthService) *Server {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
@@ -58,6 +61,7 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 		mediaSvc:   mediaSvc,
 		uploadsDir: uploadsDir,
 		startTime:  time.Now(),
+		authSvc:    authSvc,
 	}
 	s.registerRoutes()
 	return s
@@ -67,6 +71,10 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 func (s *Server) SetCloudDir(dir string) { s.cloudDir = dir }
 
 func (s *Server) registerRoutes() {
+	// Auth: 登录/注册。这两个端点本身无需认证（中间件按路径前缀豁免）。
+	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("/api/auth/register", s.handleAuthRegister)
+
 	// OpenClaw bridge
 	s.mux.HandleFunc("/api/openclaw/command", s.handleOpenClawCommand)
 
@@ -105,7 +113,61 @@ func (s *Server) OpenClawBaseURL() string { return s.openClaw.BaseURL }
 
 // ListenAndServe blocks.
 func (s *Server) ListenAndServe() error {
-	return http.ListenAndServe(s.addr, s.corsMiddleware(s.mux))
+	// 中间件链：CORS → JWT 认证 → mux。authMiddleware 内部对 /api/auth/* 与 /healthz 放行。
+	return http.ListenAndServe(s.addr, s.corsMiddleware(s.authMiddleware(s.mux)))
+}
+
+// ctxUserIDKey 是请求 context 中注入已认证用户 ID 的键类型。
+// 用私有类型避免与其他包的 context 键冲突。
+type ctxUserIDKey struct{}
+
+// userIDFromContext 取出中间件注入的 user_id；未认证请求返回空串。
+func userIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxUserIDKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// authMiddleware 解析 Bearer token，校验后将 user_id 注入请求 context。
+// 豁免路径：/api/auth/*（登录/注册本身）与 /healthz（健康检查）。其余路径无有效 token 返回 401。
+// s.authSvc 为 nil 时（未配置认证）直接放行，便于无认证的开发/测试场景。
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authSvc == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 豁免登录/注册与健康检查：这些端点本身就是获取 token 或探活用的。
+		if strings.HasPrefix(r.URL.Path, "/api/auth/") || r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 取 Authorization: Bearer <token>。
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing authorization header"})
+			return
+		}
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid authorization scheme"})
+			return
+		}
+		tokenStr := strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
+		if tokenStr == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing token"})
+			return
+		}
+		userID, err := s.authSvc.ParseToken(tokenStr)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or expired token"})
+			return
+		}
+		// 注入 user_id 供下游 handler 使用。
+		ctx := context.WithValue(r.Context(), ctxUserIDKey{}, userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // corsMiddleware adds permissive CORS headers for future web frontend support.
