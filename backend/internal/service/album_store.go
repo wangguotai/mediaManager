@@ -12,37 +12,71 @@ import (
 	"github.com/google/uuid"
 )
 
-// Album 描述一个相册：名称、包含的媒体 ID 列表及创建时间。
+// Album 描述一个相册：名称、包含的媒体 ID 列表及创建时间。所有字段与改造前一致，
+// 隔离由 AlbumStore 按 user_id 分桶实现，Album 本身不变。
 type Album struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	MediaIDs  []string  `json:"media_ids"`
-	CreatedAt int64     `json:"created_at"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	MediaIDs  []string `json:"media_ids"`
+	CreatedAt int64    `json:"created_at"`
 }
 
-// AlbumStore 持久化相册列表到 JSON 文件，读写线程安全。
+// AlbumStore 按 user_id 维度隔离持久化相册列表。
+//
+// 改造前：单文件 albums.json + 全局 map。改造后：以 UserDirs 为根，按 user_id
+// 懒创建独立的 perUserAlbums（对应 data/users/{uid}/albums.json），各自持锁、各自落盘。
+// 不同用户的相册互不可见。
 type AlbumStore struct {
-	mu       sync.RWMutex
+	dirs *UserDirs
+
+	mu    sync.Mutex
+	users map[string]*perUserAlbums
+}
+
+// perUserAlbums 单个用户的相册集合：一个 albums.json 文件 + 一把读写锁。
+type perUserAlbums struct {
+	mu      sync.RWMutex
 	filePath string
-	albums   map[string]*Album
+	albums  map[string]*Album
 }
 
-// NewAlbumStore 创建一个以 filePath 为持久化路径的 AlbumStore。
-// 文件不存在时从空集开始；存在时加载已有数据。目录会自动创建。
-func NewAlbumStore(filePath string) (*AlbumStore, error) {
-	as := &AlbumStore{
-		filePath: filePath,
-		albums:   make(map[string]*Album),
+// NewAlbumStoreWithDirs 以 userDirs 为根构造按用户隔离的 AlbumStore。
+// dirs 为 nil 时返回 nil（调用方据此禁用相册功能）。
+func NewAlbumStoreWithDirs(dirs *UserDirs) *AlbumStore {
+	if dirs == nil {
+		return nil
 	}
-	if err := as.load(); err != nil {
-		return nil, err
+	return &AlbumStore{
+		dirs:  dirs,
+		users: make(map[string]*perUserAlbums),
 	}
-	return as, nil
 }
 
-// load 从磁盘加载相册列表；文件不存在时静默返回空集。
-func (as *AlbumStore) load() error {
-	data, err := os.ReadFile(as.filePath)
+// forUser 取出（或懒创建）某用户的 perUserAlbums。uid 非法返回 nil。
+func (as *AlbumStore) forUser(uid string) *perUserAlbums {
+	if as == nil || as.dirs == nil || !validUserID(uid) {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if pa, ok := as.users[uid]; ok {
+		return pa
+	}
+	path, err := as.dirs.AlbumsPath(uid)
+	if err != nil {
+		return nil
+	}
+	pa := &perUserAlbums{filePath: path, albums: make(map[string]*Album)}
+	if err := pa.load(); err != nil {
+		_ = err // 加载失败以空集起步，首个 save 重写文件。
+	}
+	as.users[uid] = pa
+	return pa
+}
+
+// load 从磁盘加载某用户相册列表；文件不存在时静默返回空集。
+func (pa *perUserAlbums) load() error {
+	data, err := os.ReadFile(pa.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -56,17 +90,17 @@ func (as *AlbumStore) load() error {
 	if err := json.Unmarshal(data, &list); err != nil {
 		return err
 	}
-	as.albums = make(map[string]*Album, len(list))
+	pa.albums = make(map[string]*Album, len(list))
 	for _, a := range list {
-		as.albums[a.ID] = a
+		pa.albums[a.ID] = a
 	}
 	return nil
 }
 
-// save 将当前相册列表写入磁盘。
-func (as *AlbumStore) save() error {
-	list := make([]*Album, 0, len(as.albums))
-	for _, a := range as.albums {
+// save 将某用户相册列表写入其专属文件。
+func (pa *perUserAlbums) save() error {
+	list := make([]*Album, 0, len(pa.albums))
+	for _, a := range pa.albums {
 		list = append(list, a)
 	}
 	sort.Slice(list, func(i, j int) bool {
@@ -76,23 +110,30 @@ func (as *AlbumStore) save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(as.filePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(pa.filePath), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(as.filePath, data, 0644)
+	return os.WriteFile(pa.filePath, data, 0644)
 }
 
-// maxAlbums limits the number of albums to prevent unbounded creation.
+// maxAlbums limits the number of albums per user to prevent unbounded creation.
 const maxAlbums = 100
 
-// CreateAlbum 创建一个新相册，返回创建的 Album。
-func (as *AlbumStore) CreateAlbum(name string) (*Album, error) {
+// errNoUserAlbum 在 user_id 缺失/非法时统一返回的哨兵错误。
+const errNoUserAlbumMsg = "user_id is required for album operation"
+
+// CreateAlbum 在 uid 名下创建一个新相册，返回创建的 Album。
+func (as *AlbumStore) CreateAlbum(uid, name string) (*Album, error) {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return nil, fmt.Errorf(errNoUserAlbumMsg)
+	}
 	if name == "" {
 		return nil, fmt.Errorf("album name must not be empty")
 	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if len(as.albums) >= maxAlbums {
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	if len(pa.albums) >= maxAlbums {
 		return nil, fmt.Errorf("album limit reached (%d); delete an album before creating a new one", maxAlbums)
 	}
 	album := &Album{
@@ -101,19 +142,23 @@ func (as *AlbumStore) CreateAlbum(name string) (*Album, error) {
 		MediaIDs:  []string{},
 		CreatedAt: time.Now().Unix(),
 	}
-	as.albums[album.ID] = album
-	if err := as.save(); err != nil {
-		delete(as.albums, album.ID)
+	pa.albums[album.ID] = album
+	if err := pa.save(); err != nil {
+		delete(pa.albums, album.ID)
 		return nil, err
 	}
 	return album, nil
 }
 
-// AddToAlbum 将 mediaId 加入指定相册；已存在则幂等返回。
-func (as *AlbumStore) AddToAlbum(albumID, mediaID string) error {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	album, ok := as.albums[albumID]
+// AddToAlbum 将 mediaId 加入 uid 名下指定相册；已存在则幂等返回。
+func (as *AlbumStore) AddToAlbum(uid, albumID, mediaID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
 	if !ok {
 		return fmt.Errorf("album not found: %s", albumID)
 	}
@@ -123,32 +168,40 @@ func (as *AlbumStore) AddToAlbum(albumID, mediaID string) error {
 		}
 	}
 	album.MediaIDs = append(album.MediaIDs, mediaID)
-	return as.save()
+	return pa.save()
 }
 
-// RemoveFromAlbum 将 mediaId 从指定相册中移除。
-func (as *AlbumStore) RemoveFromAlbum(albumID, mediaID string) error {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	album, ok := as.albums[albumID]
+// RemoveFromAlbum 将 mediaId 从 uid 名下指定相册中移除。
+func (as *AlbumStore) RemoveFromAlbum(uid, albumID, mediaID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
 	if !ok {
 		return fmt.Errorf("album not found: %s", albumID)
 	}
 	for i, id := range album.MediaIDs {
 		if id == mediaID {
 			album.MediaIDs = append(album.MediaIDs[:i], album.MediaIDs[i+1:]...)
-			return as.save()
+			return pa.save()
 		}
 	}
 	return nil // 不存在，幂等
 }
 
-// ListAlbums 返回所有相册，按创建时间倒序。
-func (as *AlbumStore) ListAlbums() []*Album {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-	list := make([]*Album, 0, len(as.albums))
-	for _, a := range as.albums {
+// ListAlbums 返回 uid 名下所有相册，按创建时间倒序。
+func (as *AlbumStore) ListAlbums(uid string) []*Album {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return []*Album{}
+	}
+	pa.mu.RLock()
+	defer pa.mu.RUnlock()
+	list := make([]*Album, 0, len(pa.albums))
+	for _, a := range pa.albums {
 		// 返回副本，避免调用方修改内部状态
 		copy := *a
 		copy.MediaIDs = append([]string(nil), a.MediaIDs...)
@@ -160,11 +213,15 @@ func (as *AlbumStore) ListAlbums() []*Album {
 	return list
 }
 
-// GetAlbum 返回指定相册的副本；不存在返回 nil。
-func (as *AlbumStore) GetAlbum(albumID string) *Album {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-	a, ok := as.albums[albumID]
+// GetAlbum 返回 uid 名下指定相册的副本；不存在返回 nil。
+func (as *AlbumStore) GetAlbum(uid, albumID string) *Album {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return nil
+	}
+	pa.mu.RLock()
+	defer pa.mu.RUnlock()
+	a, ok := pa.albums[albumID]
 	if !ok {
 		return nil
 	}
@@ -173,13 +230,17 @@ func (as *AlbumStore) GetAlbum(albumID string) *Album {
 	return &copy
 }
 
-// DeleteAlbum 删除指定相册；不存在则幂等返回。
-func (as *AlbumStore) DeleteAlbum(albumID string) error {
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if _, ok := as.albums[albumID]; !ok {
+// DeleteAlbum 删除 uid 名下指定相册；不存在则幂等返回。
+func (as *AlbumStore) DeleteAlbum(uid, albumID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	if _, ok := pa.albums[albumID]; !ok {
 		return nil
 	}
-	delete(as.albums, albumID)
-	return as.save()
+	delete(pa.albums, albumID)
+	return pa.save()
 }

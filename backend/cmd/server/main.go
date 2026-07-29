@@ -38,16 +38,16 @@ func main() {
 		log.Fatalf("Failed to resolve data_dir: %v", err)
 	}
 
-	uploadsDir := filepath.Join(dataDir, "uploads")
-	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
-		log.Fatalf("Failed to create uploads directory: %v", err)
+	// per-user 数据根：所有用户的 uploads/thumbnails/metadata/video-meta 与
+	// favorites.json/albums.json 都挂在 <dataDir>/users/<uid>/ 下，按 user_id 隔离。
+	// UserDirs 在首次访问某用户目录时懒创建子目录，这里只需保证 users 父根存在。
+	usersRoot := filepath.Join(dataDir, "users")
+	if err := os.MkdirAll(usersRoot, 0755); err != nil {
+		log.Fatalf("Failed to create users root directory: %v", err)
 	}
+	userDirs := service.NewUserDirs(usersRoot)
 
-	thumbsDir := filepath.Join(dataDir, "thumbnails")
-	if err := os.MkdirAll(thumbsDir, 0755); err != nil {
-		log.Fatalf("Failed to create thumbnails directory: %v", err)
-	}
-
+	// cloud-images 是全局共享的网盘图片源（公共源，语义上不按用户隔离）。
 	cloudImagesDir := filepath.Join(dataDir, "cloud-images")
 	if err := os.MkdirAll(cloudImagesDir, 0755); err != nil {
 		log.Fatalf("Failed to create cloud-images directory: %v", err)
@@ -80,19 +80,13 @@ func main() {
 	}
 	log.Printf("Auth ready: allow_signup=%s", authSvc.AllowSignup())
 
-	favoritesPath := filepath.Join(dataDir, "favorites.json")
-	favStore, err := service.NewFavoriteStore(favoritesPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize favorite store: %v", err)
-	}
+	// 收藏/相册按 user_id 隔离：每个用户一份 favorites.json / albums.json，
+	// 落在 data/users/<uid>/ 下。store 为 nil 会禁用对应功能，这里 userDirs 已构造，
+	// 故两者均启用。
+	favStore := service.NewFavoriteStoreWithDirs(userDirs)
+	albumStore := service.NewAlbumStoreWithDirs(userDirs)
 
-	albumsPath := filepath.Join(dataDir, "albums.json")
-	albumStore, err := service.NewAlbumStore(albumsPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize album store: %v", err)
-	}
-
-	mediaService := service.NewMediaService(uploadsDir, thumbsDir)
+	mediaService := service.NewMediaService(userDirs, cloudImagesDir)
 	mediaService.SetCloudSource(service.NewLocalCloudSource(cloudImagesDir))
 	mediaService.SetFavoriteStore(favStore)
 	mediaService.SetAlbumStore(albumStore)
@@ -118,7 +112,7 @@ func main() {
 	restSrv := gateway.NewServer(restAddr, gateway.OpenClawConfig{
 		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
 		Timeout: 10 * time.Second,
-	}, mediaService, uploadsDir, authSvc)
+	}, mediaService, userDirs, authSvc)
 	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
 	restSrv.SetCloudDir(cloudImagesDir)
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())

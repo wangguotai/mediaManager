@@ -1,7 +1,11 @@
 # Media Manager 后端配置示例
 # 拷贝为 config.yaml 后按需修改。所有字段均可省略，省略时使用代码内默认值。
 
-# 运行期数据根目录：uploads / thumbnails / metadata / 数据库等均位于其下。
+# 运行期数据根目录。其下布局：
+#   users/<uid>/        per-user 数据（uploads / thumbnails / metadata / video-meta
+#                       及 favorites.json / albums.json），按登录用户隔离。
+#   cloud-images/       全局共享的网盘图片源（公共源，不按用户隔离）。
+#   media.db            SQLite 元数据库（user/media/device 表）。
 # 默认 "./data"。
 data_dir: ./data
 
