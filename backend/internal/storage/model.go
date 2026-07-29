@@ -10,13 +10,17 @@ import "time"
 type User struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`           // 不序列化，避免泄露
-	Role         string    `json:"role"`        // 如 "admin"、"user"
+	PasswordHash string    `json:"-"`    // 不序列化，避免泄露
+	Role         string    `json:"role"` // 如 "admin"、"user"
 	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Media 对应 media 表的一行。type/mime/deleted 等字段名与建表 SQL 一致。
 // Deleted 为软删除标记：true 表示已标记删除，不出现在常规列表中。
+//   - SHA256：内容指纹，配合 UserID 做 (user_id,sha256) 秒传去重。
+//   - ClientID：客户端为本次上传分配的幂等键（可空），用于多端冲突排查。
+//   - TakenAt：内容实际拍摄时间（EXIF/客户端声明的毫秒时间戳）；0 表未知，
+//     同步端点在 changes 中原样回传，列表排序不依赖它（沿用 updated_at）。
 type Media struct {
 	ID        string    `json:"id"`
 	UserID    string    `json:"user_id"`
@@ -30,6 +34,8 @@ type Media struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	SHA256    string    `json:"sha256"`
 	Deleted   bool      `json:"deleted"`
+	ClientID  string    `json:"client_id"`
+	TakenAt   int64     `json:"taken_at"`
 }
 
 // Device 对应 device 表的一行。记录已接入的客户端设备信息。

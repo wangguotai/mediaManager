@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	// modernc.org/sqlite 注册名为 "sqlite" 的纯 Go driver（免 CGO）。
 	// 仅以副作用方式 import，通过 sql.Open("sqlite", ...) 使用。
@@ -13,16 +14,18 @@ import (
 // schemaSQL 是初始建表 DDL。三张表字段严格对应任务定义：
 //   - user:   id, username, password_hash, role, created_at
 //   - media:  id, user_id, filename, type, size, mime, width, height,
-//             created_at, updated_at, sha256, deleted
+//     created_at, updated_at, sha256, deleted, client_id, taken_at
 //   - device: id, user_id, name, platform, created_at
 //
 // 设计取舍：
 //   - 时间列用 TEXT 存 RFC3339 字符串（time.Time↔string 在 repository 层转换），
 //     避开 driver 对 INTEGER→time.Time 的不一致行为，保持跨平台可读。
+//     taken_at 是内容拍摄时间（ms epoch），语义与进程时间不同，故存 INTEGER。
 //   - "type" 是 SQL 倾向关键字，以双引号包裹，SQLite 允许作为列名。
 //   - deleted 用 INTEGER(0/1) 表达布尔软删除；CRUD 层映射 bool。
 //   - 外键约束显式声明并配 PRAGMA foreign_keys=ON 强制生效。
 //   - CREATE TABLE IF NOT EXISTS 保证迁移幂等。
+//   - client_id/taken_at 在旧库迁移路径（migrateColumns）补齐，schemaSQL 内联便于全新建库。
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS "user" (
     id            TEXT PRIMARY KEY,
@@ -45,6 +48,8 @@ CREATE TABLE IF NOT EXISTS "media" (
     updated_at TEXT NOT NULL,
     sha256     TEXT NOT NULL DEFAULT '',
     deleted    INTEGER NOT NULL DEFAULT 0,
+    client_id  TEXT NOT NULL DEFAULT '',
+    taken_at   INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
 
@@ -57,6 +62,17 @@ CREATE TABLE IF NOT EXISTS "device" (
     FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
 `
+
+// columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。
+// SQLite 的 ALTER TABLE ADD COLUMN 不带 IF NOT EXISTS，故 migrateColumns 用
+// "duplicate column" 错误信息判定重复添加并静默忽略，实现幂等迁移。
+var columnAdditions = []struct {
+	name string
+	ddl  string
+}{
+	{"client_id", `ALTER TABLE "media" ADD COLUMN client_id TEXT NOT NULL DEFAULT ''`},
+	{"taken_at", `ALTER TABLE "media" ADD COLUMN taken_at INTEGER NOT NULL DEFAULT 0`},
+}
 
 // Store 封装一个 SQLite 连接与其上的 CRUD 能力。
 // 当前直接持有 *sql.DB；若后续需要读写分离或连接池调优再演进。
@@ -97,10 +113,29 @@ func Open(dbPath string) (*Store, error) {
 	return s, nil
 }
 
-// Migrate 执行建表 DDL（幂等）。后续若需 schema 演进，在此扩展版本化迁移逻辑。
+// Migrate 执行建表 DDL（幂等）并为旧库补齐后加列。后续若需 schema 演进，
+// 在此扩展版本化迁移逻辑。
 func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
+	}
+	if err := s.migrateColumns(ctx); err != nil {
+		return fmt.Errorf("migrate columns: %w", err)
+	}
+	return nil
+}
+
+// migrateColumns 为已存在的旧 media 表补齐 client_id/taken_at 列。
+// ALTER ADD COLUMN 无 IF NOT EXISTS：首次添加生效，重复添加会报
+// "duplicate column name"，此处据错误信息识别并跳过，保持幂等。
+func (s *Store) migrateColumns(ctx context.Context) error {
+	for _, c := range columnAdditions {
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
+			if strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
+			return fmt.Errorf("%s: %w", c.name, err)
+		}
 	}
 	return nil
 }

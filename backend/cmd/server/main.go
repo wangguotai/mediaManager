@@ -115,6 +115,8 @@ func main() {
 	}, mediaService, userDirs, authSvc)
 	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
 	restSrv.SetCloudDir(cloudImagesDir)
+	// 注入元数据库，启用多设备同步端点（/api/sync/*、/api/device/*）与 upload 秒传去重。
+	restSrv.SetStore(store)
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())
 	if err := restSrv.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to serve REST: %v", err)

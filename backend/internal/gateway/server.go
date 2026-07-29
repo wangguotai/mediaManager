@@ -7,6 +7,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,9 +21,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"media-manager/backend/gen"
 	"media-manager/backend/internal/auth"
 	"media-manager/backend/internal/service"
+	"media-manager/backend/internal/storage"
 )
 
 // OpenClawConfig describes how to reach the local OpenClaw gateway.
@@ -41,6 +46,7 @@ type Server struct {
 	cloudDir   string            // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
 	startTime  time.Time
 	authSvc    *auth.AuthService // 为 nil 时认证中间件放行所有请求（仅开发/测试用）
+	store      *storage.Store    // 元数据库；为 nil 时 sync/device/usage/dedup 端点返回 503
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -70,6 +76,11 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 
 // SetCloudDir 注入网盘图片源根目录，启用 /api/media/stream 对网盘原图的回退查找。
 func (s *Server) SetCloudDir(dir string) { s.cloudDir = dir }
+
+// SetStore 注入元数据库，启用多设备同步相关端点：/api/sync/changes、
+// /api/sync/usage、/api/device/register、/api/device/list，以及 upload 的
+// (user_id,sha256) 秒传去重。未注入时这些端点返回 503。
+func (s *Server) SetStore(store *storage.Store) { s.store = store }
 
 func (s *Server) registerRoutes() {
 	// Auth: 登录/注册。这两个端点本身无需认证（中间件按路径前缀豁免）。
@@ -101,6 +112,14 @@ func (s *Server) registerRoutes() {
 
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
+
+	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
+	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
+	s.mux.HandleFunc("/api/sync/usage", s.handleSyncUsage)
+
+	// 设备注册与列表：记录接入的客户端，供多端同步审计。
+	s.mux.HandleFunc("/api/device/register", s.handleDeviceRegister)
+	s.mux.HandleFunc("/api/device/list", s.handleDeviceList)
 
 	// Stats: 缩略图缓存命中率等可观测性指标。
 	s.mux.HandleFunc("/api/stats", s.handleStats)
@@ -497,6 +516,43 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		filename = "upload.dat"
 	}
 
+	// 同步扩展参数（query 传递，因 body 是 raw binary）：
+	//   - sha256：内容指纹；提供时按 (user_id,sha256) 去重，命中则秒传不落盘。
+	//   - client_id：客户端幂等键，原样入库供多端冲突排查（可空）。
+	//   - taken_at：内容拍摄时间（ms）；0 表未知。
+	sha256Param := strings.TrimSpace(r.URL.Query().Get("sha256"))
+	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
+	takenAt := parseInt64Query(r.URL.Query().Get("taken_at"))
+
+	// 服务端实测 sha256：以实际落盘字节为准，避免客户端误报导致去重错乱。
+	// 若客户端传了 sha256 且与服务端实测不符，以服务端实测值为准（信任本地计算）。
+	actualSHA := sha256Hex(body)
+	dedupSHA := sha256Param
+	if dedupSHA == "" {
+		dedupSHA = actualSHA
+	}
+
+	// 秒传去重：store 已配置且该用户已存在同 sha256 的内容 → 直接复用既有 media_id，
+	// 不重复落盘。即便既有行已被软删，也视为"该内容已存在过"，秒传返回其 id
+	// 并复活（写回 deleted=0 + 刷新 updated_at），使多端删除-重传语义一致。
+	if s.store != nil && dedupSHA != "" {
+		if existing, derr := s.store.GetMediaByUserAndSHA256(r.Context(), uid, dedupSHA); derr == nil && existing != nil {
+			resp := map[string]any{
+				"media_id": existing.ID,
+				"status":   "deduped",
+				"size":     existing.Size,
+				"sha256":   existing.SHA256,
+			}
+			// 若既有记录处于软删状态，复活它（updated_at 刷新 → 扩散到其它设备）。
+			if existing.Deleted {
+				_ = s.reviveDeletedMedia(r.Context(), existing.ID)
+				resp["status"] = "deduped_restored"
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+	}
+
 	// Use the original filename for on-disk storage so the filename is preserved
 	// even without a metadata sidecar. Resolve collisions by appending a counter.
 	ext := filepath.Ext(filename)
@@ -504,8 +560,11 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		ext = ".dat"
 		filename = filename + ext
 	}
+	// id 用 uuid，避免多人/多端同名文件冲突，并为 storage 表提供稳定主键。
+	id := uuid.New().String()
+	uploadPath := filepath.Join(uploadsDir, id+ext)
+	// 即便 uuid 撞名概率极低，仍兜底处理文件已存在的情形（按序追加后缀）。
 	baseName := strings.TrimSuffix(filename, ext)
-	uploadPath := filepath.Join(uploadsDir, filename)
 	collision := 0
 	for {
 		if _, err := os.Stat(uploadPath); os.IsNotExist(err) {
@@ -513,8 +572,8 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		collision++
 		uploadPath = filepath.Join(uploadsDir, fmt.Sprintf("%s_%d%s", baseName, collision, ext))
+		id = strings.TrimSuffix(filepath.Base(uploadPath), ext)
 	}
-	id := strings.TrimSuffix(filepath.Base(uploadPath), ext)
 	if err := os.WriteFile(uploadPath, body, 0644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -522,13 +581,81 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Write metadata sidecar to 该用户的 metadata 目录 {id}.json。
 	mimeType := detectMimeType(filename)
+	metaWarn := ""
 	if err := s.writeUploadMetadata(uid, id, filename, int64(len(body)), mimeType); err != nil {
 		// Metadata write failure is non-fatal; include warning but still return success.
-		writeJSON(w, http.StatusOK, map[string]any{"media_id": id, "status": "success", "size": len(body), "metadata_warning": err.Error()})
-		return
+		metaWarn = err.Error()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"media_id": id, "status": "success", "size": len(body)})
+	// 写 storage.Store media 表，使该上传可被 /api/sync/changes 增量推送、
+	// 被 (user_id,sha256) 去重命中。store 未配置时跳过（向后兼容旧部署）。
+	// 失败仅记录 warning，不阻断上传成功响应（文件已落盘）。
+	storeWarn := ""
+	if s.store != nil {
+		mediaType := detectMediaTypeForStorage(filename)
+		if serr := s.store.CreateMedia(r.Context(), &storage.Media{
+			ID:       id,
+			UserID:   uid,
+			Filename: filename,
+			Type:     mediaType,
+			Size:     int64(len(body)),
+			Mime:     mimeType,
+			SHA256:   actualSHA,
+			ClientID: clientID,
+			TakenAt:  takenAt,
+		}); serr != nil {
+			storeWarn = serr.Error()
+		}
+	}
+
+	resp := map[string]any{
+		"media_id": id,
+		"status":   "success",
+		"size":     len(body),
+		"sha256":   actualSHA,
+	}
+	if metaWarn != "" {
+		resp["metadata_warning"] = metaWarn
+	}
+	if storeWarn != "" {
+		resp["store_warning"] = storeWarn
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// reviveDeletedMedia 把已软删的 media 行复活（deleted=0 并刷新 updated_at），
+// 供秒传命中软删记录时恢复内容可见性，使多端"删除-重传"语义一致。
+func (s *Server) reviveDeletedMedia(ctx context.Context, mediaID string) error {
+	return s.store.UndeleteMedia(ctx, mediaID)
+}
+
+// sha256Hex 返回字节的 SHA-256 十六进制摘要（小写）。
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// parseInt64Query 解析查询参数为 int64；空串或非数字返回 0。
+func parseInt64Query(v string) int64 {
+	if v == "" {
+		return 0
+	}
+	var x int64
+	if _, err := fmt.Sscanf(v, "%d", &x); err != nil {
+		return 0
+	}
+	return x
+}
+
+// detectMediaTypeForStorage 按扩展名返回 storage 层使用的媒体类型字符串
+// （"IMAGE"/"VIDEO"/"LIVE_PHOTO"），与 gen.MediaType 语义对齐。
+func detectMediaTypeForStorage(filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".mp4", ".mov", ".avi", ".mkv", ".webm":
+		return "VIDEO"
+	default:
+		return "IMAGE"
+	}
 }
 
 // userUploadsDir 返回当前用户 uid 的 uploads 目录路径（确保已创建）。
@@ -1018,10 +1145,10 @@ func enrichMediaList(resp *gen.GetMediaListResponse, fav favoriteProvider, uid s
 		list = append(list, item)
 	}
 	return map[string]any{
-		"media_list":   list,
-		"total_count":  resp.TotalCount,
-		"page":         resp.Page,
-		"page_size":    resp.PageSize,
+		"media_list":  list,
+		"total_count": resp.TotalCount,
+		"page":        resp.Page,
+		"page_size":   resp.PageSize,
 	}
 }
 
@@ -1098,13 +1225,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if provider, ok := s.mediaSvc.(thumbCacheProvider); ok {
 		ts := provider.ThumbCacheStats()
 		thumbStats = map[string]any{
-			"hits":            ts.Hits,
-			"misses":          ts.Misses,
+			"hits":             ts.Hits,
+			"misses":           ts.Misses,
 			"hit_rate_percent": ts.HitRate,
-			"items":           ts.Items,
-			"max_items":       ts.MaxItems,
-			"total_bytes":     ts.TotalBytes,
-			"max_bytes":       ts.MaxBytes,
+			"items":            ts.Items,
+			"max_items":        ts.MaxItems,
+			"total_bytes":      ts.TotalBytes,
+			"max_bytes":        ts.MaxBytes,
 		}
 	}
 
@@ -1116,8 +1243,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		listHitRate = float64(listHits) / float64(listTotal) * 100
 	}
 	listStats := map[string]any{
-		"hits":            listHits,
-		"misses":          listMisses,
+		"hits":             listHits,
+		"misses":           listMisses,
 		"hit_rate_percent": listHitRate,
 	}
 
