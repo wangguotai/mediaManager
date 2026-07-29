@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运营管理 · 流量</title>
+<style>
+  :root{--bg:#0f1216;--card:#1a1f26;--fg:#e6e9ef;--muted:#8b93a3;--accent:#4f9cf9;--ok:#3ec77a;--err:#ef5b5b;--bd:#2c333d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--bd);background:#14181e;position:sticky;top:0}
+  .top .brand{font-weight:600}
+  .top nav a{color:var(--muted);text-decoration:none;margin-left:18px;font-size:13px}
+  .top nav a:hover,.top nav a.cur{color:var(--accent)}
+  .wrap{max-width:1040px;margin:22px auto;padding:0 18px}
+  h2{margin:0 0 6px;font-size:16px;font-weight:600}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 16px}
+  .card{background:var(--card);border-radius:8px;padding:16px;margin-bottom:18px}
+  .card h3{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .bar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .bar select{padding:8px 10px;border-radius:6px;border:1px solid #2c333d;background:#12161c;color:var(--fg);font-size:13px}
+  button.refresh{padding:8px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;cursor:pointer}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--bd);vertical-align:middle}
+  th{color:var(--muted);font-weight:500;font-size:12px}
+  td.mono,th.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px}
+  .pill.ok{background:rgba(62,199,122,.15);color:var(--ok)}
+  .pill.off{background:rgba(239,91,91,.15);color:var(--err)}
+  .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  .err{color:var(--err);font-size:13px;margin-bottom:12px}
+  .totals{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px}
+  .totals b{color:var(--accent);font-weight:600}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand">📡 运营管理后台</div>
+  <nav>
+    <a href="dashboard.html">看板</a>
+    <a href="users.html">用户</a>
+    <a href="servers.html">服务端</a>
+    <a href="traffic.html" class="cur">流量</a>
+    <a href="#" id="logout">退出</a>
+  </nav>
+</div>
+<div class="wrap">
+  <h2>中继流量统计</h2>
+  <p class="sub">relay_session 记账：按 server 聚合的会话数与字节数，下方为最近会话明细。</p>
+  <div class="err" id="err"></div>
+
+  <div class="card">
+    <h3>按服务端汇总</h3>
+    <div id="summary"></div>
+  </div>
+
+  <div class="card">
+    <div class="bar">
+      <select id="fServer"><option value="">全部服务端</option></select>
+      <select id="fStatus">
+        <option value="">全部会话</option>
+        <option value="active">进行中</option>
+        <option value="ended">已结束</option>
+      </select>
+      <button class="refresh" id="btnRefresh">刷新</button>
+    </div>
+    <h3>会话明细（最近 100）</h3>
+    <div id="table"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var tok = localStorage.getItem("ops_token");
+  if (!tok) { location.href = "index.html"; return; }
+  document.getElementById("logout").addEventListener("click", function(e){
+    e.preventDefault(); localStorage.removeItem("ops_token"); location.href="index.html";
+  });
+  var errEl = document.getElementById("err");
+  function api(path){
+    return fetch(path,{headers:{"Authorization":"Bearer "+tok}})
+      .then(function(r){ if(r.status===401){location.href="index.html";throw new Error("unauth");} return r.json(); });
+  }
+  function fmtBytes(n){ n=Number(n)||0; if(n<1024) return n+" B"; var u=["KB","MB","GB","TB"],i=-1; do{n/=1024;i++;}while(n>=1024&&i<u.length-1); return n.toFixed(1)+" "+u[i]; }
+  function fmtTime(s){ if(!s) return "—"; var d=new Date(s); return isNaN(d)?s:d.toLocaleString(); }
+  function escapeHtml(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+
+  var summaryAll = [], sessionsAll = [];
+
+  function renderSummary(){
+    var box = document.getElementById("summary");
+    if (!summaryAll.length){ box.innerHTML = '<div class="empty">暂无流量数据</div>'; return; }
+    var totIn=0,totOut=0,totS=0,totA=0;
+    summaryAll.forEach(function(s){ totIn+=Number(s.total_bytes_in)||0; totOut+=Number(s.total_bytes_out)||0; totS+=Number(s.session_count)||0; totA+=Number(s.active_sessions)||0; });
+    var head = '<div class="totals">总计 · 会话 <b>'+totS+'</b> · '
+      +'进行中 <b>'+totA+'</b> · '
+      +'入站 <b>'+fmtBytes(totIn)+'</b> · '
+      +'出站 <b>'+fmtBytes(totOut)+'</b></div>';
+    var body = summaryAll.map(function(s){
+      return '<tr><td class="mono">'+escapeHtml(s.server_id)+'</td>'+
+        '<td class="num">'+(s.session_count ?? 0)+'</td>'+
+        '<td class="num">'+(s.active_sessions ?? 0)+'</td>'+
+        '<td class="num">'+fmtBytes(s.total_bytes_in)+'</td>'+
+        '<td class="num">'+fmtBytes(s.total_bytes_out)+'</td></tr>';
+    }).join("");
+    box.innerHTML = head + '<table><thead><tr><th class="mono">Server</th><th class="num">会话数</th><th class="num">进行中</th><th class="num">入站</th><th class="num">出站</th></tr></thead><tbody>'+body+'</tbody></table>';
+  }
+
+  function renderSessions(){
+    var sid = document.getElementById("fServer").value;
+    var st = document.getElementById("fStatus").value;
+    var rows = sessionsAll.filter(function(x){
+      if (sid && x.server_id !== sid) return false;
+      if (st === "active" && x.ended_at) return false;
+      if (st === "ended" && !x.ended_at) return false;
+      return true;
+    });
+    var box = document.getElementById("table");
+    if (!rows.length){ box.innerHTML = '<div class="empty">无匹配会话</div>'; return; }
+    var body = rows.map(function(x){
+      var p = x.ended_at ? '<span class="pill off">结束</span>' : '<span class="pill ok">进行中</span>';
+      return '<tr><td class="mono">'+escapeHtml((x.id||"").slice(0,10))+'</td>'+
+        '<td class="mono">'+escapeHtml(x.server_id)+'</td>'+
+        '<td class="mono">'+escapeHtml(x.pair_key)+'</td>'+
+        '<td class="num">'+fmtBytes(x.bytes_in)+'</td>'+
+        '<td class="num">'+fmtBytes(x.bytes_out)+'</td>'+
+        '<td>'+fmtTime(x.started_at)+'</td>'+
+        '<td>'+(x.ended_at?fmtTime(x.ended_at):"—")+'</td>'+
+        '<td>'+p+'</td>'+
+        '<td style="color:var(--muted)">'+escapeHtml(x.close_reason||"")+'</td></tr>';
+    }).join("");
+    box.innerHTML = '<table><thead><tr><th class="mono">ID</th><th class="mono">Server</th><th class="mono">对</th><th class="num">入站</th><th class="num">出站</th><th>开始</th><th>结束</th><th>状态</th><th>原因</th></tr></thead><tbody>'+body+'</tbody></table>';
+  }
+
+  function load(){
+    errEl.textContent = "";
+    Promise.all([api("api/traffic/summary"), api("api/sessions?limit=100")])
+      .then(function(res){
+        summaryAll = (res[0] && res[0].summaries) || [];
+        sessionsAll = (res[1] && res[1].sessions) || [];
+        // 填充 server 下拉。
+        var seen={}, opts='<option value="">全部服务端</option>';
+        summaryAll.forEach(function(s){ if(!seen[s.server_id]){ seen[s.server_id]=1; opts+='<option value="'+escapeHtml(s.server_id)+'">'+escapeHtml(s.server_id.slice(0,12))+'</option>'; } });
+        document.getElementById("fServer").innerHTML = opts;
+        renderSummary(); renderSessions();
+      }).catch(function(e){ if(e.message!=="unauth") errEl.textContent="加载失败："+e.message; });
+  }
+  ["fServer","fStatus"].forEach(function(id){ document.getElementById(id).addEventListener("change", renderSessions); });
+  document.getElementById("btnRefresh").addEventListener("click", load);
+  load();
+})();
+</script>
+</body>
+</html>

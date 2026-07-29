@@ -375,11 +375,11 @@ func (s *Store) ListRelaySessionsByServer(ctx context.Context, serverID string, 
 
 // RelayTrafficSummary 是某 server 的中继流量汇总，供记账查询端点返回。
 type RelayTrafficSummary struct {
-	ServerID  string `json:"server_id"`
-	Count     int    `json:"session_count"`
-	TotalIn   int64  `json:"total_bytes_in"`
-	TotalOut  int64  `json:"total_bytes_out"`
-	Active    int    `json:"active_sessions"`
+	ServerID string `json:"server_id"`
+	Count    int    `json:"session_count"`
+	TotalIn  int64  `json:"total_bytes_in"`
+	TotalOut int64  `json:"total_bytes_out"`
+	Active   int    `json:"active_sessions"`
 }
 
 // RelayTrafficSummaryByServer 聚合某 server 的中继会话计数与流量。
@@ -396,6 +396,193 @@ func (s *Store) RelayTrafficSummaryByServer(ctx context.Context, serverID string
 		return sum, fmt.Errorf("relay traffic summary: %w", err)
 	}
 	return sum, nil
+}
+
+// ---- 跨 server 聚合（admin 看板用）----
+//
+// 下列方法面向运营管理前端"全局视图"：跨所有 server 汇总设备、服务端与会话。
+// 与上面的按 server 查询互补，避免 handler 逐 server 遍历（单连接串行下 N 次往返）。
+
+// ListServers 返回全部受管服务端，按最近活跃在前排序。
+func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, token_hash, created_at, last_seen FROM server ORDER BY last_seen DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list servers: %w", err)
+	}
+	defer rows.Close()
+	var out []Server
+	for rows.Next() {
+		var srv Server
+		var createdStr, lastSeenStr string
+		if err := rows.Scan(&srv.ID, &srv.Name, &srv.TokenHash, &createdStr, &lastSeenStr); err != nil {
+			return nil, fmt.Errorf("scan server row: %w", err)
+		}
+		ct, err := parseTime(createdStr)
+		if err != nil {
+			return nil, err
+		}
+		lt, err := parseTime(lastSeenStr)
+		if err != nil {
+			return nil, err
+		}
+		srv.CreatedAt = ct
+		srv.LastSeen = lt
+		out = append(out, srv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate servers: %w", err)
+	}
+	return out, nil
+}
+
+// ListAllDevices 返回全量设备记录（跨 server），按 server_id、device_id 排序。
+// 供 admin"用户列表"页面展示。结果集可能较大，调用方应在 handler 层不做无限增长假设；
+// 当前运营规模有限，全量返回可接受。
+func (s *Store) ListAllDevices(ctx context.Context) ([]Device, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT server_id, device_id, online, last_seen, meta FROM device
+		 ORDER BY server_id, device_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list all devices: %w", err)
+	}
+	defer rows.Close()
+	return scanDevices(rows)
+}
+
+// ListAllRelaySessions 返回全量中继会话（跨 server），最近在前，limit 上限保护。
+func (s *Store) ListAllRelaySessions(ctx context.Context, limit int) ([]RelaySession, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, server_id, pair_key, bytes_in, bytes_out, started_at, ended_at, close_reason
+		 FROM relay_session ORDER BY started_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list all relay_sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []RelaySession
+	for rows.Next() {
+		var rs RelaySession
+		var startedStr, endedStr string
+		if err := rows.Scan(&rs.ID, &rs.ServerID, &rs.PairKey, &rs.BytesIn, &rs.BytesOut, &startedStr, &endedStr, &rs.CloseReason); err != nil {
+			return nil, fmt.Errorf("scan relay_session row: %w", err)
+		}
+		st, err := parseTime(startedStr)
+		if err != nil {
+			return nil, err
+		}
+		rs.StartedAt = st
+		if endedStr != "" {
+			et, err := parseTime(endedStr)
+			if err != nil {
+				return nil, err
+			}
+			rs.EndedAt = et
+		}
+		out = append(out, rs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate relay_sessions: %w", err)
+	}
+	return out, nil
+}
+
+// ServerDeviceCount 返回各 server 名下设备计数（id → count）。
+// 用 GROUP BY 一次聚合，避免按 server 逐次 COUNT。
+func (s *Store) ServerDeviceCount(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT server_id, COUNT(*) FROM device GROUP BY server_id`)
+	if err != nil {
+		return nil, fmt.Errorf("count devices by server: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var sid string
+		var n int
+		if err := rows.Scan(&sid, &n); err != nil {
+			return nil, fmt.Errorf("scan device count row: %w", err)
+		}
+		out[sid] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate device counts: %w", err)
+	}
+	return out, nil
+}
+
+// GlobalRelaySummary 全局中继流量汇总（跨所有 server）。
+type GlobalRelaySummary struct {
+	SessionCount   int   `json:"session_count"`
+	ActiveSessions int   `json:"active_sessions"`
+	TotalBytesIn   int64 `json:"total_bytes_in"`
+	TotalBytesOut  int64 `json:"total_bytes_out"`
+}
+
+// GlobalRelaySummary 返回跨所有 server 的中继会话计数与流量。
+func (s *Store) GlobalRelaySummary(ctx context.Context) (GlobalRelaySummary, error) {
+	var g GlobalRelaySummary
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*),
+		        COALESCE(SUM(bytes_in), 0),
+		        COALESCE(SUM(bytes_out), 0),
+		        COALESCE(SUM(CASE WHEN ended_at = '' THEN 1 ELSE 0 END), 0)
+		 FROM relay_session`)
+	if err := row.Scan(&g.SessionCount, &g.TotalBytesIn, &g.TotalBytesOut, &g.ActiveSessions); err != nil {
+		return g, fmt.Errorf("global relay summary: %w", err)
+	}
+	return g, nil
+}
+
+// AllRelaySummaries 返回每个 server 的中继流量汇总，外加一条 server_id="*" 的全局合计。
+// 单次扫描用 GROUP BY 聚合，比逐 server 调用 RelayTrafficSummaryByServer 更省往返。
+func (s *Store) AllRelaySummaries(ctx context.Context) ([]RelayTrafficSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT server_id,
+		        COUNT(*),
+		        COALESCE(SUM(bytes_in), 0),
+		        COALESCE(SUM(bytes_out), 0),
+		        COALESCE(SUM(CASE WHEN ended_at = '' THEN 1 ELSE 0 END), 0)
+		 FROM relay_session GROUP BY server_id ORDER BY server_id`)
+	if err != nil {
+		return nil, fmt.Errorf("all relay summaries: %w", err)
+	}
+	defer rows.Close()
+	var out []RelayTrafficSummary
+	for rows.Next() {
+		var r RelayTrafficSummary
+		var serverID string
+		if err := rows.Scan(&serverID, &r.Count, &r.TotalIn, &r.TotalOut, &r.Active); err != nil {
+			return nil, fmt.Errorf("scan relay summary row: %w", err)
+		}
+		r.ServerID = serverID
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate relay summaries: %w", err)
+	}
+	return out, nil
+}
+
+// DeviceCountTotals 返回全量设备数与在线设备数。
+func (s *Store) DeviceCountTotals(ctx context.Context) (total, online int, err error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN online=1 THEN 1 ELSE 0 END),0) FROM device`)
+	if err = row.Scan(&total, &online); err != nil {
+		return 0, 0, fmt.Errorf("device count totals: %w", err)
+	}
+	return total, online, nil
+}
+
+// CountServers 返回受管服务端总数。
+func (s *Store) CountServers(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM server`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count servers: %w", err)
+	}
+	return n, nil
 }
 
 // ---- 工具 ----
