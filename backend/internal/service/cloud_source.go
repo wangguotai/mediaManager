@@ -100,6 +100,11 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 
 	// 标记哪些基础名的视频是 Live Photo 的视频部分（不应单独展示）。
 	livePhotoVideoBaseNames := make(map[string]bool)
+	for _, fe := range allEntries {
+		if cloudImageExts[fe.ext] && videoBaseNames[fe.baseName] {
+			livePhotoVideoBaseNames[fe.baseName] = true
+		}
+	}
 
 	var list []*gen.MediaMetadata
 	for _, fe := range allEntries {
@@ -108,7 +113,6 @@ func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 
 		// Live Photo 配对：图片与同名视频共存 → 图片变 LIVE_PHOTO，视频从列表移除。
 		if isImage && videoBaseNames[fe.baseName] {
-			livePhotoVideoBaseNames[fe.baseName] = true
 			meta := &gen.MediaMetadata{
 				Id:                 fe.baseName,
 				Filename:           fe.name,
