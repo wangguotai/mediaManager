@@ -587,6 +587,11 @@ func (s *MediaService) CloudImagesDir() string {
 	return ""
 }
 
+// ThumbCacheStats 返回缩略图缓存的统计数据，供 /api/stats 端点调用。
+func (s *MediaService) ThumbCacheStats() ThumbCacheStats {
+	return s.thumbCache.Stats()
+}
+
 // resolveMediaPath 按 mediaID 查找源文件的磁盘路径：先在 uploads 目录按
 // "mediaID.*" 匹配，未命中再回退到网盘图片源根目录（data/cloud-images）。
 // 网盘图片的 id 是去扩展名的文件名（如 test-cloud-image），与 uploads 的 uuid id

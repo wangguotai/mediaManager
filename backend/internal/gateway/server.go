@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"media-manager/backend/gen"
@@ -76,7 +78,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/upload", s.handleMediaUpload)
 	s.mux.HandleFunc("/api/media/metadata/", s.handleMediaMetadata)
 
-	// 媒体收藏：POST 设置/取消收藏，GET 返回收藏列表。
+	// 媒体收藏：POST 设置/取消收藏，DELETE 取消收藏，GET 返回收藏列表。
 	s.mux.HandleFunc("/api/media/favorite", s.handleMediaFavorite)
 	s.mux.HandleFunc("/api/media/favorites", s.handleMediaFavorites)
 	s.mux.HandleFunc("/api/media/favorite-batch", s.handleMediaFavoriteBatch)
@@ -90,6 +92,9 @@ func (s *Server) registerRoutes() {
 
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
+
+	// Stats: 缩略图缓存命中率等可观测性指标。
+	s.mux.HandleFunc("/api/stats", s.handleStats)
 
 	// Health
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
@@ -168,19 +173,17 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	// Count media files in uploads directory.
 	mediaCount := 0
 	if entries, err := os.ReadDir(s.uploadsDir); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() && strings.Contains(e.Name(), ".") {
 				mediaCount++
-		}
+			}
 		}
 	}
 
 	uptime := time.Since(s.startTime).Truncate(time.Second)
 
-	// Report cache hit/miss status and hit rate from the media service.
 	cacheStatus := "unknown"
 	cacheHitRate := 0.0
 	if _, ok := s.mediaSvc.(*service.MediaService); ok {
@@ -198,10 +201,37 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count favorites via favoriteProvider capability.
 	favoriteCount := 0
 	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
 		favoriteCount = len(fav.ListFavorites())
+	}
+
+	// Disk space: statfs on the uploads directory device.
+	diskInfo := map[string]any{}
+	if stat, err := diskUsage(s.uploadsDir); err == nil {
+		diskInfo = map[string]any{
+			"total_bytes":     stat.TotalBytes,
+			"available_bytes": stat.AvailableBytes,
+			"used_bytes":      stat.UsedBytes,
+			"total_gb":        fmt.Sprintf("%.2f", float64(stat.TotalBytes)/1e9),
+			"available_gb":    fmt.Sprintf("%.2f", float64(stat.AvailableBytes)/1e9),
+			"used_gb":         fmt.Sprintf("%.2f", float64(stat.UsedBytes)/1e9),
+			"usage_percent":   fmt.Sprintf("%.1f%%", stat.UsagePercent),
+		}
+	}
+
+	// Memory info: Go runtime MemStats for process-level memory.
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	memoryInfo := map[string]any{
+		"alloc_bytes":      memStats.Alloc,
+		"alloc_mb":         fmt.Sprintf("%.2f", float64(memStats.Alloc)/1e6),
+		"sys_bytes":        memStats.Sys,
+		"sys_mb":           fmt.Sprintf("%.2f", float64(memStats.Sys)/1e6),
+		"heap_alloc_bytes": memStats.HeapAlloc,
+		"heap_inuse_bytes": memStats.HeapInuse,
+		"num_goroutine":    runtime.NumGoroutine(),
+		"num_gc":           memStats.NumGC,
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -212,6 +242,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"cache":          cacheStatus,
 		"cache_hit_rate": fmt.Sprintf("%.1f%%", cacheHitRate),
 		"favorite_count": favoriteCount,
+		"disk":           diskInfo,
+		"memory":         memoryInfo,
 	})
 }
 
@@ -540,21 +572,32 @@ type favoriteProvider interface {
 	RemoveFavorite(mediaId string) error
 }
 
-// handleMediaFavorite 处理 POST /api/media/favorite，设置或取消收藏。
-// 请求体: {"media_id":"xxx","favorite":true}
+// handleMediaFavorite 处理 POST 和 DELETE /api/media/favorite。
+// POST 请求体: {"media_id":"xxx","favorite":true/false}
+// DELETE 请求体: {"media_id":"xxx"}  — 等价于 favorite:false。
 func (s *Server) handleMediaFavorite(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		return
-	}
 	var req struct {
 		MediaId  string `json:"media_id"`
 		Favorite bool   `json:"favorite"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+
+	switch r.Method {
+	case http.MethodPost:
+		if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+			return
+		}
+	case http.MethodDelete:
+		if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+			return
+		}
+		req.Favorite = false // DELETE 永远是取消收藏
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
+
 	if req.MediaId == "" || strings.Contains(req.MediaId, "..") || strings.Contains(req.MediaId, "/") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
 		return
@@ -886,6 +929,55 @@ func detectMimeType(filename string) string {
 	}
 }
 
+// ============ Stats endpoint ============
+
+// thumbCacheProvider 是 service.MediaService 的缩略图缓存能力接口，
+// 供 /api/stats 端点获取 ThumbCache 统计数据。
+type thumbCacheProvider interface {
+	ThumbCacheStats() service.ThumbCacheStats
+}
+
+// handleStats 处理 GET /api/stats，返回缩略图缓存命中率等可观测性指标。
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+
+	// Thumbnail cache stats from the media service.
+	thumbStats := map[string]any{}
+	if provider, ok := s.mediaSvc.(thumbCacheProvider); ok {
+		ts := provider.ThumbCacheStats()
+		thumbStats = map[string]any{
+			"hits":            ts.Hits,
+			"misses":          ts.Misses,
+			"hit_rate_percent": ts.HitRate,
+			"items":           ts.Items,
+			"max_items":       ts.MaxItems,
+			"total_bytes":     ts.TotalBytes,
+			"max_bytes":       ts.MaxBytes,
+		}
+	}
+
+	// List cache stats (GetMediaList cache).
+	listHits, listMisses := service.GetListCacheStats()
+	listTotal := listHits + listMisses
+	var listHitRate float64
+	if listTotal > 0 {
+		listHitRate = float64(listHits) / float64(listTotal) * 100
+	}
+	listStats := map[string]any{
+		"hits":            listHits,
+		"misses":          listMisses,
+		"hit_rate_percent": listHitRate,
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"thumbnail_cache": thumbStats,
+		"list_cache":      listStats,
+	})
+}
+
 // ============ Helpers ============
 
 func isAllowedMethod(m string) bool {
@@ -927,3 +1019,35 @@ func parseMediaType(s string) gen.MediaType {
 }
 
 var ErrUpstreamUnavailable = errors.New("openclaw upstream unavailable")
+
+// ============ Disk & memory helpers ============
+
+// diskInfo holds disk usage statistics for a mounted filesystem.
+type diskInfo struct {
+	TotalBytes     int64
+	AvailableBytes int64
+	UsedBytes      int64
+	UsagePercent   float64
+}
+
+// diskUsage returns disk usage for the filesystem containing the given path.
+// Uses syscall.Statfs which works on macOS and Linux.
+func diskUsage(path string) (*diskInfo, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return nil, err
+	}
+	total := int64(stat.Blocks) * int64(stat.Bsize)
+	avail := int64(stat.Bavail) * int64(stat.Bsize)
+	used := total - avail
+	var usagePct float64
+	if total > 0 {
+		usagePct = float64(used) / float64(total) * 100
+	}
+	return &diskInfo{
+		TotalBytes:     total,
+		AvailableBytes: avail,
+		UsedBytes:      used,
+		UsagePercent:   usagePct,
+	}, nil
+}

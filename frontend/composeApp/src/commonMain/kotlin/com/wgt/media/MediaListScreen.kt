@@ -409,7 +409,10 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     SearchBar(
                         expanded = searchExpanded,
                         onExpandedChange = { searchExpanded = it },
-                    onDebouncedQueryChange = { query -> viewModel.applySearchQuery(query) },
+                    onDebouncedQueryChange = { query ->
+                        viewModel.applySearchQuery(query)
+                        if (query.isNotBlank()) SearchHistory.add(query)
+                    },
                     onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
                 )
 

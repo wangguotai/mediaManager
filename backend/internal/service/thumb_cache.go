@@ -3,6 +3,7 @@ package service
 import (
 	"container/list"
 	"sync"
+	"sync/atomic"
 )
 
 // ThumbCache is an in-memory LRU cache for thumbnail byte slices.
@@ -12,6 +13,9 @@ import (
 // budget is satisfied. Individual entries larger than maxItemSize are
 // rejected to prevent a single thumbnail from evicting many small ones.
 // This avoids repeated disk reads for frequently requested thumbnails.
+//
+// Hit/miss counters (hits, misses) are tracked with atomic operations so
+// that the /api/stats endpoint can report cache hit rate without locking.
 type ThumbCache struct {
 	mu          sync.Mutex
 	maxItems    int
@@ -20,6 +24,10 @@ type ThumbCache struct {
 	items       map[string]*list.Element
 	order       *list.List // front = most recently used
 	totalBytes  int
+
+	// Atomic hit/miss counters for observability via /api/stats.
+	hits   int64
+	misses int64
 }
 
 // thumbEntry is the value stored in the LRU list/map.
@@ -47,13 +55,16 @@ func NewThumbCache(maxItems, maxBytes, maxItemSize int) *ThumbCache {
 
 // Get retrieves a cached thumbnail by key. Returns the data, mime type,
 // dimensions, and true on hit; nil values and false on miss.
+// Increments the atomic hit or miss counter for stats reporting.
 func (c *ThumbCache) Get(key string) ([]byte, string, int32, int32, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[key]
 	if !ok {
+		atomic.AddInt64(&c.misses, 1)
 		return nil, "", 0, 0, false
 	}
+	atomic.AddInt64(&c.hits, 1)
 	c.order.MoveToFront(el)
 	entry := el.Value.(*thumbEntry)
 	return entry.data, entry.mime, entry.width, entry.height, true
@@ -118,6 +129,40 @@ func (c *ThumbCache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.items)
+}
+
+// Stats returns the current cache statistics for the /api/stats endpoint.
+// Includes hit/miss counts, hit rate, entry count, and memory usage.
+func (c *ThumbCache) Stats() ThumbCacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	hits := atomic.LoadInt64(&c.hits)
+	misses := atomic.LoadInt64(&c.misses)
+	total := hits + misses
+	var hitRate float64
+	if total > 0 {
+		hitRate = float64(hits) / float64(total) * 100
+	}
+	return ThumbCacheStats{
+		Hits:       hits,
+		Misses:     misses,
+		HitRate:    hitRate,
+		Items:      len(c.items),
+		MaxItems:   c.maxItems,
+		TotalBytes: c.totalBytes,
+		MaxBytes:   c.maxBytes,
+	}
+}
+
+// ThumbCacheStats is a snapshot of thumbnail cache statistics.
+type ThumbCacheStats struct {
+	Hits       int64   `json:"hits"`
+	Misses     int64   `json:"misses"`
+	HitRate    float64 `json:"hit_rate_percent"`
+	Items      int     `json:"items"`
+	MaxItems   int     `json:"max_items"`
+	TotalBytes int     `json:"total_bytes"`
+	MaxBytes   int     `json:"max_bytes"`
 }
 
 // evictLRU removes the least recently used entry. Caller must hold the lock.

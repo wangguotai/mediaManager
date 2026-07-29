@@ -7,6 +7,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -48,6 +49,10 @@ import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_search
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 
 private const val SEARCH_DEBOUNCE_MS = 300L
 
@@ -222,6 +227,35 @@ fun SearchBar(
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )
+            }
+        }
+
+        // 搜索历史：展开态且输入为空时显示最近搜索词标签
+        if (expanded && queryText.isEmpty()) {
+            val history = SearchHistory.load()
+            if (history.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(history.size) { index ->
+                        val historicQuery = history[index]
+                        AssistChip(
+                            onClick = {
+                                queryText = historicQuery
+                                queryVisible = true
+                                onDebouncedQueryChange(historicQuery)
+                                SearchHistory.add(historicQuery)
+                            },
+                            label = { Text(historicQuery, fontSize = 13.sp) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        )
+                    }
+                }
             }
         }
     }
