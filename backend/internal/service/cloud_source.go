@@ -55,40 +55,91 @@ func (s *LocalCloudSource) Root() string {
 
 // GetCloudImages 扫描 root 目录下的图片文件并返回 MediaMetadata 列表。
 // 目录读取失败（例如不存在）会返回错误；扫描过程忽略子目录与无法获取信息的条目。
+//
+// Live Photo 检测：如果一张图片与一个视频共享相同的基础文件名（去扩展名），
+// 例如 color-blue.png + color-blue.mp4，则将该图片标记为 LIVE_PHOTO，
+// 设置 is_live_photo=true 和 live_photo_video_id=基础名，
+// 关联的视频文件将从列表中移除（不单独展示，仅作为 Live Photo 的视频部分）。
 func (s *LocalCloudSource) GetCloudImages() ([]*gen.MediaMetadata, error) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read cloud images directory %q: %v", s.root, err)
 	}
 
-	var list []*gen.MediaMetadata
+	// 先收集所有文件，按基础名索引图片和视频，用于后续 Live Photo 配对。
+	type fileEntry struct {
+		name     string // 完整文件名
+		baseName string // 去扩展名的基础名
+		ext      string // 小写扩展名（含点）
+		info     os.FileInfo
+	}
+	var allEntries []fileEntry
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
 		if !cloudSupportedExts[ext] {
 			continue
 		}
-
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
+		baseName := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		allEntries = append(allEntries, fileEntry{entry.Name(), baseName, ext, info})
+	}
+
+	// 构建 video base name → exists 映射，用于检测 Live Photo 配对。
+	videoBaseNames := make(map[string]bool)
+	for _, fe := range allEntries {
+		if cloudVideoExts[fe.ext] {
+			videoBaseNames[fe.baseName] = true
+		}
+	}
+
+	// 标记哪些基础名的视频是 Live Photo 的视频部分（不应单独展示）。
+	livePhotoVideoBaseNames := make(map[string]bool)
+
+	var list []*gen.MediaMetadata
+	for _, fe := range allEntries {
+		isImage := cloudImageExts[fe.ext]
+		isVideo := cloudVideoExts[fe.ext]
+
+		// Live Photo 配对：图片与同名视频共存 → 图片变 LIVE_PHOTO，视频从列表移除。
+		if isImage && videoBaseNames[fe.baseName] {
+			livePhotoVideoBaseNames[fe.baseName] = true
+			meta := &gen.MediaMetadata{
+				Id:                 fe.baseName,
+				Filename:           fe.name,
+				Type:               gen.MediaType_LIVE_PHOTO,
+				Size:               fe.info.Size(),
+				CreatedAt:          fe.info.ModTime().Unix(),
+				UpdatedAt:          fe.info.ModTime().Unix(),
+				MimeType:           cloudImageMimeType(fe.ext),
+				IsLivePhoto:        true,
+				LivePhotoVideoId:   fe.baseName,
+			}
+			fillDimensions(meta, filepath.Join(s.root, fe.name))
+			list = append(list, meta)
+			continue
+		}
+
+		// 跳过已被 Live Photo 配对占用的视频文件。
+		if isVideo && livePhotoVideoBaseNames[fe.baseName] {
+			continue
+		}
 
 		meta := &gen.MediaMetadata{
-			Id:        strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
-			Filename:  entry.Name(),
-			Type:      cloudMediaType(ext),
-			Size:      info.Size(),
-			CreatedAt: info.ModTime().Unix(),
-			UpdatedAt: info.ModTime().Unix(),
-			MimeType:  cloudImageMimeType(ext),
+			Id:        fe.baseName,
+			Filename:  fe.name,
+			Type:      cloudMediaType(fe.ext),
+			Size:      fe.info.Size(),
+			CreatedAt: fe.info.ModTime().Unix(),
+			UpdatedAt: fe.info.ModTime().Unix(),
+			MimeType:  cloudImageMimeType(fe.ext),
 		}
-		// P1-1: 填充 width/height/exif。图片走 image.DecodeConfig 读头，视频走 ffprobe；
-		// JPEG 顺带解析 EXIF。best-effort，失败置零不阻断扫描。
-		fillDimensions(meta, filepath.Join(s.root, entry.Name()))
+		fillDimensions(meta, filepath.Join(s.root, fe.name))
 		list = append(list, meta)
 	}
 

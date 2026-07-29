@@ -133,7 +133,9 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     }
 
     // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
+    // Tab 3 = "我的"，不加载媒体数据。
     LaunchedEffect(selectedTab) {
+        if (selectedTab == 3) return@LaunchedEffect
         // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
         // 串到新 Tab 造成“列表为空/对不上”的困惑。
         viewModel.clearSearchAndFilter()
@@ -302,137 +304,42 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     }
 
     Scaffold(
-        // 注意: nestedScroll + scrollBehavior 在 MIUI 上会拦截 TopAppBar actions 的触摸事件
+        // MIUI-style: 顶部只留标题 + 搜索图标，操作按钮全部移到底部 NavigationBar / 内容区。
+        // padding(top = 48.dp) 确保在状态栏下方，避免 MIUI 状态栏触摸拦截。
         topBar = {
-            Column {
-                // 自定义顶栏替代 TopAppBar — MIUI 上 TopAppBar actions 不传触摸
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 40.dp, bottom = 8.dp, start = 16.dp, end = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "图片管理",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
-                    )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 48.dp, bottom = 8.dp, start = 16.dp, end = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "图片管理",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp
+                )
+                // 搜索图标仅在媒体 Tab（0-2）显示，"我的" Tab 无需搜索
+                if (selectedTab < 3) {
+                    Box(
+                        modifier = Modifier
+                            .clickable {
+                                searchExpanded = !searchExpanded
+                            }
+                            .padding(8.dp)
+                            .semantics {
+                                role = Role.Button
+                                contentDescription = "搜索"
+                            }
                     ) {
-                        Box(modifier = Modifier.clickable { searchExpanded = !searchExpanded }.padding(8.dp)) {
-                            Icon(painterResource(Res.drawable.ic_search), contentDescription = "搜索")
-                        }
-                        Box(
-                            modifier = Modifier.clickable {
-                                when (selectedTab) {
-                                    0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                                    1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
-                                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
-                                }
-                            }.padding(8.dp)
-                        ) {
-                            Icon(painterResource(Res.drawable.ic_refresh), contentDescription = "刷新")
-                        }
-                        Box(modifier = Modifier.clickable { onNavigateToAlbums() }.padding(8.dp)) {
-                            Icon(painterResource(Res.drawable.ic_photo), contentDescription = "相册")
-                        }
-                        Box(modifier = Modifier.clickable { onNavigateToSettings() }.padding(8.dp)) {
-                            Icon(painterResource(Res.drawable.ic_settings), contentDescription = "设置")
-                        }
+                        Icon(painterResource(Res.drawable.ic_search), contentDescription = "搜索")
                     }
                 }
-
-                // 标签栏：自定义滑动指示器，spring 动画驱动 offset/width，切换更丝滑。
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    modifier = Modifier.fillMaxWidth(),
-                    indicator = { tabPositions ->
-                        if (selectedTab < tabPositions.size) {
-                            val position = tabPositions[selectedTab]
-                            val animatedOffset by animateDpAsState(
-                                targetValue = position.left,
-                                animationSpec = spring(
-                                    dampingRatio = Spring.DampingRatioNoBouncy,
-                                    stiffness = Spring.StiffnessMedium
-                                ),
-                                label = "tabIndicatorOffset"
-                            )
-                            val animatedWidth by animateDpAsState(
-                                targetValue = position.width,
-                                animationSpec = spring(
-                                    dampingRatio = Spring.DampingRatioNoBouncy,
-                                    stiffness = Spring.StiffnessMedium
-                                ),
-                                label = "tabIndicatorWidth"
-                            )
-                            Box(
-                                Modifier
-                                    .wrapContentSize(Alignment.BottomStart)
-                                    .offset(x = animatedOffset)
-                                    .width(animatedWidth)
-                                    .height(3.dp)
-                                    .padding(horizontal = 8.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary,
-                                        RoundedCornerShape(2.dp)
-                                    )
-                            )
-                        }
-                    }
-                ) {
-                    Tab(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        text = {
-                            Text(
-                                "本地图片",
-                                fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    )
-                    Tab(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        text = {
-                            Text(
-                                "已上传",
-                                fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    )
-                    Tab(
-                        selected = selectedTab == 2,
-                        onClick = { selectedTab = 2 },
-                        text = {
-                            Text(
-                                "网盘图片",
-                                fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    )
-                }
-
-                // 搜索栏：搜索图标点击展开输入框，debounce 300ms 实时过滤；清除按钮即时清空。
-                // 去抖后的查询经 [MediaViewModel.applySearchQuery] 写入，[filteredList] 派生过滤结果。
-                SearchBar(
-                    expanded = searchExpanded,
-                    onExpandedChange = { searchExpanded = it },
-                    onDebouncedQueryChange = { query -> viewModel.applySearchQuery(query) },
-                    onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
-                )
-
-                // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效。
-                FilterChipsRow(
-                    selected = viewModel.filterType,
-                    onSelect = { type -> viewModel.applyFilterType(type) }
-                )
             }
         },
         bottomBar = {
-            if (viewModel.hasSelection && selectedTab != 2) {
+            if (viewModel.hasSelection && selectedTab != 2 && selectedTab != 3) {
+                // 选择模式：显示批量操作底栏（替换 NavigationBar）
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
                     totalCount = viewModel.filteredList.size,
@@ -445,10 +352,38 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                     isUploading = viewModel.isUploading,
                     showUploadButton = selectedTab == 0
                 )
+            } else {
+                // 正常模式：底部导航栏（MIUI 风格）
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        icon = { Icon(painterResource(Res.drawable.ic_photo), contentDescription = "本地图片") },
+                        label = { Text("本地图片") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        icon = { Icon(painterResource(Res.drawable.ic_file_upload), contentDescription = "已上传") },
+                        label = { Text("已上传") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        icon = { Icon(painterResource(Res.drawable.ic_cloud), contentDescription = "网盘图片") },
+                        label = { Text("网盘图片") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 3,
+                        onClick = { selectedTab = 3 },
+                        icon = { Icon(painterResource(Res.drawable.ic_settings), contentDescription = "我的") },
+                        label = { Text("我的") }
+                    )
+                }
             }
         },
         floatingActionButton = {
-            if (selectedTab == 0) {
+            if (selectedTab == 0 && !viewModel.hasSelection) {
                 UploadFab(
                     onUploadClick = {
                         viewModel.uploadSelectedLocalMedia()
@@ -460,150 +395,246 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues)) {
-            // Tab 切换整体淡入淡出：Crossfade 以 selectedTab 为 key，切换瞬间旧内容淡出、新内容淡入。
-            // lambda 参数故意取同名 selectedTab 借以遮蔽外层变量，使淡出阶段的旧内容按上一次 tab 渲染。
-            Crossfade(
-                targetState = selectedTab,
-                animationSpec = tween(280),
-                label = "tabSwitch"
-            ) { selectedTab ->
-            val isLoading = when (selectedTab) {
-                0 -> viewModel.isGalleryLoading
-                2 -> viewModel.isCloudLoading
-                else -> viewModel.isLoading
-            }
-            val mediaList = viewModel.mediaList
-            // 经过搜索关键词 + 类型筛选后的列表，网格直接渲染。
-            // 注意：空态判定要用 [mediaList]（数据源层面：是否真的没数据）区分 [filteredList]
-            // （可能是过滤后为空），二者提示文案与交互不同。
-            val filtered = viewModel.filteredList
-            // 下拉刷新：网格为空时走全屏加载/空状态占位，无法也不必下拉；
-            // 有内容后下拉即触发对应 Tab 的强制刷新（forceRefresh=true，绕过缓存真正请求后端）。
-            // isRefreshing 直接复用各 Tab 的 loading 状态，刷新指示器会随请求开始/结束自动显隐。
-            val onRefresh = {
-                when (selectedTab) {
-                    0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                    1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
-                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
-                }
+            // "我的" Tab：设置 / 相册入口页，不渲染媒体网格
+            if (selectedTab == 3) {
+                MyTabContent(
+                    onNavigateToSettings = onNavigateToSettings,
+                    onNavigateToAlbums = onNavigateToAlbums
+                )
+                return@Box
             }
 
-            // 网络错误优先级最高：后端未启动 / 请求异常时 listLoadError 持续占位，
-            // 驱动"加载失败 + 重试"页，避免落入"暂无 X"误导为白屏。
-            val listError = viewModel.listLoadError
-            when {
-                mediaList.isEmpty() && listError != null && !isLoading -> {
-                    ErrorStateView(
-                        message = listError,
-                        onRetry = onRefresh
-                    )
-                }
+            // 媒体 Tab（0-2）：搜索栏 + 筛选条 + 网格列表
+            Column(modifier = Modifier.fillMaxSize()) {
+                // 搜索栏：从顶部区域移到内容区首行，确保 y > 150dp，避免 MIUI 状态栏拦截
+                SearchBar(
+                    expanded = searchExpanded,
+                    onExpandedChange = { searchExpanded = it },
+                    onDebouncedQueryChange = { query -> viewModel.applySearchQuery(query) },
+                    onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
+                )
 
-                mediaList.isEmpty() && isLoading -> {
-                    // 加载中状态：圆圈 + 文案，背景留脉动 shimmer 条点缀，比纯圆圈更连贯。
-                    FullScreenLoading()
-                }
+                // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效
+                FilterChipsRow(
+                    selected = viewModel.filterType,
+                    onSelect = { type -> viewModel.applyFilterType(type) }
+                )
 
-                mediaList.isEmpty() -> {
-                    // 空状态：每个 Tab 不同文案与图标，包一层 PullToRefreshBox 便于下拉重试。
-                    PullToRefreshBox(
-                        isRefreshing = isLoading,
-                        onRefresh = onRefresh,
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        EmptyStateView(tabIndex = selectedTab)
+                // Tab 切换整体淡入淡出
+                Crossfade(
+                    targetState = selectedTab,
+                    animationSpec = tween(280),
+                    label = "tabSwitch",
+                    modifier = Modifier.weight(1f)
+                ) { selectedTab ->
+                    val isLoading = when (selectedTab) {
+                        0 -> viewModel.isGalleryLoading
+                        2 -> viewModel.isCloudLoading
+                        else -> viewModel.isLoading
                     }
-                }
-
-                // 搜索/筛选后无结果：数据源有内容但 [filteredList] 为空，提示无匹配。
-                // 与"暂无 X"区分：此处可一键清除过滤条件回到完整列表。
-                filtered.isEmpty() -> {
-                    NoSearchResultView(
-                        searchQuery = viewModel.searchQuery,
-                        filterType = viewModel.filterType,
-                        onClear = {
-                            searchExpanded = false
-                            viewModel.clearSearchAndFilter()
-                        }
-                    )
-                }
-
-                else -> {
-                    // 媒体网格列表：下拉刷新包住网格，手势到达阈值触发 onRefresh。
-                    // 网格用 [filteredList]（搜索+筛选后），预览索引基于 filtered 计算，
-                    // 确保左右滑动只在当前可见结果集内切换。
-                    // 网盘图片 Tab：点击直接进全屏预览（该 Tab 无选择/批量操作，点击预览更自然）。
-                    // 其余 Tab 保持原有交互：短按选中，长按预览。
-                    PullToRefreshBox(
-                        isRefreshing = isLoading,
-                        onRefresh = onRefresh,
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        // 搜索/类型筛选激活时走平铺网格（不分组），便于在结果集中快速定位；
-                        // 默认浏览态按 created_at 日期分组（sticky header："今天"/"昨天"/"YYYY年MM月DD日"），
-                        // 呼应相册式时间线浏览直觉。两者共用同一套交互回调与预览索引口径。
-                        val isSearching = viewModel.searchQuery.isNotBlank() ||
-                            viewModel.filterType != MediaFilterType.ALL
-                        // 点击/长按回调：网盘 Tab 视频进播放器、图片进预览；其余 Tab 短按选中、长按预览。
-                        // 预览索引基于 [filtered]（与上方 filteredList 一致），左右滑动只在当前可见集内切换。
-                        val onMediaClick: (MediaMetadata) -> Unit = { media ->
-                            if (selectedTab == 2) {
-                                if (media.type == MediaType.VIDEO) {
-                                    videoPlayerMedia = media
-                                } else {
-                                    previewIndex = filtered.indexOf(media)
-                                }
-                            } else {
-                                viewModel.toggleMediaSelection(media.id)
-                            }
-                        }
-                        val onMediaLongClick: (MediaMetadata) -> Unit = { media ->
-                            if (selectedTab == 2) {
-                                // 网盘 Tab（无选择模式）：长按弹上下文菜单
-                                contextMenuMedia = media
-                            } else if (viewModel.hasSelection) {
-                                // 已在选择模式：长按仍走选中/预览原逻辑
-                                if (media.type == MediaType.VIDEO) {
-                                    videoPlayerMedia = media
-                                } else {
-                                    previewIndex = filtered.indexOf(media)
-                                }
-                            } else {
-                                // 非选择模式下长按：弹上下文菜单
-                                contextMenuMedia = media
-                            }
-                        }
-                        val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
-                        if (isSearching) {
-                            MediaGrid(
-                                mediaList = filtered,
-                                selectedMediaIds = viewModel.selectedMediaIds,
-                                onMediaClick = onMediaClick,
-                                onMediaLongClick = onMediaLongClick,
-                                useBackendLoader = useBackend,
-                                videoDurations = viewModel.videoDurations,
-                                searchQuery = viewModel.searchQuery,
-                                favoriteIds = viewModel.favoriteIds,
-                                onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            DateGroupedGrid(
-                                groups = viewModel.groupedMediaList,
-                                selectedMediaIds = viewModel.selectedMediaIds,
-                                onMediaClick = onMediaClick,
-                                onMediaLongClick = onMediaLongClick,
-                                useBackendLoader = useBackend,
-                                videoDurations = viewModel.videoDurations,
-                                searchQuery = viewModel.searchQuery,
-                                favoriteIds = viewModel.favoriteIds,
-                                onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                modifier = Modifier.fillMaxSize()
-                            )
+                    val mediaList = viewModel.mediaList
+                    val filtered = viewModel.filteredList
+                    val onRefresh = {
+                        when (selectedTab) {
+                            0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                            1 -> viewModel.loadUploadedMediaList(forceRefresh = true)
+                            else -> viewModel.loadCloudMediaList(forceRefresh = true)
                         }
                     }
-               }
-           }
+
+                    val listError = viewModel.listLoadError
+                    when {
+                        mediaList.isEmpty() && listError != null && !isLoading -> {
+                            ErrorStateView(
+                                message = listError,
+                                onRetry = onRefresh
+                            )
+                        }
+
+                        mediaList.isEmpty() && isLoading -> {
+                            FullScreenLoading()
+                        }
+
+                        mediaList.isEmpty() -> {
+                            PullToRefreshBox(
+                                isRefreshing = isLoading,
+                                onRefresh = onRefresh,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                EmptyStateView(tabIndex = selectedTab)
+                            }
+                        }
+
+                        filtered.isEmpty() -> {
+                            NoSearchResultView(
+                                searchQuery = viewModel.searchQuery,
+                                filterType = viewModel.filterType,
+                                onClear = {
+                                    searchExpanded = false
+                                    viewModel.clearSearchAndFilter()
+                                }
+                            )
+                        }
+
+                        else -> {
+                            PullToRefreshBox(
+                                isRefreshing = isLoading,
+                                onRefresh = onRefresh,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                val isSearching = viewModel.searchQuery.isNotBlank() ||
+                                    viewModel.filterType != MediaFilterType.ALL
+                                val onMediaClick: (MediaMetadata) -> Unit = { media ->
+                                    if (selectedTab == 2) {
+                                        if (media.type == MediaType.VIDEO) {
+                                            videoPlayerMedia = media
+                                        } else {
+                                            previewIndex = filtered.indexOf(media)
+                                        }
+                                    } else {
+                                        viewModel.toggleMediaSelection(media.id)
+                                    }
+                                }
+                                val onMediaLongClick: (MediaMetadata) -> Unit = { media ->
+                                    if (selectedTab == 2) {
+                                        contextMenuMedia = media
+                                    } else if (viewModel.hasSelection) {
+                                        if (media.type == MediaType.VIDEO) {
+                                            videoPlayerMedia = media
+                                        } else {
+                                            previewIndex = filtered.indexOf(media)
+                                        }
+                                    } else {
+                                        contextMenuMedia = media
+                                    }
+                                }
+                                val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
+                                if (isSearching) {
+                                    MediaGrid(
+                                        mediaList = filtered,
+                                        selectedMediaIds = viewModel.selectedMediaIds,
+                                        onMediaClick = onMediaClick,
+                                        onMediaLongClick = onMediaLongClick,
+                                        useBackendLoader = useBackend,
+                                        videoDurations = viewModel.videoDurations,
+                                        searchQuery = viewModel.searchQuery,
+                                        favoriteIds = viewModel.favoriteIds,
+                                        onFavoriteToggle = { viewModel.toggleFavorite(it) },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    DateGroupedGrid(
+                                        groups = viewModel.groupedMediaList,
+                                        selectedMediaIds = viewModel.selectedMediaIds,
+                                        onMediaClick = onMediaClick,
+                                        onMediaLongClick = onMediaLongClick,
+                                        useBackendLoader = useBackend,
+                                        videoDurations = viewModel.videoDurations,
+                                        searchQuery = viewModel.searchQuery,
+                                        favoriteIds = viewModel.favoriteIds,
+                                        onFavoriteToggle = { viewModel.toggleFavorite(it) },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "我的" Tab 内容页（MIUI 风格）。
+ *
+ * 简洁的设置入口列表，包含：
+ * - 相册管理入口
+ * - 应用设置入口
+ *
+ * 避免在顶部放置任何可点击元素，所有按钮 y > 150dp，确保 MIUI 状态栏不拦截触摸。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun MyTabContent(
+    onNavigateToSettings: () -> Unit,
+    onNavigateToAlbums: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            "我的",
+            fontWeight = FontWeight.Bold,
+            fontSize = 22.sp,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        MyTabItem(
+            iconRes = Res.drawable.ic_photo,
+            title = "相册管理",
+            subtitle = "查看和管理相册",
+            onClick = onNavigateToAlbums
+        )
+        MyTabItem(
+            iconRes = Res.drawable.ic_settings,
+            title = "应用设置",
+            subtitle = "后端地址、主题、OpenClaw 等",
+            onClick = onNavigateToSettings
+        )
+    }
+}
+
+/**
+ * "我的" Tab 列表项。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun MyTabItem(
+    iconRes: DrawableResource,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                contentDescription = title
+            },
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -620,6 +651,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
  * - 顶部信息栏：文件名 + 大小 + 日期
  * - 毛玻璃背景：模糊当前图片作为背景
  * - 缩放态禁用翻页：避免放大时误触发 pager 滑动
+ * - Live Photo 支持：底部"动态照片"按钮 + 长按图片播放关联视频
  *
  * @param mediaList 当前 Tab 的完整媒体列表
  * @param initialIndex 进入预览时聚焦的媒体在 [mediaList] 中的索引
@@ -648,6 +680,10 @@ fun ImagePreviewDialog(
 
     // 跟踪当前页是否处于缩放态：缩放时禁用 pager 滑动，避免放大浏览时误翻页。
     var currentZoomed by remember { mutableStateOf(false) }
+
+    // Live Photo 视频播放状态：非空时在预览上层渲染 VideoPlayer 播放关联视频。
+    // 点击"动态照片"按钮或长按图片时设置，播放器关闭后清空。
+    var livePhotoVideoMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
@@ -698,6 +734,17 @@ fun ImagePreviewDialog(
                             // 仅当 page == currentIndex 时更新，避免预加载页干扰
                             if (page == pagerState.currentPage) {
                                 currentZoomed = zoomed
+                            }
+                        },
+                        onLongPress = {
+                            // 长按图片：如果是 Live Photo，播放关联视频
+                            val m = mediaList[page]
+                            if (m.is_live_photo && m.live_photo_video_id.isNotEmpty()) {
+                                livePhotoVideoMedia = m.copy(
+                                    id = m.live_photo_video_id,
+                                    type = MediaType.VIDEO,
+                                    filename = m.filename
+                                )
                             }
                         }
                     )
@@ -806,6 +853,21 @@ fun ImagePreviewDialog(
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // 动态照片按钮：仅当当前图片是 Live Photo 时显示。
+                            // 点击播放关联的视频部分（live_photo_video_id）。
+                            if (currentMedia.is_live_photo && currentMedia.live_photo_video_id.isNotEmpty()) {
+                                PreviewActionButton(
+                                    iconRes = Res.drawable.ic_play_arrow,
+                                    label = "动态照片",
+                                    onClick = {
+                                        livePhotoVideoMedia = currentMedia.copy(
+                                            id = currentMedia.live_photo_video_id,
+                                            type = MediaType.VIDEO,
+                                            filename = currentMedia.filename
+                                        )
+                                    }
+                                )
+                            }
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_edit,
                                 label = "编辑",
@@ -837,6 +899,16 @@ fun ImagePreviewDialog(
                         }
                     }
                 }
+
+                // Live Photo 视频播放器覆盖层：点击"动态照片"按钮或长按图片后显示。
+                // 在预览对话框上层全屏播放关联视频，关闭后返回图片预览。
+                livePhotoVideoMedia?.let { videoMedia ->
+                    VideoPlayer(
+                        media = videoMedia,
+                        initialDurationSeconds = null,
+                        onDismiss = { livePhotoVideoMedia = null }
+                    )
+                }
             } // AnimatedVisibility inner Box
         }
     }
@@ -850,6 +922,7 @@ fun ImagePreviewDialog(
  * - 双击在 1x → 2x → 4x 间循环，超过 4x 回到 1x
  * - 单指拖动平移：仅缩放>1 时生效
  * - 单击：缩放态先复位（不关闭），1x 下关闭预览
+ * - 长按：触发 [onLongPress] 回调（用于 Live Photo 视频播放）
  * - 缩放态禁用 pager 翻页：通过 [onZoomChanged] 回调通知父组件
  *
  * 手势冲突处理：detectTransformGestures 与 HorizontalPager 共存时，
@@ -867,6 +940,7 @@ private fun ZoomableImage(
     useBackendLoader: Boolean,
     onTapClose: () -> Unit,
     onZoomChanged: (Boolean) -> Unit = {},
+    onLongPress: () -> Unit = {},
     loadFullResolution: Boolean = true
 ) {
     // 先加载缩略图立即显示，再异步加载原图（降采样）替换。
@@ -950,6 +1024,10 @@ private fun ZoomableImage(
                         scale = nextScale
                         offsetX = 0f
                         offsetY = 0f
+                    },
+                    onLongPress = {
+                        // 长按图片：触发 Live Photo 视频播放回调
+                        onLongPress()
                     }
                 )
             }
@@ -1260,25 +1338,31 @@ fun MediaGridItem(
                     )
                 }
 
-                // Live 图标识
+                // Live Photo 标识：左下角"Live"文字徽标（类似小米相册的"秒"标记），
+                // 白色文字 + 半透明黑色背景圆角胶囊，清晰标识 Live Photo 身份。
                 if (media.is_live_photo) {
-                    Row(
+                    Box(
                         modifier = Modifier
                             .align(Alignment.BottomStart)
-                            .padding(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(4.dp)
+                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .background(Color.Black.copy(alpha = 0.55f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 painterResource(Res.drawable.ic_play_arrow),
-                                contentDescription = "Live Photo",
+                                contentDescription = null,
                                 tint = Color.White,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                "Live",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
