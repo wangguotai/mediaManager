@@ -1,0 +1,74 @@
+# tasks-baidu-sprint4.yaml — 剩余前端+运营前端+QA
+
+tasks:
+  - id: fe-sync-v2
+    product: claude
+    prompt: |
+      在 frontend/ 实现自动同步。注意：后端已有 /api/sync/changes, /api/device/register, /api/sync/usage 端点。
+      1. 增量拉取: App启动+进入"已上传"Tab调 GET /api/sync/changes?since=cursor，用本地游标拉增量
+      2. 云相册自动备份: 设置开关，本地新增图片后台增量上传（复用现有上传 API，加 sha256 去重）
+      3. 离线队列: 弱网时上传失败入队内存列表，恢复网络后重放（不需要SQLite，简单内存队列即可）
+      4. "已上传"Tab升级为云端媒体视图（sync/changes 返回的数据直接展示）
+      5. 在 MediaViewModel 加 syncCursor: Long, loadCloudChanges() 方法
+      保持简单，不要过度设计。commonMain 不用 java.*/android.*。
+      完成后 git add -A && git commit -m "fe-sync-v2: incremental pull + auto backup + dedup"
+    files: [frontend/]
+    depends_on: []
+    timeout: 600s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: ops-frontend-v2
+    product: claude
+    prompt: |
+      在 ops-server/ 内嵌运营管理前端。用 Go embed + 纯 HTML/JS（不用框架）。
+      1. 在 ops-server/internal/admin/ 创建 embed.go 用 //go:embed 嵌入 static/ 目录
+      2. static/ 下创建: index.html(登录), dashboard.html(看板), users.html(用户), servers.html(服务端), traffic.html(流量)
+      3. /admin/* 路由：未登录跳登录页，GET 返回页面，POST 纯 JSON API
+      4. 管理员账号独立：admin_users 表，POST /admin/login 签 JWT
+      5. 页面用最小 CSS（内联，不用外部库），fetch API 调后端
+      6. 功能：用户列表、服务端在线状态、中继会话列表、流量统计表
+      保持极简，能看数据即可。
+      完成后 git add -A && git commit -m "ops-frontend-v2: embedded admin dashboard"
+    files: [ops-server/]
+    depends_on: []
+    timeout: 600s
+    max_retries: 3
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  - id: fe-file-mgmt-v2
+    product: claude
+    prompt: |
+      在 frontend/ "我的"Tab 下增加"文件管理"入口。
+      1. 新建 FileManagementScreen.kt composable
+      2. 列出云端所有媒体（调 GET /api/sync/changes 不带 since 拉全量）
+      3. 按类型/时间/大小筛选排序（复用现有 FilterChipsRow）
+      4. 批量删除云端（调现有 deleteMedia API）
+      5. 查看占用空间（调 GET /api/sync/usage 显示总量）
+      6. 在 MyTabContent 加"文件管理"入口
+      不做下载到本地（复杂，后续做）。保持简单。
+      完成后 git add -A && git commit -m "fe-file-mgmt-v2: cloud file management view"
+    files: [frontend/]
+    depends_on: [fe-sync-v2]
+    timeout: 500s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: qa-v4-final
+    product: claude
+    prompt: |
+      全量 QA 验收。
+      1. cd backend && go build ./...
+      2. cd ops-server && go build ./...
+      3. cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64
+      4. 检查 git log 确认所有任务已 merge
+      5. 输出报告到 docs/V4-QA-REPORT.md
+      完成后 git add -A && git commit -m "qa: V4 final acceptance report"
+    files: [docs/]
+    depends_on: [fe-file-mgmt-v2, ops-frontend-v2]
+    timeout: 400s
+    max_retries: 1
+    verify_commands: []

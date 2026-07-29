@@ -1,0 +1,83 @@
+# tasks-baidu-sprint3.yaml — 剩余任务
+
+tasks:
+  - id: ops-server-skeleton
+    product: claude
+    prompt: |
+      新建 ops-server/ 目录，实现运营服务端骨架。独立 Go module，SQLite 存储。
+      1. 运营账号: POST /op/auth/register|login
+      2. 服务端注册: POST /op/server/register → {server_id,server_token}
+      3. 设备发现: device(server_id,device_id,online,last_seen) 在线表
+      4. WebSocket 长连: 客户端和服务端各自连运营服务端
+      5. 信令交换: 介绍双方候选地址
+      6. TCP 中继: 直连失败时 TURN 式转发
+      7. 流量记账: relay_session 表
+      8. Docker 部署: Dockerfile + docker-compose.yml
+      完成后 git add -A && git commit -m "ops-server-skeleton: relay + discovery + traffic"
+    files: [ops-server/]
+    depends_on: []
+    timeout: 600s
+    max_retries: 2
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  - id: ops-frontend
+    product: claude
+    prompt: |
+      在 ops-server/ 内嵌运营管理前端（HTMX 或纯 HTML+JS，不开 SPA 框架）。
+      1. 登录页 2. 用户管理 3. 服务端监控 4. 设备/连接 5. 流量统计
+      /admin/* 路由，嵌入二进制，独立管理员账号。
+      完成后 git add -A && git commit -m "ops-frontend: admin dashboard"
+    files: [ops-server/]
+    depends_on: [ops-server-skeleton]
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  - id: fe-sync
+    product: claude
+    prompt: |
+      在 frontend/ 实现自动同步。
+      1. 增量拉取: App启动+进入"已上传"Tab调 GET /api/sync/changes?since=cursor
+      2. 云相册自动备份: 设置开关，本地新增图片后台增量上传
+      3. 上传去重: 算 sha256 命中跳过
+      4. 离线队列: 弱网入队 SQLite，恢复重放
+      5. "已上传"Tab升级为云端媒体视图
+      完成后 git add -A && git commit -m "fe-sync: incremental pull + auto backup + dedup"
+    files: [frontend/]
+    depends_on: []
+    timeout: 500s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: fe-file-mgmt
+    product: claude
+    prompt: |
+      在 frontend/ "我的"Tab 下增加"文件管理"入口。
+      1. 列出云端所有媒体，按类型/时间/大小筛选排序
+      2. 批量下载到本地相册 3. 批量删除云端（写墓碑）
+      4. 查看占用空间（/api/sync/usage）
+      不做目录层级，媒体扁平+相册分组。
+      完成后 git add -A && git commit -m "fe-file-mgmt: cloud file management"
+    files: [frontend/]
+    depends_on: [fe-sync]
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: qa-v4
+    product: claude
+    prompt: |
+      全量 QA 验收，按 docs/PRD-v4.md §7 §8 逐项检查。
+      1. go build ./... 通过 2. assembleDebug+compileKotlinIosArm64 通过
+      3. docker compose up -d /healthz 200 4. 401 隔离 5. 同步 6. 运营前端
+      输出报告到 docs/V4-QA-REPORT.md
+      完成后 git add -A && git commit -m "qa: V4 acceptance report"
+    files: [docs/]
+    depends_on: [fe-file-mgmt, ops-frontend]
+    timeout: 400s
+    max_retries: 1
+    verify_commands: []
