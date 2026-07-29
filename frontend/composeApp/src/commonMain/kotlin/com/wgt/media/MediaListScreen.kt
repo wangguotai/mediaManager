@@ -131,7 +131,6 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
     var addToAlbumMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
-    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     // 监听错误信息并显示 Snackbar
     LaunchedEffect(viewModel.errorMessage) {
@@ -265,32 +264,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
         )
     }
 
-    // 批量删除确认对话框："确定删除 N 项吗？" + 确认/取消
-    if (showDeleteConfirm) {
-        val count = viewModel.selectedCount
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("确认删除", fontWeight = FontWeight.Bold) },
-            text = { Text("确定删除 $count 项吗？") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDeleteConfirm = false
-                        viewModel.deleteSelectedMedia()
-                    }
-                ) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
-
-    // 上传进度对话框：显示 "上传中 2/5..." + 进度条
+// 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
             uploaded = uploaded,
@@ -308,7 +282,7 @@ fun MediaListScreen(viewModel: MediaViewModel, onNavigateToSettings: () -> Unit 
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
                     totalCount = viewModel.filteredList.size,
-                    onDelete = { showDeleteConfirm = true },
+                    onDelete = { viewModel.deleteSelectedMedia() },
                     onUpload = { if (selectedTab == 0) viewModel.uploadSelectedLocalMedia() },
                     onShare = { viewModel.shareSelectedMedia() },
                     onSelectAll = { viewModel.selectAll() },
