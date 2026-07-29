@@ -151,21 +151,24 @@ func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
 		m.UpdatedAt = now
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO "media" (id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO "media" (id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.UserID, m.Filename, m.Type, m.Size, m.Mime, m.Width, m.Height,
-		timeToVal(m.CreatedAt), timeToVal(m.UpdatedAt), m.SHA256, boolToInt(m.Deleted))
+		timeToVal(m.CreatedAt), timeToVal(m.UpdatedAt), m.SHA256, boolToInt(m.Deleted),
+		m.ClientID, m.TakenAt)
 	if err != nil {
 		return fmt.Errorf("insert media: %w", err)
 	}
 	return nil
 }
 
+// mediaColumns 是 media 表的完整列清单（含同步扩展列 client_id/taken_at），
+// 供各 SELECT 复用，避免增删列时多处漂移。
+const mediaColumns = `id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at`
+
 // GetMedia 按 id 取单行 media（含已软删除行，便于审计/恢复）。未命中返回 ErrNotFound。
 func (s *Store) GetMedia(ctx context.Context, id string) (*Media, error) {
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted
-FROM "media" WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+mediaColumns+` FROM "media" WHERE id = ?`, id)
 	return scanMedia(row.Scan)
 }
 
@@ -173,8 +176,7 @@ FROM "media" WHERE id = ?`, id)
 // 与现有 MediaService 列表排序一致。
 func (s *Store) ListMediaByUser(ctx context.Context, userID string) ([]*Media, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted
-FROM "media" WHERE user_id = ? AND deleted = 0 ORDER BY created_at DESC`, userID)
+SELECT `+mediaColumns+` FROM "media" WHERE user_id = ? AND deleted = 0 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list media by user: %w", err)
 	}
@@ -214,6 +216,20 @@ func (s *Store) MarkDeleted(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE "media" SET deleted = 1, updated_at = ? WHERE id = ?`, timeToVal(time.Now()), id)
 	if err != nil {
 		return fmt.Errorf("mark media deleted: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UndeleteMedia 复活一行被软删的 media（deleted=0），刷新 updated_at 使其重新
+// 出现在列表与增量同步流中。未命中返回 ErrNotFound。供秒传命中软删记录时
+// 恢复内容可见性使用。
+func (s *Store) UndeleteMedia(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE "media" SET deleted = 0, updated_at = ? WHERE id = ?`, timeToVal(time.Now()), id)
+	if err != nil {
+		return fmt.Errorf("undelete media: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
@@ -298,18 +314,86 @@ func (s *Store) DeleteDevice(ctx context.Context, id string) error {
 	return nil
 }
 
+// ===== 同步：去重 / 增量 changes / usage =====
+
+// GetMediaByUserAndSHA256 按 (user_id, sha256) 查询媒体记录（含已软删行）。
+// 用于上传秒传：同一用户已存在同 sha256 的内容时直接复用，避免重复落盘。
+// sha256 为空时直接返回 ErrNotFound（不去重空指纹）。
+func (s *Store) GetMediaByUserAndSHA256(ctx context.Context, userID, sha256 string) (*Media, error) {
+	if userID == "" || sha256 == "" {
+		return nil, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT `+mediaColumns+` FROM "media" WHERE user_id = ? AND sha256 = ? LIMIT 1`, userID, sha256)
+	return scanMedia(row.Scan)
+}
+
+// ListMediaChanges 返回某用户 updated_at 严格大于 sinceCursor 的全部 media 行，
+// 含软删除墓碑（deleted=1）。按 updated_at 升序排序，配合 limit/offset 实现
+// "拉取增量 → 用最后一条的 updated_at 作为下一次 cursor" 的增量同步。
+//
+// sinceCursor 为空串时从头拉取。返回值用于构造 {changes, next_cursor, has_more}。
+// 注：updated_at 以 RFC3339Nano 字符串比较；纳秒精度下同时间戳几乎不发生，
+// 严格大于保证每页边界不重不漏。若未来引入批量导入可能产生同时间戳，
+// 再以 id 作为次序键兜底。
+func (s *Store) ListMediaChanges(ctx context.Context, userID, sinceCursor string, limit, offset int) ([]*Media, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	q := `SELECT ` + mediaColumns + ` FROM "media" WHERE user_id = ?`
+	args := []any{userID}
+	if sinceCursor != "" {
+		q += ` AND updated_at > ?`
+		args = append(args, sinceCursor)
+	}
+	q += ` ORDER BY updated_at ASC, id ASC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list media changes: %w", err)
+	}
+	return scanMediaRows(rows)
+}
+
+// CountMediaChanges 返回 updated_at 严格大于 sinceCursor 的行数（含墓碑），
+// 供 changes 端点计算 has_more（总数 vs 已取）。
+func (s *Store) CountMediaChanges(ctx context.Context, userID, sinceCursor string) (int, error) {
+	q := `SELECT COUNT(*) FROM "media" WHERE user_id = ?`
+	args := []any{userID}
+	if sinceCursor != "" {
+		q += ` AND updated_at > ?`
+		args = append(args, sinceCursor)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count media changes: %w", err)
+	}
+	return n, nil
+}
+
+// UserUsage 统计某用户名下未软删媒体的存储总量与文件数，供 /api/sync/usage。
+// 软删墓碑不计入（其文件可能仍在磁盘但语义上已不属于用户活跃集）。
+func (s *Store) UserUsage(ctx context.Context, userID string) (totalBytes int64, fileCount int, err error) {
+	q := `SELECT COALESCE(SUM(size), 0), COUNT(*) FROM "media" WHERE user_id = ? AND deleted = 0`
+	if err = s.db.QueryRowContext(ctx, q, userID).Scan(&totalBytes, &fileCount); err != nil {
+		return 0, 0, fmt.Errorf("user usage: %w", err)
+	}
+	return totalBytes, fileCount, nil
+}
+
 // ===== scan 辅助 =====
 
 // scanFuncRow 是 QueryRow.Scan 的签名；用于让单行与多行复用同一列扫描逻辑。
 type scanFunc func(dest ...any) error
 
 // scanMedia 把一行 media 列扫描进 *Media。传入 row.Scan 或 rows.Scan。
+// 列顺序须与 mediaColumns 一致（含 client_id/taken_at）。
 func scanMedia(scan scanFunc) (*Media, error) {
 	var m Media
 	var createdAt, updatedAt string
 	var deleted int
 	if err := scan(&m.ID, &m.UserID, &m.Filename, &m.Type, &m.Size, &m.Mime,
-		&m.Width, &m.Height, &createdAt, &updatedAt, &m.SHA256, &deleted); err != nil {
+		&m.Width, &m.Height, &createdAt, &updatedAt, &m.SHA256, &deleted,
+		&m.ClientID, &m.TakenAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
