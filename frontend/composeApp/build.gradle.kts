@@ -34,6 +34,8 @@ kotlin {
     sourceSets {
         androidMain.dependencies {
             implementation(libs.androidx.core)
+            // EncryptedSharedPreferences：安全存储 JWT token（见 SettingsStorage.android.kt）
+            implementation(libs.androidx.security.crypto)
 //            implementation(project(":rn-plugin:rn-android"))
         }
         commonMain.dependencies {

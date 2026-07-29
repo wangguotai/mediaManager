@@ -263,6 +263,33 @@ fun SettingsScreen(onBack: () -> Unit) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
 
+            // ---- 账号 ----
+            SectionTitle("账号", iconRes = Res.drawable.ic_settings)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("当前用户", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    AuthState.currentUsername.ifEmpty { "未登录" },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            Button(
+                onClick = {
+                    AuthState.clearSession()
+                    scope.launch { snackbarHostState.showSnackbar("已退出登录") }
+                },
+                enabled = AuthState.isLoggedIn,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("退出登录") }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
             // ---- 2. 主题 ----
             SectionTitle("主题", iconRes = Res.drawable.ic_palette)
             ThemeMode.values().forEach { mode ->
