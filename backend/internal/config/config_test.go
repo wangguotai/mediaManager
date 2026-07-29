@@ -108,3 +108,163 @@ func TestLoadSignupNormalizeUnknown(t *testing.T) {
 		t.Fatalf("unknown AllowSignup should normalize to off, got %q", cfg.AllowSignup)
 	}
 }
+
+// TestDefaultPort 验证默认 Port 为 8080（无配置文件场景）。
+func TestDefaultPort(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load missing file: %v", err)
+	}
+	if cfg.Port != "8080" {
+		t.Fatalf("default Port: got %q want 8080", cfg.Port)
+	}
+	if cfg.OpsServerURL != "" {
+		t.Fatalf("default OpsServerURL should be empty, got %q", cfg.OpsServerURL)
+	}
+}
+
+// TestLoadPortAndOps 验证 port / ops_server_url 被解析，且 port 去掉前导冒号归一。
+func TestLoadPortAndOps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "port: \":9000\"\nops_server_url: http://ops.example/api\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Port != "9000" {
+		t.Fatalf("Port: got %q want 9000 (leading colon stripped)", cfg.Port)
+	}
+	if cfg.OpsServerURL != "http://ops.example/api" {
+		t.Fatalf("OpsServerURL: got %q", cfg.OpsServerURL)
+	}
+}
+
+// setEnv 是测试用的环境变量设置+回滚助手，t.Cleanup 自动还原每个变量。
+func setEnv(t *testing.T, kvs ...string) {
+	t.Helper()
+	for i := 0; i+1 < len(kvs); i += 2 {
+		key, val := kvs[i], kvs[i+1]
+		old, ok := os.LookupEnv(key)
+		os.Setenv(key, val)
+		t.Cleanup(func() {
+			if ok {
+				os.Setenv(key, old)
+			} else {
+				os.Unsetenv(key)
+			}
+		})
+	}
+}
+
+// TestApplyEnvOverrides 验证 MM_* 环境变量覆盖 config.yaml 各字段。
+func TestApplyEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "port: \"8080\"\ndata_dir: ./data\ndb_path: ./data/media.db\njwt_secret: fromfile\n" +
+		"jwt_ttl_seconds: 3600\nallow_signup: off\nops_server_url: http://file\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	setEnv(t,
+		"MM_PORT", "9001",
+		"MM_DATA_DIR", "/var/mm",
+		"MM_DB_PATH", "/var/mm/custom.db",
+		"MM_JWT_SECRET", "fromenv",
+		"MM_JWT_TTL_SECONDS", "7200",
+		"MM_ALLOW_SIGNUP", "open",
+		"MM_OPS_SERVER_URL", "http://env",
+	)
+	cfg.ApplyEnv()
+
+	if cfg.Port != "9001" {
+		t.Fatalf("Port: got %q want 9001", cfg.Port)
+	}
+	if cfg.DataDir != "/var/mm" {
+		t.Fatalf("DataDir: got %q want /var/mm", cfg.DataDir)
+	}
+	if cfg.DBPath != "/var/mm/custom.db" {
+		t.Fatalf("DBPath: got %q want /var/mm/custom.db", cfg.DBPath)
+	}
+	if cfg.JWTSecret != "fromenv" {
+		t.Fatalf("JWTSecret: got %q want fromenv", cfg.JWTSecret)
+	}
+	if cfg.JWTTTLSeconds != 7200 {
+		t.Fatalf("JWTTTLSeconds: got %d want 7200", cfg.JWTTTLSeconds)
+	}
+	if cfg.AllowSignup != SignupOpen {
+		t.Fatalf("AllowSignup: got %q want open", cfg.AllowSignup)
+	}
+	if cfg.OpsServerURL != "http://env" {
+		t.Fatalf("OpsServerURL: got %q want http://env", cfg.OpsServerURL)
+	}
+}
+
+// TestApplyEnvDataDirRecomputesDBPath 验证仅设 MM_DATA_DIR（不设 MM_DB_PATH）时，
+// DBPath 跟随新 data_dir 重算为 <data_dir>/media.db。
+func TestApplyEnvDataDirRecomputesDBPath(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	setEnv(t, "MM_DATA_DIR", "/opt/data")
+	cfg.ApplyEnv()
+	if cfg.DataDir != "/opt/data" {
+		t.Fatalf("DataDir: got %q want /opt/data", cfg.DataDir)
+	}
+	want := "/opt/data/media.db"
+	if filepath.ToSlash(cfg.DBPath) != want {
+		t.Fatalf("DBPath should recompute to %q, got %q", want, cfg.DBPath)
+	}
+}
+
+// TestApplyEnvInvalidTTLIgnored 验证 MM_JWT_TTL_SECONDS 非法值不破坏原值。
+func TestApplyEnvInvalidTTLIgnored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("jwt_ttl_seconds: 3600\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	setEnv(t, "MM_JWT_TTL_SECONDS", "not-a-number")
+	cfg.ApplyEnv()
+	if cfg.JWTTTLSeconds != 3600 {
+		t.Fatalf("invalid TTL should be ignored, got %d want 3600", cfg.JWTTTLSeconds)
+	}
+}
+
+// TestApplyEnvEmptyKeepsFile 验证空环境变量不覆盖文件值（"存在且非空才覆盖"语义）。
+func TestApplyEnvEmptyKeepsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("port: \"8080\"\njwt_secret: fromfile\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// 设为空串——不应覆盖。
+	setEnv(t,
+		"MM_PORT", "",
+		"MM_JWT_SECRET", "",
+	)
+	cfg.ApplyEnv()
+	if cfg.Port != "8080" {
+		t.Fatalf("empty MM_PORT should not override, got %q", cfg.Port)
+	}
+	if cfg.JWTSecret != "fromfile" {
+		t.Fatalf("empty MM_JWT_SECRET should not override, got %q", cfg.JWTSecret)
+	}
+}

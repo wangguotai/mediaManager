@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"media-manager/backend/gen"
@@ -20,9 +22,10 @@ import (
 
 const (
 	grpcPort = ":50051"
-	restPort = ":8080"
 	// configPath 是后端配置文件路径，相对 cwd（通常为 backend/）。缺失时回退默认值。
 	configPath = "config.yaml"
+	// defaultOpenClawURL 是未配置运维面时的回退 OpenClaw 网关地址（本地默认端口）。
+	defaultOpenClawURL = "http://127.0.0.1:18789"
 )
 
 func main() {
@@ -31,6 +34,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config %s: %v", configPath, err)
 	}
+	// 环境变量 MM_* 在文件之后覆盖，支持 compose/k8s 注入与本地临时覆盖。
+	cfg.ApplyEnv()
 
 	// 解析并创建数据目录（uploads / thumbnails / cloud-images 等子目录的父目录）。
 	dataDir, err := cfg.ResolveDataDir()
@@ -80,9 +85,12 @@ func main() {
 	}
 	log.Printf("Auth ready: allow_signup=%s", authSvc.AllowSignup())
 
+	// 首次启动引导：库为空时自动创建首个超管账号，打印一次性凭据 + token，
+	// 避免 allow_signup=off 下无人能登录的死锁。库非空则静默跳过。
+	bootstrapAdmin(cfg, authSvc)
+
 	// 收藏/相册按 user_id 隔离：每个用户一份 favorites.json / albums.json，
-	// 落在 data/users/<uid>/ 下。store 为 nil 会禁用对应功能，这里 userDirs 已构造，
-	// 故两者均启用。
+	// 落在 data/users/<uid>/ 下。
 	favStore := service.NewFavoriteStoreWithDirs(userDirs)
 	albumStore := service.NewAlbumStoreWithDirs(userDirs)
 
@@ -108,9 +116,12 @@ func main() {
 	}()
 
 	// Start REST gateway (OpenClaw bridge + media REST + auth)
-	restAddr := envOr("REST_PORT", restPort)
+	// 端口优先取 cfg.Port（经文件 + MM_PORT 覆盖链），回退 8080；
+	// 同时保留旧环境变量 REST_PORT 的向后兼容（仅当 MM_* 均未设置时）。
+	restAddr := ":" + resolvePort(cfg.Port)
+	openClawURL := resolveOpenClawURL(cfg, defaultOpenClawURL)
 	restSrv := gateway.NewServer(restAddr, gateway.OpenClawConfig{
-		BaseURL: envOr("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789"),
+		BaseURL: openClawURL,
 		Timeout: 10 * time.Second,
 	}, mediaService, userDirs, authSvc)
 	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
@@ -121,8 +132,58 @@ func main() {
 	}
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+// bootstrapAdmin 在 user 表为空时创建首个超管账号，并在日志中打印一次性凭据与 token。
+//
+// 凭据来源（均可选，均可经同名环境变量覆盖）：
+//   - MM_BOOTSTRAP_ADMIN_USERNAME：超管用户名，缺省 "admin"。
+//   - MM_BOOTSTRAP_ADMIN_PASSWORD：超管密码，缺省则生成一次性随机密码（强烈建议登录后修改）。
+//
+// 库非空时 authSvc.BootstrapAdmin 返回 nil，本函数静默跳过——这是幂等的正常路径，
+// 每次重启不会重复建号、也不会重复打印凭据。
+func bootstrapAdmin(cfg *config.Config, authSvc *auth.AuthService) {
+	username := os.Getenv("MM_BOOTSTRAP_ADMIN_USERNAME")
+	password := os.Getenv("MM_BOOTSTRAP_ADMIN_PASSWORD")
+	res, err := authSvc.BootstrapAdmin(context.Background(), username, password)
+	if err != nil {
+		// 引导失败不阻断启动——主功能仍可用，仅记录便于排查。
+		log.Printf("WARNING: admin bootstrap failed: %v", err)
+		return
+	}
+	if res == nil {
+		// 已有用户，无需引导。
+		return
+	}
+	// 多行醒目输出，便于 `docker logs` 抓取。token 仅此一次明文出现。
+	log.Printf("========================================================")
+	log.Printf(" INITIAL ADMIN ACCOUNT CREATED (first run, empty user DB)")
+	log.Printf("--------------------------------------------------------")
+	log.Printf("  username: %s", res.Username)
+	log.Printf("  password: %s", res.Password)
+	log.Printf("  token   : %s", res.Token)
+	log.Printf("  expires : %s", res.ExpiresAt.Format(time.RFC3339))
+	log.Printf("--------------------------------------------------------")
+	log.Printf(" Login via POST /api/auth/login with these credentials,")
+	log.Printf(" then CHANGE the password immediately. allow_signup=%s", cfg.AllowSignup)
+	log.Printf("========================================================")
+}
+
+// resolvePort 把端口归一为纯端口号字符串。cfg.Port 经 config 已去前导冒号；
+// 这里再兜底空值回退 8080，并去掉调用方可能传入的 ":8080" 形态。
+func resolvePort(p string) string {
+	if p = strings.TrimSpace(p); p == "" {
+		return "8080"
+	}
+	return strings.TrimPrefix(p, ":")
+}
+
+// resolveOpenClawURL 决定 OpenClaw 网关地址，优先级：
+// cfg.OpsServerURL（config.yaml + MM_OPS_SERVER_URL）> 旧环境变量 OPENCLAW_GATEWAY_URL > def。
+// 保留 OPENCLAW_GATEWAY_URL 回退以兼容现有部署文档。
+func resolveOpenClawURL(cfg *config.Config, def string) string {
+	if cfg.OpsServerURL != "" {
+		return cfg.OpsServerURL
+	}
+	if v := os.Getenv("OPENCLAW_GATEWAY_URL"); v != "" {
 		return v
 	}
 	return def

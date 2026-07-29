@@ -1,5 +1,15 @@
 # Media Manager 后端配置示例
 # 拷贝为 config.yaml 后按需修改。所有字段均可省略，省略时使用代码内默认值。
+#
+# 覆盖优先级：代码默认 < config.yaml < MM_* 环境变量。
+# 即任何字段都可用同名 MM_* 环境变量临时覆盖（参见 internal/config/config.go::ApplyEnv）：
+#   MM_PORT / MM_DATA_DIR / MM_DB_PATH / MM_JWT_SECRET / MM_JWT_TTL_SECONDS
+#   / MM_ALLOW_SIGNUP / MM_OPS_SERVER_URL
+# Docker 部署时通过 docker-compose 的 environment 段注入这些变量。
+
+# REST gateway 监听端口（仅端口号，如 "8080"）。默认 8080。
+# Note: gRPC 端口(:50051) 仅在进程内部使用，不在此配置、不对容器外暴露。
+port: "8080"
 
 # 运行期数据根目录。其下布局：
 #   users/<uid>/        per-user 数据（uploads / thumbnails / metadata / video-meta
@@ -13,6 +23,12 @@ data_dir: ./data
 # 留空时自动派生为 <data_dir>/media.db（与代码默认一致）。
 # 可指定为绝对路径以放到独立位置，如 /var/lib/media-manager/media.db。
 db_path: ./data/media.db
+
+# ---- OpenClaw 运维面（可选）----
+# 运维管理面 / OpenClaw 网关地址，供 POST /api/openclaw/command 转发请求。
+# 留空时回退到环境变量 OPENCLAW_GATEWAY_URL，再回退 http://127.0.0.1:18789。
+# 若未部署 OpenClaw，保持留空即可——该桥接端点会返回 502，不影响媒体主功能。
+ops_server_url: ""
 
 # ---- JWT 用户认证 ----
 
@@ -29,4 +45,7 @@ jwt_ttl_seconds: 604800
 #   first  仅在 user 表为空时允许注册第一个账号（自动授予 admin 角色），之后关闭。
 #          适合冷启动自动引导首个管理员，无需人工建号。
 #   open   任意人可注册（角色固定为 user）。适合受信内部环境。
+#
+# 首次启动引导：当本项为 off 且 user 表为空时，后端会自动创建一个超管账号
+# (admin) 并在启动日志中打印一次性登录凭据与 token，避免无人能登录的死锁。
 allow_signup: off

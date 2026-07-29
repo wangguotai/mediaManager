@@ -13,8 +13,10 @@ package auth
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -315,3 +317,85 @@ func (a *AuthService) ParseToken(tokenStr string) (string, error) {
 
 // AllowSignup 返回当前注册模式，供 /healthz 或调试端点观测。
 func (a *AuthService) AllowSignup() string { return a.signup }
+
+// BootstrapResult 是 BootstrapAdmin 成功创建首个超管账号后返回的引导信息。
+// main.go 据此在启动日志中打印一次性凭据与 token，使运维首次即可登录。
+type BootstrapResult struct {
+	Username  string    // 实际落库的用户名（等于入参或默认 "admin"）。
+	Password  string    // 实际使用的密码（入参为空时为生成的一次性随机密码）。
+	Token     string    // 已签发的 admin JWT，可直接用于后续 API。
+	ExpiresAt time.Time // token 过期时间，供日志展示。
+	UserID    string    // 新建账号的 ID。
+}
+
+// defaultBootstrapUsername 是未指定用户名时的默认超管账号名。
+const defaultBootstrapUsername = "admin"
+
+// BootstrapAdmin 在 user 表为空时创建首个 admin 账号并签发 token，返回引导信息。
+//
+// 用途：allow_signup=off（默认）下首次启动无人能注册，存在"鸡生蛋"死锁——
+// 此方法在启动期旁路 signup 模式直接建超管，并把一次性凭据打印到日志。
+//
+// 语义：
+//   - 库非空（已存在任意用户）→ 返回 (nil, nil)，视为已引导过，不重复创建。
+//   - 用户名为空 → 用默认 "admin"。
+//   - 密码为空 → 生成 16 字节随机 hex 作为一次性密码，调用方应提示尽快修改。
+//   - 创建唯一冲突（理论上库空不应发生）→ 返回 (nil, ErrUsernameTaken)，交调用方决定。
+//
+// 该方法不受 allow_signup 约束——引导本身是特权操作，仅在库空时可用一次。
+func (a *AuthService) BootstrapAdmin(ctx context.Context, username, password string) (*BootstrapResult, error) {
+	users, err := a.store.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("auth: bootstrap list users: %w", err)
+	}
+	if len(users) > 0 {
+		// 已有用户，无需引导。
+		return nil, nil
+	}
+
+	if username = strings.TrimSpace(username); username == "" {
+		username = defaultBootstrapUsername
+	}
+	generated := false
+	if password == "" {
+		// 16 字节随机 = 32 hex 字符，足够一次性强度；调用方须提示尽快修改。
+		password = hex.EncodeToString(randomBytes(16))
+		generated = true
+	}
+	if err := a.validatePassword(password); err != nil {
+		// 一次性随机密码不会触发；仅防御调用方传入过短的显式密码。
+		return nil, err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("auth: bootstrap hash password: %w", err)
+	}
+	now := a.nowFunc()
+	uid := a.idGen()
+	u := StoredUser{
+		ID:           uid,
+		Username:     username,
+		PasswordHash: string(hash),
+		Role:         RoleAdmin,
+		CreatedAt:    now,
+	}
+	if err := a.store.CreateUser(ctx, u); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrUsernameTaken
+		}
+		return nil, fmt.Errorf("auth: bootstrap create user: %w", err)
+	}
+	token, exp, err := a.issueToken(uid, now)
+	if err != nil {
+		return nil, err
+	}
+	_ = generated // 保留语义供调用方区分（当前 main.go 据打印文案固定提示修改）。
+	return &BootstrapResult{
+		Username:  username,
+		Password:  password,
+		Token:     token,
+		ExpiresAt: exp,
+		UserID:    uid,
+	}, nil
+}
