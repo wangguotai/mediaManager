@@ -69,7 +69,7 @@ import org.jetbrains.compose.resources.painterResource
  *   把来源固定为云端分支（避免被当作本地相册 id 误删），再注入选中集合并触发批量删除，
  *   删除成功后从本页本地列表移除对应条目（viewModel.mediaList 与本页列表是分离的，互不影响）。
  * - 用量来自 [MediaService.getSyncUsage]，仅展示总量，失败时回退本地计数。
- * - 纯 Kotlin / commonMain，无 java.*/android.* 平台依赖。
+ * - 纯 Kotlin / commonMain，无 java/android 平台依赖。
  *
  * @param viewModel 主视图模型，复用其删除能力
  * @param onBack 返回上一级
@@ -94,7 +94,7 @@ fun FileManagementScreen(
 
     // 多选
     val selectedIds = remember { mutableStateListOf<String>() }
-    val inSelectionMode get() = selectedIds.isNotEmpty()
+    val inSelectionMode = selectedIds.isNotEmpty()
     var isDeleting by remember { mutableStateOf(false) }
     var snack by remember { mutableStateOf<String?>(null) }
 

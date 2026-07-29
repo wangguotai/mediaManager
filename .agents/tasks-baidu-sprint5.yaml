@@ -1,0 +1,36 @@
+# tasks-baidu-sprint5.yaml — 最后2个任务
+
+tasks:
+  - id: fe-file-mgmt-v2
+    product: claude
+    prompt: |
+      在 frontend/ "我的"Tab 下增加"文件管理"入口。
+      1. 新建 FileManagementScreen.kt composable，列出云端媒体（调 SyncManager.pullChanges()）
+      2. 按类型/时间/大小筛选排序
+      3. 批量删除（调现有 viewModel.deleteSelectedMedia）
+      4. 查看占用空间（调 MediaService.getSyncUsage()，显示总量）
+      5. 在 MyTabContent 加"文件管理"入口
+      保持简单，不下载到本地。commonMain 不用 java.*/android.*。
+      完成后 git add -A && git commit -m "fe-file-mgmt-v2: cloud file management view"
+    files: [frontend/]
+    depends_on: []
+    timeout: 500s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: qa-v4-final
+    product: claude
+    prompt: |
+      全量 QA 验收。
+      1. cd backend && go build ./...
+      2. cd ops-server && go build ./...
+      3. cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64
+      4. 检查 git log 确认所有任务已 merge
+      5. 输出报告到 docs/V4-QA-REPORT.md（含编译结果、功能清单、已知限制）
+      完成后 git add -A && git commit -m "qa: V4 final acceptance report"
+    files: [docs/]
+    depends_on: [fe-file-mgmt-v2]
+    timeout: 400s
+    max_retries: 1
+    verify_commands: []
