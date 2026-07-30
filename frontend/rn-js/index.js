@@ -118,7 +118,7 @@ function MediaManagerApp(props) {
     // 并行拉取 promotions + healthz（媒体统计）
     Promise.all([
       fetch(`${baseUrl}/api/promotions`, {
-        headers: token ? {Authorization: `Bearer ${token}`} : {},
+        headers: token ? {Authorization: 'Bearer ' + token} : {},
       }).then(r => r.json()).catch(() => []),
       fetch(`${baseUrl}/healthz`).then(r => r.json()).catch(() => ({})),
     ])
