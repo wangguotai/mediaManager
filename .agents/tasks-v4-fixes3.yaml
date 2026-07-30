@@ -1,0 +1,63 @@
+# tasks-v4-fixes3.yaml — 剩余2修复 + MVP验证
+
+tasks:
+  - id: fix-ios-sec
+    product: claude
+    prompt: |
+      在 frontend/ 修复 iOS SettingsStorage 的 secure storage。
+      当前 SettingsStorage.ios.kt 用 NSUserDefaults 存所有数据。改：
+      1. getString/putString 继续用 NSUserDefaults
+      2. getSecureString/putSecureString/removeSecureString 改用文件方案：写到 App Documents 目录的加密文件
+      3. 不用 Keychain C API（interop 类型问题太多），用简单文件+Base64
+      4. 文件路径: Documents/mm_secure.json，内容: {"key":"value"} JSON
+      5. 读写用 NSData/NSString 的 iOS API
+      6. compileKotlinIosArm64 必须通过
+      完成后 git add -A && git commit -m "fix-ios-sec: file-based secure storage for iOS"
+    files: [frontend/]
+    depends_on: []
+    timeout: 300s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:compileKotlinIosArm64"
+
+  - id: fix-android-del
+    product: claude
+    prompt: |
+      在 frontend/ 修复 Android 10+ 本地图片删除。
+      1. 当前 PhotoGalleryService.android.kt 的 deleteMedia 用 ContentResolver.delete() — Android 10+ 会抛 SecurityException
+      2. Android 10+ (API 29+) 需要 MediaStore.createDeleteRequest() 返回 PendingIntent
+      3. 方案：deleteMedia 返回需要删除的 Uri 列表，UI 层在 Activity 中调 createDeleteRequest 启动 IntentSender
+      4. 新增 expect/actual: expect fun requestDeletion(uris: List<String>, onResult: (Boolean)->Unit)
+      5. Android actual 用 Activity+IntentSenderHelper, iOS actual 直接回调 true
+      6. < API 29 继续用 ContentResolver.delete()
+      7. assembleDebug 必须通过
+      完成后 git add -A && git commit -m "fix-android-del: Android 10+ recoverable deletion"
+    files: [frontend/]
+    depends_on: []
+    timeout: 300s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:assembleDebug"
+
+  - id: mvp-e2e
+    product: claude
+    prompt: |
+      端到端验证 V4 MVP。在 /Users/wgt/projects/media-manager 工作。
+      1. cd backend && go run ./cmd/server &
+      2. sleep 3, 从日志提取超管账号密码
+      3. curl POST /api/auth/login 登录获取 token
+      4. 创建测试图片: echo "test" > /tmp/test.jpg
+      5. curl POST /api/media/upload 上传测试图片
+      6. curl GET /api/sync/changes?since=0 确认看到图片
+      7. curl POST /api/media/delete 删除
+      8. curl GET /api/sync/changes?since={上次的cursor} 确认墓碑 deleted=true
+      9. curl GET /healthz 确认健康
+      10. curl GET /api/sync/usage 确认用量
+      11. kill 后端进程
+      把每步请求/响应记录到 docs/V4-MVP-VERIFY.md
+      完成后 git add -A && git commit -m "mvp-e2e: end-to-end verification report"
+    files: [docs/]
+    depends_on: [fix-ios-sec, fix-android-del]
+    timeout: 300s
+    max_retries: 1
+    verify_commands: []
