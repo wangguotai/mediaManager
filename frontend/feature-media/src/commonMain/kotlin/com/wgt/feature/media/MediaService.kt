@@ -638,6 +638,26 @@ object MediaService {
     }
 
     /**
+     * V7：POST /api/media/album/cover — 设置相册封面。
+     */
+    suspend fun setAlbumCover(albumId: String, mediaId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/cover") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_id", mediaId)
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "setAlbumCover FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * 删除相册。
      *
      * DELETE /api/media/album/{id}
