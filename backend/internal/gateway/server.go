@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +50,12 @@ type Server struct {
 	startTime  time.Time
 	authSvc    *auth.AuthService // 为 nil 时认证中间件放行所有请求（仅开发/测试用）
 	store      *storage.Store    // 元数据库；为 nil 时 sync/device/usage/dedup 端点返回 503
+
+	// healthz 降频缓存：/healthz 每次请求都跑 countAllUserMedia 全量目录扫描会造成
+	// IO 放大，且该端点无认证可被外部刷。缓存统计结果（30s TTL），过期才重扫。
+	mediaCountMu        sync.Mutex
+	mediaCountCache     int
+	mediaCountCachedAt  time.Time
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -570,17 +577,39 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
 		return
 	}
-	// Direct file write (bypasses gRPC streaming for REST)
-	// Upload cap is 100 MB (larger than the 10 MB JSON body limit, since uploads are raw file bytes).
-	body, err := io.ReadAll(io.LimitReader(r.Body, 100<<20)) // 100MB cap
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read body"})
-		return
-	}
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
 		filename = "upload.dat"
 	}
+	ext := filepath.Ext(filename)
+	if ext == "" {
+		ext = ".dat"
+		filename = filename + ext
+	}
+
+	// 流式落盘：避免把整个上传体读入堆（旧实现用 io.ReadAll 把 100MB 整文件
+	// 载入内存）。这里在 uploads 目录下建临时文件，用 io.Copy 边收边写并同步计算
+	// sha256，写完即 rename 到最终 uuid 文件名。大文件只占固定大小缓冲，不再占等量堆。
+	tmpFile, err := os.CreateTemp(uploadsDir, "upload-*"+ext)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create temp file"})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	// 失败/早退时清理临时文件；成功路径会在 rename 后令 remove 失效（静默忽略）。
+	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+
+	// 上限仍保留 100MB（raw binary body，大于 JSON 体限制）。
+	limited := io.LimitReader(r.Body, 100<<20)
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(tmpFile, hasher), limited)
+	tmpFile.Close()
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read body"})
+		return
+	}
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
 
 	// 同步扩展参数（query 传递，因 body 是 raw binary）：
 	//   - sha256：内容指纹；提供时按 (user_id,sha256) 去重，命中则秒传不落盘。
@@ -590,9 +619,8 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
 	takenAt := parseInt64Query(r.URL.Query().Get("taken_at"))
 
-	// 服务端实测 sha256：以实际落盘字节为准，避免客户端误报导致去重错乱。
-	// 若客户端传了 sha256 且与服务端实测不符，以服务端实测值为准（信任本地计算）。
-	actualSHA := sha256Hex(body)
+	// 服务端实测 sha256 已在流式落盘时同步算出（actualSHA）；以实际落盘字节为准，
+	// 避免客户端误报导致去重错乱。若客户端未传 sha256，以实测值作为去重指纹。
 	dedupSHA := sha256Param
 	if dedupSHA == "" {
 		dedupSHA = actualSHA
@@ -603,6 +631,8 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	// 并复活（写回 deleted=0 + 刷新 updated_at），使多端删除-重传语义一致。
 	if s.store != nil && dedupSHA != "" {
 		if existing, derr := s.store.GetMediaByUserAndSHA256(r.Context(), uid, dedupSHA); derr == nil && existing != nil {
+			// 命中去重：丢弃刚刚落盘的临时文件，不保留重复内容。
+			cleanupTmp()
 			resp := map[string]any{
 				"media_id": existing.ID,
 				"status":   "deduped",
@@ -619,13 +649,6 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use the original filename for on-disk storage so the filename is preserved
-	// even without a metadata sidecar. Resolve collisions by appending a counter.
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".dat"
-		filename = filename + ext
-	}
 	// id 用 uuid，避免多人/多端同名文件冲突，并为 storage 表提供稳定主键。
 	id := uuid.New().String()
 	uploadPath := filepath.Join(uploadsDir, id+ext)
@@ -640,7 +663,10 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		uploadPath = filepath.Join(uploadsDir, fmt.Sprintf("%s_%d%s", baseName, collision, ext))
 		id = strings.TrimSuffix(filepath.Base(uploadPath), ext)
 	}
-	if err := os.WriteFile(uploadPath, body, 0644); err != nil {
+	// 流式落盘已完成：将临时文件原子 rename 到最终 uuid 路径（同目录 rename 即原子）。
+	// 同一 uploads 目录下 rename 不跨设备，O(1) 且不重写数据。
+	if err := os.Rename(tmpPath, uploadPath); err != nil {
+		cleanupTmp()
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -648,7 +674,7 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	// Write metadata sidecar to 该用户的 metadata 目录 {id}.json。
 	mimeType := detectMimeType(filename)
 	metaWarn := ""
-	if err := s.writeUploadMetadata(uid, id, filename, int64(len(body)), mimeType); err != nil {
+	if err := s.writeUploadMetadata(uid, id, filename, written, mimeType); err != nil {
 		// Metadata write failure is non-fatal; include warning but still return success.
 		metaWarn = err.Error()
 	}
@@ -664,7 +690,7 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 			UserID:   uid,
 			Filename: filename,
 			Type:     mediaType,
-			Size:     int64(len(body)),
+			Size:     written,
 			Mime:     mimeType,
 			SHA256:   actualSHA,
 			ClientID: clientID,
@@ -677,7 +703,7 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"media_id": id,
 		"status":   "success",
-		"size":     len(body),
+		"size":     written,
 		"sha256":   actualSHA,
 	}
 	if metaWarn != "" {
@@ -693,12 +719,6 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 // 供秒传命中软删记录时恢复内容可见性，使多端"删除-重传"语义一致。
 func (s *Server) reviveDeletedMedia(ctx context.Context, mediaID string) error {
 	return s.store.UndeleteMedia(ctx, mediaID)
-}
-
-// sha256Hex 返回字节的 SHA-256 十六进制摘要（小写）。
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 // parseInt64Query 解析查询参数为 int64；空串或非数字返回 0。
@@ -746,14 +766,40 @@ func (s *Server) usersRoot() string {
 	return s.userDirs.UsersRoot()
 }
 
+// healthzMediaCountTTL 是 /healthz 的 media_count 缓存有效期。该端点无认证、
+// 每次 countAllUserMedia 全量扫描所有用户 uploads 目录，IO 开销随用户数线性放大；
+// 30s 内复用上次结果，把刷 healthz 的 IO 放大降为常数级。
+const healthzMediaCountTTL = 30 * time.Second
+
 // countAllUserMedia 跨所有已存在的用户 uploads 目录聚合统计媒体文件数，
 // 供 /healthz 在无单一 user_id 的情形下给出全局 media_count。仅扫已落盘的
 // <usersRoot>/<uid>/uploads 目录（不依赖运行期"哪些 uid 访问过"的记忆）。
-// userDirs 未注入时返回 0。
+// 结果按 healthzMediaCountTTL 缓存以避免每次请求全量扫描；userDirs 未注入时返回 0。
 func (s *Server) countAllUserMedia() int {
 	if s.userDirs == nil {
 		return 0
 	}
+	// 缓存命中：30s 内直接返回上次扫描值，跳过全量目录 IO。
+	s.mediaCountMu.Lock()
+	if !s.mediaCountCachedAt.IsZero() && time.Since(s.mediaCountCachedAt) < healthzMediaCountTTL {
+		cached := s.mediaCountCache
+		s.mediaCountMu.Unlock()
+		return cached
+	}
+	s.mediaCountMu.Unlock()
+
+	total := s.scanAllUserMedia()
+
+	// 写回缓存（即便 total==0 也缓存，避免空库被刷时反复扫盘）。
+	s.mediaCountMu.Lock()
+	s.mediaCountCache = total
+	s.mediaCountCachedAt = time.Now()
+	s.mediaCountMu.Unlock()
+	return total
+}
+
+// scanAllUserMedia 执行一次真实的全量目录扫描，返回媒体文件总数。
+func (s *Server) scanAllUserMedia() int {
 	root := s.userDirs.UsersRoot()
 	entries, err := os.ReadDir(root)
 	if err != nil {

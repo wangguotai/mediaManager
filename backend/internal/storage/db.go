@@ -61,6 +61,16 @@ CREATE TABLE IF NOT EXISTS "device" (
     created_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
+
+-- 性能索引（IF NOT EXISTS 保证幂等，旧库迁移时自动补建）。
+--   idx_media_user_sha   : 上传秒传按 (user_id, sha256) 查询（repository GetMediaByUserAndSHA256）。
+--   idx_media_user_sync  : 增量同步 ListMediaChanges 按 (user_id, deleted, updated_at) 过滤+排序游标。
+--   idx_media_user_list  : 列表分页按 (user_id, updated_at) 排序（与 sync 游标复用，覆盖用户维度多数扫描）。
+--   idx_device_user      : 设备列表按 user_id 聚合（repository ListDevices）。
+CREATE INDEX IF NOT EXISTS idx_media_user_sha  ON "media"(user_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_media_user_sync ON "media"(user_id, deleted, updated_at);
+CREATE INDEX IF NOT EXISTS idx_media_user_list ON "media"(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_device_user     ON "device"(user_id);
 `
 
 // columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。
@@ -96,9 +106,12 @@ func Open(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
 	}
-	// 单写连接足以支撑当前元数据写入量；max open conns=1 可规避 SQLite
-	// "database is locked"（即便有 WAL，写仍串行）。读连接放开以利列表查询。
-	db.SetMaxOpenConns(1)
+	// 并发连接池：DSN 已启用 WAL（journal_mode(WAL)）与 busy_timeout(5000)。
+	// WAL 模式下读连接可并发，写仍由 SQLite 单写者串行；busy_timeout 让短时写锁
+	// 冲突排队等待而非立即返回 "database is locked"。放开 MaxOpenConns 提升列表/
+	// 同步等多读场景吞吐，元数据写入量受单写瓶颈约束但对该负载足够。
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
 
 	if err := db.PingContext(context.Background()); err != nil {
 		db.Close()
@@ -149,7 +162,7 @@ func (s *Store) Close() error {
 }
 
 // DB 暴露底层 *sql.DB，供需要直接执行 SQL 的调用方使用（如批量导入）。
-// 注意：通过此句柄的写操作仍受 MaxOpenConns=1 串行化约束。
+// 注意：通过此句柄的并发写受 SQLite 单写者约束，依赖 WAL + busy_timeout 排队。
 func (s *Store) DB() *sql.DB {
 	return s.db
 }
