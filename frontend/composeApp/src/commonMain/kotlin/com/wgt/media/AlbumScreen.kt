@@ -487,7 +487,13 @@ private fun AlbumDetailPage(
                 },
                 onShare = {},
                 onFavoriteToggle = { media -> viewModel.toggleFavorite(media.id) },
-                isFavorite = { media -> viewModel.isFavorite(media.id) }
+                isFavorite = { media -> viewModel.isFavorite(media.id) },
+                onSetCover = { media ->
+                    viewModel.setAlbumCover(albumId, media.id) { success ->
+                        if (success) viewModel.showErrorMessage("已设为封面")
+                        else viewModel.showErrorMessage("设置失败")
+                    }
+                }
             )
         } else {
             previewIndex = null

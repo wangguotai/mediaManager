@@ -1862,6 +1862,15 @@ class MediaViewModel {
         }
     }
 
+    // ---- V7：设置相册封面 ----
+
+    fun setAlbumCover(albumId: String, mediaId: String, onComplete: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val success = MediaService.setAlbumCover(albumId, mediaId)
+            onComplete(success)
+        }
+    }
+
     /**
      * V7：一键删除重复文件（保留每组最新的一份）。
      * 收集所有 delete_ids，调 deleteMedia 批量删除，然后刷新。

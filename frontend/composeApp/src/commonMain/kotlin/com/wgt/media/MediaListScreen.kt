@@ -932,7 +932,8 @@ fun ImagePreviewDialog(
     onFavoriteToggle: (MediaMetadata) -> Unit = {},
     isFavorite: (MediaMetadata) -> Boolean = { false },
     onSlideshow: () -> Unit = {},
-    onRename: (MediaMetadata) -> Unit = {}
+    onRename: (MediaMetadata) -> Unit = {},
+    onSetCover: (MediaMetadata) -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -1208,6 +1209,12 @@ fun ImagePreviewDialog(
                                 iconRes = Res.drawable.ic_edit,
                                 label = "重命名",
                                 onClick = { onRename(currentMedia) }
+                            )
+                            // V7：设为相册封面（仅在相册上下文有意义）
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_image_placeholder,
+                                label = "封面",
+                                onClick = { onSetCover(currentMedia) }
                             )
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_share,
