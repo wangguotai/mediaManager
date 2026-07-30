@@ -60,6 +60,7 @@ import mediamanager.composeapp.generated.resources.ic_arrow_back
 import mediamanager.composeapp.generated.resources.ic_close
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlin.time.Clock
 import media.MediaMetadata
 import media.MediaType
 import org.jetbrains.compose.resources.ExperimentalResourceApi
@@ -96,6 +97,9 @@ fun FileManagementScreen(
     // 筛选 / 排序维度
     var typeFilter by remember { mutableStateOf(UsageTypeFilter.ALL) }
     var sortOrder by remember { mutableStateOf(UsageSortOrder.DATE_DESC) }
+    // V7：快捷筛选
+    var largeFilesOnly by remember { mutableStateOf(false) }
+    var recentOnly by remember { mutableStateOf(false) }
 
     // 多选
     val selectedIds = remember { mutableStateListOf<String>() }
@@ -127,14 +131,22 @@ fun FileManagementScreen(
     }
 
     // —— 经筛选 + 排序后的展示列表 ——
-    val visibleList by remember(mediaList, typeFilter, sortOrder) {
+    val visibleList by remember(mediaList, typeFilter, sortOrder, largeFilesOnly, recentOnly) {
         derivedStateOf {
-            val filtered = when (typeFilter) {
+            var filtered = when (typeFilter) {
                 UsageTypeFilter.ALL -> mediaList
                 UsageTypeFilter.IMAGE -> mediaList.filter {
                     it.type == MediaType.IMAGE || it.type == MediaType.LIVE_PHOTO
                 }
                 UsageTypeFilter.VIDEO -> mediaList.filter { it.type == MediaType.VIDEO }
+            }
+            // V7：快捷筛选
+            if (largeFilesOnly) {
+                filtered = filtered.filter { it.size > 10L * 1024 * 1024 }
+            }
+            if (recentOnly) {
+                val thirtyDaysAgoSec = (Clock.System.now().toEpochMilliseconds() / 1000) - 30 * 24 * 3600
+                filtered = filtered.filter { it.created_at > thirtyDaysAgoSec }
             }
             when (sortOrder) {
                 UsageSortOrder.DATE_DESC -> filtered.sortedByDescending { it.created_at }
@@ -286,6 +298,23 @@ fun FileManagementScreen(
                 sortOrder = sortOrder,
                 onSortChange = { sortOrder = it }
             )
+
+            // V7：大文件快捷筛选
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = largeFilesOnly,
+                    onClick = { largeFilesOnly = !largeFilesOnly },
+                    label = { Text("大文件 >10MB") }
+                )
+                FilterChip(
+                    selected = recentOnly,
+                    onClick = { recentOnly = !recentOnly },
+                    label = { Text("近 30 天") }
+                )
+            }
 
             when {
                 loading -> {
