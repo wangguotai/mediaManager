@@ -28,3 +28,21 @@ actual fun writeBundleToCache(bundleName: String, data: ByteArray): String {
     file.writeBytes(data)
     return file.absolutePath
 }
+
+// V7 §3.2：版本号用 SharedPreferences 持久化（key: rn_bundle_version_<name>）
+
+actual fun readCachedBundleVersion(bundleName: String): String? {
+    val ctx = runCatching {
+        if (AppContext.isInitialized) AppContext.applicationContext else null
+    }.getOrNull() ?: return null
+    val prefs = ctx.getSharedPreferences("rn-bundle-versions", Context.MODE_PRIVATE)
+    return prefs.getString("version_$bundleName", null)
+}
+
+actual fun writeCachedBundleVersion(bundleName: String, version: String) {
+    val ctx = runCatching {
+        if (AppContext.isInitialized) AppContext.applicationContext else null
+    }.getOrNull() ?: return
+    val prefs = ctx.getSharedPreferences("rn-bundle-versions", Context.MODE_PRIVATE)
+    prefs.edit().putString("version_$bundleName", version).apply()
+}

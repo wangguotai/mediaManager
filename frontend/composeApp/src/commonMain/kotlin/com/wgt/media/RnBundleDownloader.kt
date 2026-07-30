@@ -55,35 +55,48 @@ suspend fun fetchRnManifest(): List<RnBundleManifest> {
 }
 
 /**
- * 确保指定 bundle 在本地缓存就绪。
+ * 确保指定 bundle 在本地缓存就绪，带版本号比对（V7 §3.2 热更新基础）。
  *
- * 1. 检查本地缓存目录是否有该 bundle 文件。
- * 2. 有则返回本地路径；无则从后端下载到缓存。
- * 3. 下载失败返回 null（调用方回退到 assets 内置 bundle）。
+ * 1. 拉取后端 manifest 获取最新版本号。
+ * 2. 比对本地缓存的版本号——相同则复用缓存，不同则重新下载。
+ * 3. 下载成功后更新本地版本号记录。
+ * 4. 任何步骤失败返回 null（调用方回退到 assets 内置 bundle）。
  *
  * @param bundleName bundle 名称（如 "activity-bundle"）
- * @return 本地文件路径（平台缓存目录下），或 null 表示未就绪
+ * @return 包含本地路径和版本的 Result，或 null 表示未就绪
  */
-suspend fun ensureBundle(bundleName: String): String? {
+suspend fun ensureBundleWithVersion(bundleName: String): BundleResult? {
     return try {
-        // 检查本地缓存
+        // 拉取 manifest 获取版本
+        val manifests = fetchRnManifest()
+        val manifest = manifests.find { it.name == bundleName }
+            ?: return null
+
+        // 检查本地缓存版本
+        val localVersion = readCachedBundleVersion(bundleName)
         val localPath = readCachedBundlePath(bundleName)
-        if (localPath != null) {
-            logger.info(TAG, "bundle cached: $bundleName -> $localPath")
-            return localPath
+
+        if (localPath != null && localVersion == manifest.version) {
+            // 版本一致，复用缓存
+            logger.info(TAG, "bundle cached (version match): $bundleName v$localVersion -> $localPath")
+            return BundleResult(localPath, manifest.version)
         }
-        // 从后端下载
+
+        // 版本不同或无缓存，从后端下载
         val bytes = MediaService.getRawBytes("${MediaService.rnBackendBaseUrl()}/api/rn/bundle/$bundleName")
             ?: return null
-        // 写入缓存
         val path = writeBundleToCache(bundleName, bytes)
-        logger.info(TAG, "bundle downloaded: $bundleName -> $path (${bytes.size} bytes)")
-        path
+        writeCachedBundleVersion(bundleName, manifest.version)
+        logger.info(TAG, "bundle downloaded: $bundleName v${manifest.version} -> $path (${bytes.size} bytes)")
+        BundleResult(path, manifest.version)
     } catch (e: Exception) {
-        logger.error(TAG, "ensureBundle failed for $bundleName: ${e.message}")
+        logger.error(TAG, "ensureBundleWithVersion failed for $bundleName: ${e.message}")
         null
     }
 }
+
+/** bundle 下载结果。 */
+data class BundleResult(val path: String, val version: String)
 
 /**
  * 读取本地缓存的 bundle 文件路径（如果存在）。
@@ -96,3 +109,15 @@ expect fun readCachedBundlePath(bundleName: String): String?
  * 平台 expect/actual。
  */
 expect fun writeBundleToCache(bundleName: String, data: ByteArray): String
+
+/**
+ * 读取本地缓存的 bundle 版本号（V7 §3.2 热更新版本比对）。
+ * 平台 expect/actual：Android 用 SharedPreferences，iOS 用 NSUserDefaults。
+ */
+expect fun readCachedBundleVersion(bundleName: String): String?
+
+/**
+ * 写入 bundle 版本号到本地缓存。
+ * 平台 expect/actual。
+ */
+expect fun writeCachedBundleVersion(bundleName: String, version: String)

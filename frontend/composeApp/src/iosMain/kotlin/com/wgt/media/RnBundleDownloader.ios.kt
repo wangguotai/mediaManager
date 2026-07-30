@@ -5,6 +5,7 @@ import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSFileManager
+import platform.Foundation.NSUserDefaults
 import platform.posix.fclose
 import platform.posix.fopen
 import platform.posix.fwrite
@@ -37,4 +38,14 @@ actual fun writeBundleToCache(bundleName: String, data: ByteArray): String {
         fclose(fp)
     }
     return path
+}
+
+// V7 §3.2：iOS 版本号用 NSUserDefaults 持久化
+
+actual fun readCachedBundleVersion(bundleName: String): String? {
+    return NSUserDefaults.standardUserDefaults.stringForKey("rn_bundle_version_$bundleName")
+}
+
+actual fun writeCachedBundleVersion(bundleName: String, version: String) {
+    NSUserDefaults.standardUserDefaults.setObject(version, forKey = "rn_bundle_version_$bundleName")
 }

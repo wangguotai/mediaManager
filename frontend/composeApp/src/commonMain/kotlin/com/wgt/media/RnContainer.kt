@@ -44,9 +44,10 @@ fun RnContainer(
         loaded = false
         error = null
         try {
-            val localPath = ensureBundle(bundleAssetName)
-            if (localPath != null) {
-                logger.info(TAG, "RN bundle ready: $bundleAssetName -> $localPath")
+            // V7 §3.2：尝试从后端热更新 bundle（版本比对后下载）
+            val result = ensureBundleWithVersion(bundleAssetName)
+            if (result != null) {
+                logger.info(TAG, "RN bundle ready: $bundleAssetName v${result.version} -> ${result.path}")
             } else {
                 logger.info(TAG, "RN bundle not in cache, trying assets: $bundleAssetName")
             }

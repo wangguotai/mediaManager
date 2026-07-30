@@ -149,6 +149,17 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
+	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
+	//   - POST   /api/media/album/share  ：邀请用户共享相册（body: album_id + username/user_id）。
+	//   - DELETE /api/media/album/share  ：撤销共享（body: album_id + username/user_id）。
+	//   - GET    /api/media/albums/shared：列出被共享给当前用户的相册。
+	// 路由优先级：ServeMux 按"最长匹配优先"，/api/media/album/share 精确匹配优先于
+	// /api/media/album/ 前缀匹配，故 POST share 不会被 handleAlbumResource 误捕获。
+	// 同理 /api/media/albums/shared 精确匹配优先于（未注册的）/api/media/albums/ 前缀。
+	// 这些端点位于 authMiddleware 保护下，需 Bearer token。
+	s.mux.HandleFunc("/api/media/album/share", s.handleAlbumShare)
+	s.mux.HandleFunc("/api/media/albums/shared", s.handleAlbumsShared)
+
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
 
@@ -1292,7 +1303,18 @@ func (s *Server) handleAlbumAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := userIDFromContext(r.Context())
-	if err := provider.AddToAlbum(uid, req.AlbumID, req.MediaID); err != nil {
+	// 相册归属判定（PRD-v7 §2.3）：所有者或被共享者均可向相册添加媒体。
+	// resolveAlbumOwnerForUser 返回应操作的归属 uid（owner → uid；sharee → owner_uid）；
+	// 无权访问返回空串 → 404（不区分不存在与无权，避免泄露）。
+	opUID := uid
+	if provider.GetAlbum(uid, req.AlbumID) == nil {
+		opUID = s.resolveAlbumOwnerForUser(r, provider, uid, req.AlbumID)
+		if opUID == "" {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+			return
+		}
+	}
+	if err := provider.AddToAlbum(opUID, req.AlbumID, req.MediaID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -1350,16 +1372,37 @@ func (s *Server) handleAlbumResource(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		album := provider.GetAlbum(uid, albumID)
+		// 相册详情：所有者或被共享者均可查看（PRD-v7 §2.3）。
+		// resolveAlbumOwnerForUser 返回应使用的归属 uid（owner 自己 → uid；
+		// sharee → owner_uid）；无权访问返回空串 → 404。
+		viewUID := uid
+		if provider.GetAlbum(uid, albumID) == nil {
+			viewUID = s.resolveAlbumOwnerForUser(r, provider, uid, albumID)
+			if viewUID == "" {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+				return
+			}
+		}
+		album := provider.GetAlbum(viewUID, albumID)
 		if album == nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
 			return
 		}
 		writeJSON(w, http.StatusOK, album)
 	case http.MethodDelete:
+		// 删除相册：仅所有者可删。删除成功后级联清理该相册的所有共享关系，
+		// 避免悬空的 album_shares 记录（被共享者再查列表时虽会跳过，但清理更干净）。
+		if provider.GetAlbum(uid, albumID) == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+			return
+		}
 		if err := provider.DeleteAlbum(uid, albumID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
+		}
+		// 级联清理共享关系（store 为 nil 时跳过，纯文件相册无共享记录）。
+		if s.store != nil {
+			_ = s.store.DeleteAlbumShare(r.Context(), albumID, uid, "")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": albumID})
 	default:
