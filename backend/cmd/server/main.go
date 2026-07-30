@@ -14,6 +14,7 @@ import (
 	"media-manager/backend/internal/auth"
 	"media-manager/backend/internal/config"
 	"media-manager/backend/internal/gateway"
+	"media-manager/backend/internal/opsclient"
 	"media-manager/backend/internal/service"
 	"media-manager/backend/internal/storage"
 
@@ -24,8 +25,8 @@ const (
 	grpcPort = ":50051"
 	// configPath 是后端配置文件路径，相对 cwd（通常为 backend/）。缺失时回退默认值。
 	configPath = "config.yaml"
-	// defaultOpenClawURL 是未配置运维面时的回退 OpenClaw 网关地址（本地默认端口）。
-	defaultOpenClawURL = "http://127.0.0.1:18789"
+	// defaultOpenClawURL 是未配置运维面时的回退 ops-server 地址（本地默认端口 8090）。
+	defaultOpenClawURL = "http://127.0.0.1:8090"
 )
 
 func main() {
@@ -128,6 +129,14 @@ func main() {
 	restSrv.SetCloudDir(cloudImagesDir)
 	// 注入元数据库，启用多设备同步端点（/api/sync/*、/api/device/*）与 upload 秒传去重。
 	restSrv.SetStore(store)
+
+	// 运营服务端注册上报 + 信令长连（路径 B，PRD §3.2）。
+	// 配置了 ops_server_url 时启动后台 goroutine：注册拿 token，维持 WS 长连+心跳。
+	// 失败不阻断主服务（降级为日志），符合"运营中继为可选增强"的语义。
+	if cfg.OpsServerURL != "" {
+		go startOpsRelay(context.Background(), cfg)
+	}
+
 	fmt.Printf("Media Manager REST gateway listening on %s (OpenClaw -> %s)\n", restAddr, restSrv.OpenClawBaseURL())
 	if err := restSrv.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to serve REST: %v", err)
@@ -178,6 +187,49 @@ func resolvePort(p string) string {
 		return "8080"
 	}
 	return strings.TrimPrefix(p, ":")
+}
+
+// startOpsRelay 完成受管存储服务端到运营服务端的注册 + WS 长连维持（PRD §3.2）。
+//
+// 流程：
+//  1. 调 POST /op/server/register 拿 {server_id, server_token}（重试退避，失败仅日志）。
+//  2. 调 opsclient.Run 维持 WS 长连 + ping 心跳；断线自动重连，永不抛出（直到 ctx 取消）。
+//
+// 该函数设计为在独立 goroutine 中运行，永不正常返回（阻塞至 ctx 取消）。
+func startOpsRelay(ctx context.Context, cfg *config.Config) {
+	// 受管服务端展示名：用 hostname 兜底，便于 ops 前端识别。
+	name := "media-backend"
+	if hn, err := os.Hostname(); err == nil && hn != "" {
+		name = hn
+	}
+
+	client := opsclient.New(cfg.OpsServerURL, name)
+
+	// 注册阶段：指数退避重试，直至成功或 ctx 取消。失败不阻断主进程。
+	var creds opsclient.Credentials
+	backoff := 2 * time.Second
+	for {
+		c, err := client.Register(ctx)
+		if err == nil {
+			creds = c
+			log.Printf("opsclient: registered at ops-server (server_id=%s)", creds.ServerID)
+			break
+		}
+		log.Printf("opsclient: register failed: %v (retry in %s)", err, backoff)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+
+	// WS 长连 + 心跳：Run 内部含重连退避，永不返回（除非 ctx 取消）。
+	if err := client.Run(ctx, creds); err != nil {
+		log.Printf("opsclient: relay loop exited: %v", err)
+	}
 }
 
 // resolveOpenClawURL 决定 OpenClaw 网关地址，优先级：

@@ -35,8 +35,8 @@ type Config struct {
 }
 
 const (
-	// defaultHTTPAddr REST/WS 默认监听 :18789（与 backend 的 OpenClaw 回退默认端口对齐）。
-	defaultHTTPAddr = ":18789"
+	// defaultHTTPAddr REST/WS 默认监听 :8090（与 docker-compose/Dockerfile 对齐，PRD §3.5）。
+	defaultHTTPAddr = ":8090"
 	// defaultRelayAddr TCP 中继默认监听 :18790（紧邻 REST 端口，便于记忆）。
 	defaultRelayAddr = ":18790"
 	// defaultDataDir 默认数据目录（相对 cwd）。
