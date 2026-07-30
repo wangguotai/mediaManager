@@ -638,8 +638,28 @@ object MediaService {
     }
 
     /**
-     * V7：POST /api/media/album/cover — 设置相册封面。
+     * V7：POST /api/media/album/batch-add — 批量添加媒体到相册。
+     * 返回实际添加数量（已存在的跳过）。
      */
+    suspend fun batchAddMediaToAlbum(albumId: String, mediaIds: List<String>): Int? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/batch-add") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_ids", JsonArray(mediaIds.map { JsonPrimitive(it) }))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["added_count"]?.jsonPrimitive?.intOrNull
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchAddMediaToAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
     suspend fun setAlbumCover(albumId: String, mediaId: String): Boolean {
         return try {
             val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/cover") {
