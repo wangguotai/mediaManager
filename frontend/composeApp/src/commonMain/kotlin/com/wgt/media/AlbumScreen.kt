@@ -34,6 +34,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -227,60 +229,86 @@ private fun AlbumListPage(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
-            when {
-                albums.isEmpty() && isLoading -> {
-                    FullScreenLoadingAlbum()
-                }
-                albums.isEmpty() -> {
-                    // 空状态
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            painterResource(Res.drawable.ic_photo),
-                            contentDescription = null,
-                            modifier = Modifier.size(72.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            "暂无相册",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "点击右下角按钮创建相册",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            // V7 §2.3：我的相册 / 共享相册 Tab 切换
+            val sharedAlbums = viewModel.sharedAlbumList
+            var selectedTab by remember { mutableStateOf(0) }
+
+            TabRow(selectedTabIndex = selectedTab) {
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    text = { Text("我的相册") }
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = {
+                        selectedTab = 1
+                        viewModel.loadSharedAlbums()
+                    },
+                    text = { Text("共享相册 (${sharedAlbums.size})") }
+                )
+            }
+
+            val displayAlbums = if (selectedTab == 0) albums else sharedAlbums
+            val displayLoading = if (selectedTab == 0) isLoading else false
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                when {
+                    displayAlbums.isEmpty() && displayLoading -> {
+                        FullScreenLoadingAlbum()
                     }
-                }
-                else -> {
-                    LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 160.dp),
-                        contentPadding = PaddingValues(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        items(
-                            items = albums,
-                            key = { it.id },
-                            contentType = { "album_card" }
-                        ) { album ->
-                            AlbumCard(
-                                album = album,
-                                onClick = { onAlbumClick(album) },
+                    displayAlbums.isEmpty() -> {
+                        // 空状态
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                painterResource(Res.drawable.ic_photo),
+                                contentDescription = null,
+                                modifier = Modifier.size(72.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                if (selectedTab == 1) "暂无共享相册" else "暂无相册",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                if (selectedTab == 1) "其他用户共享给你的相册会显示在这里"
+                                else "点击右下角按钮创建相册",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                    else -> {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 160.dp),
+                            contentPadding = PaddingValues(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(
+                                items = displayAlbums,
+                                key = { it.id },
+                                contentType = { "album_card" }
+                            ) { album ->
+                                AlbumCard(
+                                    album = album,
+                                    onClick = { onAlbumClick(album) },
                                 onLongClick = { onAlbumLongClick(album) }
                             )
                         }
                     }
                 }
             }
+        }
         }
     }
 }
