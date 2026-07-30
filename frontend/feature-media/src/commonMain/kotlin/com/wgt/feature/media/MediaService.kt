@@ -376,15 +376,35 @@ object MediaService {
      * filename 通过 query param 传递。与后端 handleMediaUpload 的读取方式对齐
      * （io.ReadAll 读取 raw body）。
      *
+     * 去重扩展参数同样经 query 传递（body 是 raw bytes，无法放 JSON）：
+     *   - [sha256]：内容指纹。后端按 (user_id, sha256) 查库，命中则秒传不落盘，
+     *     直接返回既有 media_id。这正是服务端权威去重——即便本端 DedupStore 未命中，
+     *     只要云端已有同内容即可省去落盘。留空则后端自行实测 sha256 落库（不去重查询）。
+     *   - [clientId]：客户端幂等键，原样入库供多端冲突排查，留空不传。
+     *   - [takenAt]：内容拍摄时间（ms），>0 时透传，0 表未知。
+     *
      * @param fileData 文件字节
      * @param filename 原始文件名（用于后端取扩展名与 metadata sidecar）
      * @param isLivePhoto 是否为 Live Photo（通过 query param 传递）
+     * @param sha256 内容指纹（hex），非空时透传供后端秒传去重
+     * @param clientId 客户端幂等键，非空时透传
+     * @param takenAt 拍摄时间 ms，>0 时透传
      */
-    suspend fun uploadMedia(fileData: ByteArray, filename: String, isLivePhoto: Boolean = false): Boolean {
+    suspend fun uploadMedia(
+        fileData: ByteArray,
+        filename: String,
+        isLivePhoto: Boolean = false,
+        sha256: String = "",
+        clientId: String = "",
+        takenAt: Long = 0L
+    ): Boolean {
         return try {
             val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/upload") {
                 parameter("filename", filename)
                 if (isLivePhoto) parameter("is_live_photo", "true")
+                if (sha256.isNotEmpty()) parameter("sha256", sha256)
+                if (clientId.isNotEmpty()) parameter("client_id", clientId)
+                if (takenAt > 0L) parameter("taken_at", takenAt.toString())
                 contentType(ContentType.Application.OctetStream)
                 setBody(fileData)
             }
