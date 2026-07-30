@@ -223,6 +223,38 @@ func (as *AlbumStore) RemoveFromAlbum(uid, albumID, mediaID string) error {
 	return nil // 不存在，幂等
 }
 
+// BatchRemoveFromAlbum V7：批量从相册移除多个媒体。不存在的跳过（幂等）。
+func (as *AlbumStore) BatchRemoveFromAlbum(uid, albumID string, mediaIDs []string) (int, error) {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return 0, fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return 0, fmt.Errorf("album not found: %s", albumID)
+	}
+	toRemove := make(map[string]bool, len(mediaIDs))
+	for _, id := range mediaIDs {
+		toRemove[id] = true
+	}
+	filtered := album.MediaIDs[:0]
+	removed := 0
+	for _, id := range album.MediaIDs {
+		if toRemove[id] {
+			removed++
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+	if removed > 0 {
+		album.MediaIDs = filtered
+		return removed, pa.save()
+	}
+	return 0, nil
+}
+
 // SetAlbumCover V7：设置相册封面 media_id。
 func (as *AlbumStore) SetAlbumCover(uid, albumID, mediaID string) error {
 	pa := as.forUser(uid)

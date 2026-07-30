@@ -601,6 +601,14 @@ func (s *MediaService) BatchAddToAlbum(uid, albumID string, mediaIDs []string) (
 	return s.albumStore.BatchAddToAlbum(uid, albumID, mediaIDs)
 }
 
+// BatchRemoveFromAlbum V7：批量从相册移除多个媒体。
+func (s *MediaService) BatchRemoveFromAlbum(uid, albumID string, mediaIDs []string) (int, error) {
+	if s.albumStore == nil {
+		return 0, fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.BatchRemoveFromAlbum(uid, albumID, mediaIDs)
+}
+
 // ListAlbums 返回 user_id 名下所有相册列表。
 func (s *MediaService) ListAlbums(uid string) []*Album {
 	if s.albumStore == nil {

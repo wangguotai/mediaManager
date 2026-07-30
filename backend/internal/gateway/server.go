@@ -161,6 +161,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/add", s.handleAlbumAdd)
 	// V7：批量添加媒体到相册
 	s.mux.HandleFunc("/api/media/album/batch-add", s.handleAlbumBatchAdd)
+	// V7：批量从相册移除媒体
+	s.mux.HandleFunc("/api/media/album/batch-remove", s.handleAlbumBatchRemove)
 	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
 	// V7：设置相册封面
 	s.mux.HandleFunc("/api/media/album/cover", s.handleAlbumCover)
@@ -1319,6 +1321,7 @@ type albumStoreProvider interface {
 	RemoveFromAlbum(uid, albumID, mediaID string) error
 	SetAlbumCover(uid, albumID, mediaID string) error
 	BatchAddToAlbum(uid, albumID string, mediaIDs []string) (int, error)
+	BatchRemoveFromAlbum(uid, albumID string, mediaIDs []string) (int, error)
 	ListAlbums(uid string) []*service.Album
 	GetAlbum(uid, albumID string) *service.Album
 	DeleteAlbum(uid, albumID string) error
@@ -1467,6 +1470,51 @@ func (s *Server) handleAlbumBatchAdd(w http.ResponseWriter, r *http.Request) {
 		"album_id":    req.AlbumID,
 		"added_count": added,
 		"total":       len(req.MediaIDs),
+	})
+}
+
+// handleAlbumBatchRemove V7：POST /api/media/album/batch-remove — 批量从相册移除媒体。
+// 请求体: {"album_id":"x","media_ids":["a","b","c"]}
+func (s *Server) handleAlbumBatchRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported"})
+		return
+	}
+	var req struct {
+		AlbumID  string   `json:"album_id"`
+		MediaIDs []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_ids are required"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	opUID := uid
+	if provider.GetAlbum(uid, req.AlbumID) == nil {
+		opUID = s.resolveAlbumOwnerForUser(r, provider, uid, req.AlbumID)
+		if opUID == "" {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+			return
+		}
+	}
+	removed, err := provider.BatchRemoveFromAlbum(opUID, req.AlbumID, req.MediaIDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"album_id":      req.AlbumID,
+		"removed_count": removed,
 	})
 }
 
