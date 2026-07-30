@@ -594,7 +594,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":         "ok",
-		"version":        "v0.3.0",
+		"version":        "v0.4.0",
 		"media_count":    mediaCount,
 		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
 		"cache":          cacheStatus,
