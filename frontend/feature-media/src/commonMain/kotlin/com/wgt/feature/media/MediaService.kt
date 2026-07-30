@@ -1207,6 +1207,43 @@ object MediaService {
         val createdAtMs: Long
     )
 
+    /**
+     * V7：GET /api/share/list — 列出当前用户的分享链接。
+     */
+    suspend fun listShares(): List<ShareInfo>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/share/list") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val arr = obj["shares"]?.jsonArray ?: return emptyList()
+                arr.mapNotNull { item ->
+                    val o = item.jsonObject
+                    ShareInfo(
+                        token = o["token"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        url = o["url"]?.jsonPrimitive?.contentOrNull ?: "",
+                        expiresAt = o["expires_at"]?.jsonPrimitive?.contentOrNull ?: "永久",
+                        hasPassword = o["has_password"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "listShares FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V7：分享链接信息 */
+    data class ShareInfo(
+        val token: String,
+        val url: String,
+        val expiresAt: String,
+        val hasPassword: Boolean,
+        val createdAt: String
+    )
+
     // ---- 解析 ----
 
     /**
