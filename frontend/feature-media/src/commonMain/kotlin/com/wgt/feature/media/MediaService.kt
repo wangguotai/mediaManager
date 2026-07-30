@@ -612,6 +612,74 @@ object MediaService {
         }
     }
 
+    // ============================================================
+    // V7 §2.3 共享相册 API
+    // ============================================================
+
+    /**
+     * 邀请用户共享相册。
+     * @param albumId 相册 ID
+     * @param username 被邀请用户的用户名
+     */
+    suspend fun shareAlbum(albumId: String, username: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/share") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("username", username)
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "shareAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /** 撤销共享。 */
+    suspend fun unshareAlbum(albumId: String, username: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/unshare") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("username", username)
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "unshareAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /** 获取被共享给当前用户的相册列表。 */
+    suspend fun getSharedAlbums(): List<Album> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/albums/shared")
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                val obj = Json.parseToJsonElement(respBody).jsonObject
+                val arr = obj["albums"] as? JsonArray ?: return emptyList()
+                arr.mapNotNull { el ->
+                    val o = el.jsonObject
+                    Album(
+                        id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        coverMediaId = o["cover_media_id"]?.jsonPrimitive?.contentOrNull,
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSharedAlbums FAILED: ${e::class.simpleName} ${e.message}")
+            emptyList()
+        }
+    }
+
     /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
