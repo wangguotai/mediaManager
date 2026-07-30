@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
 import com.wgt.feature.gallery.gallery
+import com.wgt.feature.gallery.requestMediaDeletion
 import com.wgt.base.network.platform
 import kotlin.time.Clock
 
@@ -1020,6 +1021,22 @@ class MediaViewModel {
             try {
                 if (currentSource == MediaSource.LOCAL) {
                     val deleted = galleryFeature.deleteMedia(listOf(mediaId))
+                    if (deleted == -1) {
+                        // Android 10+：需要系统确认，拉起 createDeleteRequest 授权弹窗。
+                        requestMediaDeletion(listOf(mediaId)) { granted ->
+                            viewModelScope.launch {
+                                try {
+                                    if (granted > 0) {
+                                        selectedMediaIds.remove(mediaId)
+                                        loadMediaFromGallery(forceRefresh = true)
+                                    }
+                                } catch (e: Exception) {
+                                    errorMessage = "删除媒体失败: ${e.message}"
+                                }
+                            }
+                        }
+                        return@launch
+                    }
                     if (deleted > 0) {
                         // 本地删除经系统授权（Android 10+ recoverable deletion），
                         // 以 MediaStore 为准重新加载，保证列表与系统一致；同时清理选中态。
@@ -1042,6 +1059,10 @@ class MediaViewModel {
     /**
      * 批量删除选中的媒体
      *
+     * 本地来源（LOCAL）下，Android 10+ scoped storage 对非 owner 媒体需走系统可恢复删除流程：
+     * 先调 [GalleryFeature.deleteMedia] 探测，返回 -1 表示需要系统确认，随即调
+     * [requestMediaDeletion] 拉起系统授权弹窗完成删除；非 -1 直接按返回数量处理。
+     *
      * 删除完成后发送 Snackbar 结果消息（"已删除 N 项"）。
      */
     fun deleteSelectedMedia() {
@@ -1051,10 +1072,34 @@ class MediaViewModel {
         isDeleting = true
 
         viewModelScope.launch {
+            // -1 异步授权路径由回调自行收尾 isDeleting，同步路径在 finally 统一收尾。
+            var deferredToAsync = false
             try {
                 if (currentSource == MediaSource.LOCAL) {
                     val idsToDelete = selectedMediaIds.toList()
                     val deleted = galleryFeature.deleteMedia(idsToDelete)
+                    if (deleted == -1) {
+                        // Android 10+：需要系统确认，拉起 createDeleteRequest 授权弹窗。
+                        deferredToAsync = true
+                        requestMediaDeletion(idsToDelete) { granted ->
+                            viewModelScope.launch {
+                                try {
+                                    if (granted > 0) {
+                                        selectedMediaIds.clear()
+                                        errorMessage = "已删除 $granted 项"
+                                        loadMediaFromGallery(forceRefresh = true)
+                                    } else {
+                                        errorMessage = "删除失败，可能需要授权"
+                                    }
+                                } catch (e: Exception) {
+                                    errorMessage = "删除媒体失败: ${e.message}"
+                                } finally {
+                                    isDeleting = false
+                                }
+                            }
+                        }
+                        return@launch
+                    }
                     if (deleted > 0) {
                         // 本地批量删除经系统授权后，以 MediaStore 为准重新加载。
                         selectedMediaIds.clear()
@@ -1075,7 +1120,11 @@ class MediaViewModel {
             } catch (e: Exception) {
                 errorMessage = "删除媒体失败: ${e.message}"
             } finally {
-                isDeleting = false
+                // 异步授权路径已 deferredToAsync=true 并自行 return，isDeleting 交回调收尾；
+                // 其余同步完成/异常路径在此统一重置。
+                if (!deferredToAsync) {
+                    isDeleting = false
+                }
             }
         }
     }
