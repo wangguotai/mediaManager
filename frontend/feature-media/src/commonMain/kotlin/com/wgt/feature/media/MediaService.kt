@@ -982,6 +982,45 @@ object MediaService {
     )
 
     /**
+     * V7：GET /api/media/summary → 媒体库综合摘要。
+     */
+    suspend fun getMediaSummary(): MediaSummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/summary") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaSummary(
+                    totalCount = obj["total_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = obj["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    imageCount = obj["image_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    videoCount = obj["video_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    liveCount = obj["live_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    earliestTs = obj["earliest_ts"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    latestTs = obj["latest_ts"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSummary FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    data class MediaSummary(
+        val totalCount: Int,
+        val totalBytes: Long,
+        val imageCount: Int,
+        val videoCount: Int,
+        val liveCount: Int,
+        val earliestTs: Long,
+        val latestTs: Long
+    ) {
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /**
      * POST /api/device/register {device_name, platform} → {device_id}。
      *
      * 为当前登录用户登记一台设备，返回后端分配的 device_id（uuid）。同一用户可多设备，
