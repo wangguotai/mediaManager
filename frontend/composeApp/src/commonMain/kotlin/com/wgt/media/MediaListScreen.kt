@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import com.wgt.media.AuthState
+import com.wgt.feature.media.MediaService
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -691,6 +692,48 @@ private fun MyTabContent(
             }
         }
 
+        // V7：存储统计卡片
+        var storageStats by remember { mutableStateOf<MediaService.StorageStats?>(null) }
+        LaunchedEffect(Unit) {
+            storageStats = MediaService.getStorageStats()
+        }
+        storageStats?.let { stats ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "存储概览",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        StatItem("图片", stats.imageCount, stats.imageBytes)
+                        StatItem("视频", stats.videoCount, stats.videoBytes)
+                        StatItem("Live", stats.livePhotoCount, stats.livePhotoBytes)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "总计 ${stats.totalCount} 项 · " + (stats.totalMB).let { mb ->
+                            val s = mb.toString()
+                            s.take(s.indexOf('.') + 2)
+                        } + " MB",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
@@ -724,6 +767,16 @@ private fun MyTabContent(
 /**
  * "我的" Tab 列表项。
  */
+/** 存储统计单项（类型标签 + 数量 + 占用） */
+@Composable
+private fun StatItem(label: String, count: Int, bytes: Long) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("$count", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+        Text(formatBytesToMB(bytes), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+    }
+}
+
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun MyTabItem(
