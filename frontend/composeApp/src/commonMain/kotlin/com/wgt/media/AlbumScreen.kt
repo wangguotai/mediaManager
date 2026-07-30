@@ -471,6 +471,13 @@ private fun AlbumDetailPage(
     var showAddMediaDialog by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<String?>(null) } // V7：长按移除目标 media id
 
+    // V7：进入相册详情时预加载云端媒体列表（用于添加照片对话框）
+    LaunchedEffect(albumId) {
+        if (viewModel.cloudMedia.isEmpty()) {
+            viewModel.loadCloudMediaList()
+        }
+    }
+
     // 图片预览
     previewIndex?.let { index ->
         if (index in mediaList.indices) {
