@@ -138,6 +138,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/duplicates", s.handleMediaDuplicates)
 	// V7：媒体库综合摘要端点
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
+	// V7：按月份分组的时间轴端点
+	s.mux.HandleFunc("/api/media/timeline", s.handleMediaTimeline)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V7：批量下载（zip）
@@ -1932,6 +1934,72 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 		"earliest_ts":  earliest,
 		"latest_ts":    latest,
 		"user_id":      uid,
+	})
+}
+
+// handleMediaTimeline V7：GET /api/media/timeline — 按月份分组返回媒体列表。
+// 返回格式: {"groups": [{"month": "2026-07", "count": 3, "items": [...media_view...]}]}
+func (s *Server) handleMediaTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按月份分组
+	type monthGroup struct {
+		Month string        `json:"month"`
+		Count int           `json:"count"`
+		Items []map[string]any `json:"items"`
+	}
+	groups := make(map[string]*monthGroup)
+	var monthOrder []string
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		month := m.CreatedAt.Format("2006-01")
+		g, ok := groups[month]
+		if !ok {
+			g = &monthGroup{Month: month}
+			groups[month] = g
+			monthOrder = append(monthOrder, month)
+		}
+		g.Count++
+		g.Items = append(g.Items, map[string]any{
+			"id":         m.ID,
+			"filename":   m.Filename,
+			"type":       m.Type,
+			"size":       m.Size,
+			"created_at": m.CreatedAt.Unix(),
+		})
+	}
+
+	// 按月份倒序排列
+	sort.Slice(monthOrder, func(i, j int) bool {
+		return monthOrder[i] > monthOrder[j]
+	})
+	result := make([]*monthGroup, 0, len(monthOrder))
+	for _, mo := range monthOrder {
+		result = append(result, groups[mo])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"groups":      result,
+		"total_months": len(result),
 	})
 }
 
