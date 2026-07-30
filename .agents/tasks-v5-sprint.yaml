@@ -1,0 +1,130 @@
+# tasks-v5-sprint.yaml — V5 技术债收口 + 体验打磨
+
+tasks:
+  # ── Layer 0: 安全修复（最高优先级）──
+
+  - id: v5-security
+    product: claude
+    prompt: |
+      在 backend/ 修安全问题。
+      1. config.yaml 的 jwt_secret:"wangguotai" 改为留空(启动时随机生成) + 删除提交里的明文
+      2. CORS 限制为 localhost + 内网网段，不用 *
+      3. 密码最低长度改为 8
+      4. BootstrapAdmin 日志不打印明文密码(只打印用户名+token)
+      5. 新增 POST /api/auth/change-password 端点
+      6. 墓碑删除校验 user_id(防横向越权): 只能删自己的 media
+      7. go build ./... 通过
+      完成后 git add -A && git commit -m "v5-security: jwt secret+ CORS+ password policy+ change-password+ user_id guard"
+    files: [backend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  - id: v5-ios-keychain
+    product: claude
+    prompt: |
+      在 frontend/ iOS SettingsStorage 迁移到 Keychain。
+      1. getSecureString/putSecureString/removeSecureString 用 Keychain kSecClassGenericPassword
+      2. 用 memScoped + alloc<CFTypeRefVar>() 处理 SecItemCopyMatching 返回值
+      3. 用 CFDictionaryRef 构造查询字典(不用 NSMutableDictionary)
+      4. 首次启动迁移: 读旧 mm_secure.json → 写 Keychain → 删 JSON
+      5. PersistentFileStore.ios.kt 从 NSUserDefaults 改为 App Documents JSON 文件
+      6. compileKotlinIosArm64 必须通过
+      完成后 git add -A && git commit -m "v5-ios-keychain: Keychain + file-based PersistentFileStore"
+    files: [frontend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:compileKotlinIosArm64"
+
+  # ── Layer 1: 上传路径统一 + 自动备份 ──
+
+  - id: v5-upload-path
+    product: claude
+    prompt: |
+      在 frontend/ 修上传路径统一，让 sha256 去重真正生效。
+      1. MediaViewModel 的自动备份路径调 SyncManager.uploadLocal(带sha256)，不再直接调 uploadMedia(3参版)
+      2. SyncManager.uploadLocal 要被 ViewModel 实际调用(当前是死代码)
+      3. uploadMedia API 扩展支持 sha256/client_id/taken_at 参数(如果后端已支持就只改前端)
+      4. 离线队列改用持久化的 OfflineQueueStore(当前用内存 UploadQueue)
+      5. assembleDebug + compileKotlinIosArm64 通过
+      完成后 git add -A && git commit -m "v5-upload-path: unified upload with sha256 dedup + persistent offline queue"
+    files: [frontend/]
+    depends_on: [v5-security]
+    timeout: 500s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: v5-ops-relay
+    product: claude
+    prompt: |
+      在 ops-server/ 接线孤儿包，让中继真正跑通。
+      1. main.go import 并初始化 discovery/signaling/ws 包
+      2. 暴露端点: POST /op/server/register, POST /op/device/register, GET /op/device/list, WS /op/ws
+      3. backend 侧补注册上报: 如果 config 有 ops_server_url，启动时 POST /op/server/register 获取 server_token
+      4. 中继骨架修复: TCP 双向 copy + 心跳 + 超时断开
+      5. go build ./... 通过
+      完成后 git add -A && git commit -m "v5-ops-relay: wire up discovery+signaling+ws+relay"
+    files: [ops-server/, backend/]
+    depends_on: [v5-security]
+    timeout: 500s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/ops-server && go build ./..."
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  # ── Layer 2: 性能 + 可观测 ──
+
+  - id: v5-perf
+    product: claude
+    prompt: |
+      在 backend/ 修性能问题。
+      1. SQLite 加索引: media(user_id, sha256), media(user_id, updated_at), media(user_id, deleted)
+      2. MaxOpenConns 从 1 改为合适并发数(如 10)
+      3. REST 上传改流式落盘(不用全量入内存)
+      4. go build ./... 通过
+      完成后 git add -A && git commit -m "v5-perf: SQLite indexes+ concurrent writes+ streaming upload"
+    files: [backend/]
+    depends_on: [v5-security]
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  - id: v5-docs
+    product: claude
+    prompt: |
+      在 docs/ 写部署文档和用户手册。
+      1. docs/DEPLOY.md: 存储服务端+运营服务端 Docker 裸机部署全流程
+      2. docs/USER-GUIDE.md: 客户端 App 使用手册(登录/上传/同步/文件管理/编辑)
+      3. docs/API.md: 全部 REST 端点文档(请求/响应/认证)
+      4. 读现有 docs/USAGE.md 作为基础，扩展为完整文档
+      完成后 git add -A && git commit -m "v5-docs: deploy guide + user manual + API reference"
+    files: [docs/]
+    depends_on: [v5-upload-path, v5-ops-relay]
+    timeout: 400s
+    max_retries: 2
+    verify_commands: []
+
+  # ── Layer 3: QA ──
+
+  - id: v5-qa
+    product: claude
+    prompt: |
+      V5 全量 QA 验收。
+      1. cd backend && go build ./...
+      2. cd ops-server && go build ./...
+      3. cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64
+      4. 端到端: 启动后端 → 登录 → 上传(带sha256) → sync/changes → 删除 → 墓碑确认 → 401隔离
+      5. 安全: 弱密码拒绝、CORS限制、change-password
+      6. 输出报告到 docs/V5-QA-REPORT.md
+      完成后 git add -A && git commit -m "v5-qa: V5 acceptance report"
+    files: [docs/]
+    depends_on: [v5-perf, v5-docs]
+    timeout: 400s
+    max_retries: 1
+    verify_commands: []
