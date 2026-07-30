@@ -433,6 +433,17 @@ var thumbnailLongEdge = map[gen.ThumbnailSize]int{
 	gen.ThumbnailSize_THUMBNAIL_LARGE:  512,
 }
 
+// maxHugeImageLongEdge 是超大图长边阈值（像素）。超过此值的图片在生成缩略图时
+// 直接降级为 placeholder，避免极端大图（如全景拼接图）在纯 Go 单线程像素循环中
+// 长时间占满 CPU 导致接口卡死。
+const maxHugeImageLongEdge = 8000
+
+// thumbGenSem 限制同时进行的缩略图生成（nearestNeighbor 像素循环）数量。
+// 每个 nearestNeighbor 调用会占满一个 CPU 核较长时间，多个大图并发缩略图会
+// 耗尽所有 CPU；此处用 cap=2 的 buffered channel 信号量将并发降至 2，
+// 既保留一定并发度又不至于压垮机器。acquire/release 在 resizeLongEdge 调用点完成。
+var thumbGenSem = make(chan struct{}, 2)
+
 type MediaService struct {
 	gen.UnimplementedMediaServiceServer
 	// per-user 目录解析：uploads/thumbnails/metadata/video-meta 均挂在
@@ -1302,6 +1313,32 @@ func (s *MediaService) GetThumbnail(ctx context.Context, req *gen.GetThumbnailRe
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %v", err)
 	}
+
+	// 超大图降级：长边超过 maxHugeImageLongEdge 的图片直接用 placeholder，避免
+	// 极端大图在 nearestNeighbor 像素循环中长时间占满 CPU 导致接口卡死。
+	imgBounds := img.Bounds()
+	imgLong := imgBounds.Dx()
+	if imgBounds.Dy() > imgLong {
+		imgLong = imgBounds.Dy()
+	}
+	if imgLong > maxHugeImageLongEdge {
+		placeholder := generatePlaceholderThumbnail(longEdge)
+		_ = os.WriteFile(thumbPath, placeholder, 0644)
+		w := int32(longEdge)
+		h := int32(longEdge)
+		s.thumbCache.Put(cacheKey, "image/jpeg", w, h, placeholder)
+		return &gen.GetThumbnailResponse{
+			Data:     placeholder,
+			MimeType: "image/jpeg",
+			Width:    w,
+			Height:   h,
+		}, nil
+	}
+
+	// 信号量限并发：acquire 后 defer release，确保即使 resize panic 也会释放。
+	// 限制同时只有 2 个 nearestNeighbor 像素循环在跑，防止多个大图并发缩略图占满全部 CPU。
+	thumbGenSem <- struct{}{}
+	defer func() { <-thumbGenSem }()
 
 	thumb := resizeLongEdge(img, longEdge)
 	encoded, mimeType, err := encodeImage(thumb, ext, s.getMimeType(path))

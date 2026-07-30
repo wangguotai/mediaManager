@@ -427,6 +427,56 @@ fun SettingsScreen(
                     enabled = AuthState.isLoggedIn
                 )
             }
+            // V6 §2.1：备份策略开关——仅在自动备份开启时展示。
+            // 仅 WiFi：移动数据下暂停备份（默认开，对标小米）。仅充电：电池供电时暂停。
+            if (SettingsState.autoBackupEnabled) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("仅 WiFi 备份", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "移动数据下暂停备份，避免消耗流量",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = SettingsState.backupWifiOnly,
+                        onCheckedChange = { SettingsState.saveBackupWifiOnly(it) },
+                        enabled = AuthState.isLoggedIn
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("仅充电备份", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "电池供电时暂停备份，省电",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = SettingsState.backupChargingOnly,
+                        onCheckedChange = { SettingsState.saveBackupChargingOnly(it) },
+                        enabled = AuthState.isLoggedIn
+                    )
+                }
+            }
             // 设备登记状态：供用户确认本机已被云同步纳入。
             if (SettingsState.autoBackupEnabled) {
                 Row(
