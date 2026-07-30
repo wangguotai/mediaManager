@@ -64,10 +64,10 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 private const val TAG = "SettingsScreen"
 
 /** 应用版本号 —— 与“关于”区展示一致。暂不接入 Gradle versionName 以避免跨模块依赖。 */
-private const val APP_VERSION = "v0.3.0"
+private const val APP_VERSION = "v0.4.0 (V7+V8)"
 
 /** 构建时间戳 —— 手动维护，发布时更新。 */
-private const val BUILD_TIME = "2026-07-28"
+private const val BUILD_TIME = "2026-07-31"
 
 /**
  * 设置项的跨屏幕共享状态。单例，进程内唯一：
