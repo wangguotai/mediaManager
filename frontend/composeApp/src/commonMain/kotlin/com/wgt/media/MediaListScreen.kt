@@ -112,6 +112,7 @@ fun MediaListScreen(
     // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
     // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
     var previewIndex by remember { mutableStateOf<Int?>(null) }
+    var renameTarget by remember { mutableStateOf<MediaMetadata?>(null) }
 
     // 视频播放状态：点击视频项时填充，非空即在顶层渲染全屏 [VideoPlayer]。
     // 与图片预览互斥：视频项点击直接进播放器，不走 [ImagePreviewDialog]。
@@ -214,7 +215,8 @@ fun MediaListScreen(
                     onSlideshow = {
                         previewIndex = null
                         slideshowActive = true
-                    }
+                    },
+                    onRename = { media -> renameTarget = media }
                 )
             } else {
                 // 点击的是视频但不知为何 previewIndex 被设置（理论上不会发生），关关闭
@@ -242,6 +244,39 @@ fun MediaListScreen(
             media = media,
             useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
             onDismiss = { editorMedia = null }
+        )
+    }
+
+    // V7：重命名对话框
+    renameTarget?.let { media ->
+        var newName by remember { mutableStateOf(media.filename) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("重命名") },
+            text = {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text("文件名") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newName.isNotBlank() && newName != media.filename,
+                    onClick = {
+                        val target = media
+                        renameTarget = null
+                        viewModel.renameMedia(target.id, newName) { success ->
+                            if (success) viewModel.showErrorMessage("重命名成功")
+                            else viewModel.showErrorMessage("重命名失败")
+                        }
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("取消") }
+            }
         )
     }
 
@@ -896,7 +931,8 @@ fun ImagePreviewDialog(
     onDelete: (MediaMetadata) -> Unit = {},
     onFavoriteToggle: (MediaMetadata) -> Unit = {},
     isFavorite: (MediaMetadata) -> Boolean = { false },
-    onSlideshow: () -> Unit = {}
+    onSlideshow: () -> Unit = {},
+    onRename: (MediaMetadata) -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -1135,6 +1171,11 @@ fun ImagePreviewDialog(
                                 iconRes = Res.drawable.ic_edit,
                                 label = "编辑",
                                 onClick = { onEdit(currentMedia) }
+                            )
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_edit,
+                                label = "重命名",
+                                onClick = { onRename(currentMedia) }
                             )
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_share,

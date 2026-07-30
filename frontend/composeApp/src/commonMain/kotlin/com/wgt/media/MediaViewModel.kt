@@ -196,6 +196,9 @@ class MediaViewModel {
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
+    /** V7：供 UI 层设置操作反馈消息 */
+    fun showErrorMessage(msg: String) { errorMessage = msg }
+
     // 列表加载失败占位文案（持续性）。
     // 与 [errorMessage] 区分：errorMessage 是一次性 Snackbar，转瞬即逝；
     // listLoadError 在列表为空且加载失败时驱动网格区显示“加载失败 + 重试”占位，
