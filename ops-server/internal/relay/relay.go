@@ -88,8 +88,8 @@ type pairSlots struct {
 	a         *relayConn
 	b         *relayConn
 	paired    bool
-	closed    bool
-	finishErr error // relay 期间首个方向的错误（io.Copy 非 EOF），用于区分结束原因
+	closed    atomic.Bool // 是否已关闭；跨 s.mu / slot.mu 读写，故用原子操作避免 data race
+	finishErr error       // relay 期间首个方向的错误（io.Copy 非 EOF），用于区分结束原因
 }
 
 // relayConn 一端中继连接的运行态。
@@ -143,7 +143,7 @@ func (s *Service) CloseSession(sessionID string) error {
 	var found *pairSlots
 	for _, slot := range s.pairs {
 		slot.mu.Lock()
-		if slot.sessionID == sessionID && !slot.closed {
+		if slot.sessionID == sessionID && !slot.closed.Load() {
 			found = slot
 			slot.mu.Unlock()
 			break
@@ -156,7 +156,7 @@ func (s *Service) CloseSession(sessionID string) error {
 	}
 
 	found.mu.Lock()
-	found.closed = true
+	found.closed.Store(true)
 	if found.a != nil && found.a.conn != nil {
 		_ = found.a.conn.Close()
 	}
@@ -298,7 +298,7 @@ func (s *Service) enterPair(pairKey string, srv *Server, rc *relayConn) (*pairSl
 	defer s.mu.Unlock()
 	slot, ok := s.pairs[pairKey]
 	now := s.nowFunc()
-	if !ok || slot.closed {
+	if !ok || slot.closed.Load() {
 		// 首端：新建槽位 + 落账进行中 session。
 		slot = &pairSlots{pairKey: pairKey, serverID: srv.ID, startedAt: now, sessionID: s.idGen()}
 		s.pairs[pairKey] = slot
@@ -316,13 +316,10 @@ func (s *Service) enterPair(pairKey string, srv *Server, rc *relayConn) (*pairSl
 		return slot, true, nil
 	}
 	// 已存在槽位：若已配对/关闭则拒绝（骨架不允许多端复用）。
-	slot.mu.Lock()
-	if slot.closed {
-		slot.mu.Unlock()
-		// 旧槽已关，删除后递归重建（重试一次）。
+	// closed 字段为原子量，此处可直接读，无需再加 slot.mu（避免旧代码双重 Unlock 的隐患）。
+	if slot.closed.Load() {
+		// 旧槽已关，删除后重建（重试一次）。
 		delete(s.pairs, pairKey)
-		slot.mu.Unlock()
-		// 重新进入。
 		slot2 := &pairSlots{pairKey: pairKey, serverID: srv.ID, startedAt: now, sessionID: s.idGen()}
 		s.pairs[pairKey] = slot2
 		rc.role = "a"
@@ -334,6 +331,7 @@ func (s *Service) enterPair(pairKey string, srv *Server, rc *relayConn) (*pairSl
 		})
 		return slot2, true, nil
 	}
+	slot.mu.Lock()
 	if slot.paired {
 		slot.mu.Unlock()
 		return nil, false, fmt.Errorf("pair %s already active", pairKey)
@@ -359,7 +357,7 @@ func (p *pairSlots) waitPaired(svcClosed <-chan struct{}) error {
 	for {
 		p.mu.Lock()
 		paired := p.paired
-		closed := p.closed
+		closed := p.closed.Load()
 		p.mu.Unlock()
 		if paired {
 			return nil
@@ -471,8 +469,8 @@ func (p *pairSlots) finishReason(rc *relayConn) string {
 func (s *Service) endSession(slot *pairSlots, rc *relayConn, reason string) {
 	s.mu.Lock()
 	slot.mu.Lock()
-	alreadyClosed := slot.closed
-	slot.closed = true
+	alreadyClosed := slot.closed.Load()
+	slot.closed.Store(true)
 	aBytes := int64(0)
 	bBytes := int64(0)
 	if slot.a != nil {

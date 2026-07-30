@@ -98,9 +98,9 @@ object SettingsState {
         private set
 
     /**
-     * 上次增量同步推进到的 cursor（毫秒）。0 表示从未同步过（下次拉全量）。
-     * 持久化使冷启动后能续拉增量，而非每次重头全量。由 [MediaViewModel.loadCloudChanges]
-     * 在每页成功后经 [saveSyncCursor] 推进。
+     * 上次增量同步推进到的复合游标（"ms|id" 字符串，V6 §2.7）。空串/"" 表示从未同步过
+     * （下次拉全量）。持久化使冷启动后能续拉增量，而非每次重头全量。由
+     * [MediaViewModel.loadCloudChanges] 在每页成功后经 [saveSyncCursor] 推进。
      */
     var syncCursor by mutableStateOf(loadSyncCursor())
         private set
@@ -132,8 +132,8 @@ object SettingsState {
 
     private fun loadDeviceId(): String = storage.getString(SettingsKeys.DEVICE_ID, "")
 
-    private fun loadSyncCursor(): Long =
-        storage.getString(SettingsKeys.SYNC_CURSOR, "0").toLongOrNull() ?: 0L
+    private fun loadSyncCursor(): String =
+        storage.getString(SettingsKeys.SYNC_CURSOR, "")
 
     private fun loadBackupWifiOnly(): Boolean =
         storage.getString(SettingsKeys.BACKUP_WIFI_ONLY, "true").equals("true", ignoreCase = true)
@@ -181,13 +181,13 @@ object SettingsState {
     }
 
     /**
-     * 推进增量同步游标并持久化。仅当新值严格大于当前值才写盘，避免空页回退/重复写入。
-     * 0 不落（视为未同步）。
+     * 推进增量同步复合游标并持久化（V6 §2.7）。
+     * cursor 为 "ms|id" 字符串。空串不落（视为未同步）。仅在游标推进时写盘。
      */
-    fun saveSyncCursor(cursor: Long) {
-        if (cursor <= 0 || cursor <= syncCursor) return
+    fun saveSyncCursor(cursor: String) {
+        if (cursor.isEmpty()) return
         syncCursor = cursor
-        storage.putString(SettingsKeys.SYNC_CURSOR, cursor.toString())
+        storage.putString(SettingsKeys.SYNC_CURSOR, cursor)
     }
 
     /** V6 §2.1：持久化仅 WiFi 备份开关。 */

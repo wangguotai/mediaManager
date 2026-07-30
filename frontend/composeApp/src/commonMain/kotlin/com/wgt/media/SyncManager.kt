@@ -15,7 +15,7 @@ private const val TAG = "SyncManager"
  * 云相册自动备份开关控制本地新图后台上传。
  */
 object SyncManager {
-    private var cursor: Long = 0L
+    private var cursor: String = ""
     private val _syncing = MutableStateFlow(false)
     val syncing = _syncing.asStateFlow()
 
@@ -27,8 +27,13 @@ object SyncManager {
         try {
             val result = MediaService.getSyncChanges(cursor) ?: return emptyList()
             val items = result.changes.filter { !it.deleted }
-            if (result.changes.isNotEmpty()) {
-                cursor = result.changes.maxOf { it.updatedAt }
+            // 推进复合游标（V6 §2.7）。
+            if (result.nextCursor > 0L) {
+                cursor = if (result.nextCursorId.isNotEmpty()) {
+                    "${result.nextCursor}|${result.nextCursorId}"
+                } else {
+                    result.nextCursor.toString()
+                }
             }
             return items.map { it.toMediaMetadata() }
         } catch (e: Exception) {

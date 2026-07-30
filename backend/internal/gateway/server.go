@@ -171,19 +171,20 @@ func (s *Server) OpenClawBaseURL() string { return s.openClaw.BaseURL }
 
 // ListenAndServe blocks.
 func (s *Server) ListenAndServe() error {
-	// 中间件链：CORS → requestID → accessLog → auth → mux（PRD §2.6 可观测性）。
+	// 中间件链：CORS → requestID → auth → accessLog → mux（PRD §2.6 可观测性）。
 	//   - corsMiddleware：跨域头 + OPTIONS 短路（最外层，确保预检不被内层 401 拦截）。
 	//   - requestIDMiddleware：每请求生成/透传 X-Request-ID，注入 context 供日志关联。
+	//   - authMiddleware：JWT 校验 + user_id 注入（/api/auth/login、/register、/healthz、
+	//     /metrics 豁免）。校验通过后用 r.WithContext(ctx) 造新 Request 传给内层。
 	//   - accessLogMiddleware：slog 结构化访问日志（method/path/status/latency/脱敏 user）+
-	//     更新 metrics 计数/延迟。置于 auth 之前，但在 next 返回后读 context 中的 user_id
-	//     （auth 已注入），故能记录已认证身份。
-	//   - authMiddleware：JWT 校验 + user_id 注入（/api/auth/*、/healthz、/metrics 豁免）。
-	// authMiddleware 内部对 /api/auth/login、/api/auth/register、/healthz、/metrics 放行。
+	//     更新 metrics 计数/延迟。置于 auth 之内（auth 是其外层），auth 注入 user_id 后
+	//     传给本中间件的 r 已带新 context，next 返回后读 r.Context() 即可拿到 user_id。
+	//     豁免/未认证请求 auth 不注入 user_id，此处读到空串记为 anon，符合预期。
 	return http.ListenAndServe(s.addr,
 		s.corsMiddleware(
 			s.requestIDMiddleware(
-				s.accessLogMiddleware(
-					s.authMiddleware(s.mux)))))
+				s.authMiddleware(
+					s.accessLogMiddleware(s.mux)))))
 }
 
 // userIDFromContext 取出中间件注入的 user_id；未认证请求返回空串。

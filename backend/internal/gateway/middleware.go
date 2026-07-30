@@ -119,11 +119,16 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 // 日志字段：method、path、status、latency_ms、request_id、user（脱敏）、
 //           remote（客户端 IP，脱敏为 /24）。
 //
-// 链路位置：CORS → requestID → [accessLog] → auth → mux。
-// 故此处尚未经 authMiddleware 注入 user_id —— 但 authMiddleware 会把 user_id 写入
-// context 后再 next.ServeHTTP，而本中间件在 next 返回后才记日志（defer 语义由
-// 顺序调用保证），届时 context 中的 user_id 已被 auth 注入，可通过
-// service.UserIDFromContext 读到。
+// 链路位置：CORS → requestID → auth → [accessLog] → mux。
+// authMiddleware 在本中间件之外：校验通过后用 r.WithContext(ctx) 造带 user_id 的
+// 新 Request 传给本中间件，故本中间件持有的 r 已是带 user_id 的新 r（而非原始 r）。
+// next.ServeHTTP(rec, r) 传给 mux 的也是同一个 r，next 返回后读 r.Context() 即可
+// 拿到 auth 注入的 user_id。豁免路径（login/register/healthz/metrics）与未认证请求
+// auth 不注入 user_id，此处读到空串记为 anon，符合预期。
+//
+// 注意：此前链路为 CORS → requestID → accessLog → auth → mux（accessLog 在 auth 之外），
+// auth 用 r.WithContext 的新 r 只传给 mux，accessLog 持有的仍是原始 r，其 context
+// 永远不含 user_id，导致全部记为 anon（QA P0-2）。调换为 auth → accessLog 后修复。
 //
 // 指标：method/path/status 计数与延迟经 s.metrics.RecordRequest 记录；
 // path 用 normalizePath 折叠 ID 段，避免高基数拖垮 Prometheus。

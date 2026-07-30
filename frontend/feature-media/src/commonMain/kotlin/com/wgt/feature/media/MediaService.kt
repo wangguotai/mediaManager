@@ -681,12 +681,17 @@ object MediaService {
     }
 
     /**
-     * /api/sync/changes 单页响应。客户端用 [nextCursor] 续拉，[hasMore] 为 false 即本次
-     * 增量同步完成。空页且 hasMore=false 时 [nextCursor] 回显原 since。
+     * /api/sync/changes 单页响应。客户端用 [nextCursor]+[nextCursorId] 组装复合游标续拉，
+     * [hasMore] 为 false 即本次增量同步完成。空页且 hasMore=false 时游标回显原 since。
+     *
+     * V6 §2.7 复合游标：后端响应含 next_cursor（毫秒）+ next_cursor_id（末条 id），
+     * 客户端下次 since 传 "ms|id" 使后端走 (updated_at, id) 复合严格大于分支，
+     * 消除同时间戳边界的重/漏。
      */
     data class SyncChangesResult(
         val changes: List<SyncChange>,
         val nextCursor: Long,
+        val nextCursorId: String = "",
         val hasMore: Boolean
     )
 
@@ -698,16 +703,18 @@ object MediaService {
     /**
      * 增量拉取媒体变更。
      *
-     * GET /api/sync/changes?since=<ms>，返回 updated_at 严格晚于 since 的全部 media 行
-     * （含软删墓碑）。since=0 表示从头全量拉取（首次同步）。客户端循环用本页
-     * [nextCursor] 作为下次 since，直至 [hasMore] = false。
+     * GET /api/sync/changes?since=<cursor>，返回 updated_at 严格晚于 since 的全部 media 行
+     * （含软删墓碑）。since 为复合游标字符串 "ms|id"（V6 §2.7 复合游标），或纯毫秒数字
+     * （向下兼容，后端 sinceID 为空退化纯时间戳）。since="" 或 "0" 表示从头全量拉取。
+     * 客户端循环用本页 [SyncChangesResult.nextCursor]+[nextCursorId] 组装 "ms|id" 作下次 since，
+     * 直至 [hasMore] = false。
      *
-     * @param since 毫秒游标；0 表示从首条拉取
+     * @param since 游标字符串（"ms|id" 或纯毫秒或空串）；空串/"0" 表示首拉
      * @param pageSize 单页大小（后端夹到 [1,500]，默认 100）
      * @return 该页变更 + 下一游标 + 是否还有更多；网络/HTTP 错误返回 null，调用方按
      *         "同步失败、保留旧游标下次重试" 处理（不前进游标避免丢增量）。
      */
-    suspend fun getSyncChanges(since: Long, pageSize: Int = 100): SyncChangesResult? {
+    suspend fun getSyncChanges(since: String, pageSize: Int = 100): SyncChangesResult? {
         return try {
             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/sync/changes") {
                 parameter("since", since)
@@ -720,7 +727,8 @@ object MediaService {
                 val obj = Json.parseToJsonElement(body).jsonObject
                 SyncChangesResult(
                     changes = parsed,
-                    nextCursor = obj["next_cursor"]?.jsonPrimitive?.longOrNull ?: since,
+                    nextCursor = obj["next_cursor"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    nextCursorId = obj["next_cursor_id"]?.jsonPrimitive?.contentOrNull ?: "",
                     hasMore = obj["has_more"]?.jsonPrimitive?.booleanOrNull ?: false
                 )
             } else {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"media-manager/ops-server/internal/auth"
 )
 
 // 哨兵错误。gateway/auth 据此映射 HTTP 状态码。
@@ -46,11 +48,23 @@ func (s *Store) CreateOpAccount(ctx context.Context, a StoredOpAccount) error {
 
 // SetOpAccountServer 把运营账号绑定到指定受管服务端（更新 op_account.server_id）。
 // 空字符串表示解除绑定。PRD §2.8 运营写操作用。
+//
+// 注意：SQLite 的 UPDATE 在 WHERE 命中 0 行时不会报错（err 为 nil），若不检查
+// RowsAffected，对不存在的 account_id 会静默成功。此处显式校验，0 行命中即返回
+// auth.ErrAccountNotFound，使 admin 层的 errors.Is(err, auth.ErrAccountNotFound)
+// 分支能正确落到 404（见 admin/write_handlers.go apiUserBindServer）。
 func (s *Store) SetOpAccountServer(ctx context.Context, accountID, serverID string) error {
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE op_account SET server_id = ? WHERE id = ?`, serverID, accountID)
 	if err != nil {
 		return fmt.Errorf("set op_account server_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set op_account server_id: rows affected: %w", err)
+	}
+	if n == 0 {
+		return auth.ErrAccountNotFound
 	}
 	return nil
 }

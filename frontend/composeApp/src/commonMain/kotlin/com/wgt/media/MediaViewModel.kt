@@ -208,11 +208,11 @@ class MediaViewModel {
     // ---- 增量同步 / 自动备份 ----
 
     /**
-     * 增量同步游标（毫秒）。初值取自 [SettingsState.syncCursor]（持久化），随
-     * [loadCloudChanges] 每页成功推进并回写。0 表示从未同步过（下次全量拉取）。
-     * 由 App 启动与进入"已上传"Tab 的 [loadCloudChanges] 消费。
+     * 增量同步复合游标（"ms|id" 字符串，V6 §2.7）。初值取自 [SettingsState.syncCursor]
+     * （持久化），随 [loadCloudChanges] 每页成功推进并回写。空串表示从未同步过
+     * （下次全量拉取）。由 App 启动与进入"已上传"Tab 的 [loadCloudChanges] 消费。
      */
-    var syncCursor: Long = SettingsState.syncCursor
+    var syncCursor: String = SettingsState.syncCursor
         private set
 
     /**
@@ -388,10 +388,17 @@ class MediaViewModel {
                 dedup.loadFromSync(page.changes)
                 // 合并到云端累积视图（upsert + 软删移除）。
                 cloudMedia = mergeCloudChanges(cloudMedia, page.changes)
-                // nextCursor 推进后立即落盘，保证中途失败也只丢未拉部分而非已拉进度。
-                if (page.nextCursor > syncCursor) {
-                    SettingsState.saveSyncCursor(page.nextCursor)
-                    syncCursor = page.nextCursor
+                // 组装复合游标 "ms|id" 并推进落盘（V6 §2.7）。
+                // nextCursor 为毫秒（Long），nextCursorId 为末条 id（String）。
+                // 二者组装为 "ms|id" 传给后端，使下次走 (updated_at, id) 复合严格大于。
+                if (page.nextCursor > 0L) {
+                    val newCursor = if (page.nextCursorId.isNotEmpty()) {
+                        "${page.nextCursor}|${page.nextCursorId}"
+                    } else {
+                        page.nextCursor.toString()
+                    }
+                    SettingsState.saveSyncCursor(newCursor)
+                    syncCursor = newCursor
                 }
                 hasMoreCloudChanges = page.hasMore
                 logger.info(TAG, "loadCloudChanges page done, cloud=${cloudMedia.size} cursor=$syncCursor hasMore=$hasMoreCloudChanges")
