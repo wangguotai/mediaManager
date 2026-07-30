@@ -848,6 +848,30 @@ object MediaService {
         val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
     }
 
+    /** V7：重复文件检测结果 */
+    data class DuplicateMedia(
+        val id: String,
+        val filename: String,
+        val size: Long,
+        val sha256: String,
+        val type: String,
+        val createdAt: Long
+    )
+    data class DuplicateGroup(
+        val sha256: String,
+        val count: Int,
+        val size: Long,
+        val media: List<DuplicateMedia>
+    )
+    data class DuplicateResult(
+        val groups: List<DuplicateGroup>,
+        val groupCount: Int,
+        val totalDupes: Int,
+        val wastedBytes: Long
+    ) {
+        val wastedMB: Double get() = wastedBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
     suspend fun getStorageStats(): StorageStats? {
         return try {
             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-stats")
@@ -872,6 +896,50 @@ object MediaService {
             } else null
         } catch (e: Exception) {
             logger.error("MediaService", "getStorageStats FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V7：GET /api/media/duplicates → 重复文件检测（按 SHA256 分组）。
+     */
+    suspend fun getDuplicates(): DuplicateResult? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/duplicates") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = response.bodyAsText().let { Json.parseToJsonElement(it).jsonObject }
+                val groups = obj["groups"]?.jsonArray?.map { g ->
+                    val go = g.jsonObject
+                    val media = go["media"]?.jsonArray?.map { m ->
+                        val mo = m.jsonObject
+                        DuplicateMedia(
+                            id = mo["id"]?.jsonPrimitive?.content ?: "",
+                            filename = mo["filename"]?.jsonPrimitive?.content ?: "",
+                            size = mo["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                            sha256 = mo["sha256"]?.jsonPrimitive?.content ?: "",
+                            type = mo["type"]?.jsonPrimitive?.content ?: "",
+                            createdAt = mo["created_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                        )
+                    } ?: emptyList()
+                    DuplicateGroup(
+                        sha256 = go["sha256"]?.jsonPrimitive?.content ?: "",
+                        count = go["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        size = go["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        media = media
+                    )
+                } ?: emptyList()
+                DuplicateResult(
+                    groups = groups,
+                    groupCount = obj["group_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalDupes = obj["total_dupes"]?.jsonPrimitive?.intOrNull ?: 0,
+                    wastedBytes = obj["wasted_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getDuplicates FAILED: ${e::class.simpleName} ${e.message}")
             null
         }
     }
