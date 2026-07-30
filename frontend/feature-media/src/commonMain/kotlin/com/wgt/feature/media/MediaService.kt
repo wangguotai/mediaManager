@@ -830,6 +830,53 @@ object MediaService {
     }
 
     /**
+     * V7：GET /api/media/storage-stats → 按类型分组的存储统计。
+     *
+     * 返回 image/video/live_photo 各自数量+字节数，以及总计。
+     * 需要登录（Authorization header 自动注入）。
+     */
+    data class StorageStats(
+        val imageCount: Int,
+        val imageBytes: Long,
+        val videoCount: Int,
+        val videoBytes: Long,
+        val livePhotoCount: Int,
+        val livePhotoBytes: Long,
+        val totalCount: Int,
+        val totalBytes: Long
+    ) {
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    suspend fun getStorageStats(): StorageStats? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-stats")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val byType = obj["by_type"]?.jsonObject
+                fun typeStats(key: String): Pair<Int, Long> {
+                    val t = byType?.get(key)?.jsonObject
+                    return (t?.get("count")?.jsonPrimitive?.intOrNull ?: 0) to
+                        (t?.get("total_bytes")?.jsonPrimitive?.longOrNull ?: 0L)
+                }
+                val (img, imgB) = typeStats("image")
+                val (vid, vidB) = typeStats("video")
+                val (lp, lpB) = typeStats("live_photo")
+                StorageStats(
+                    imageCount = img, imageBytes = imgB,
+                    videoCount = vid, videoBytes = vidB,
+                    livePhotoCount = lp, livePhotoBytes = lpB,
+                    totalCount = obj["total_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = obj["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageStats FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * POST /api/device/register {device_name, platform} → {device_id}。
      *
      * 为当前登录用户登记一台设备，返回后端分配的 device_id（uuid）。同一用户可多设备，
