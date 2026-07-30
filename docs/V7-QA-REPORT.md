@@ -1,87 +1,68 @@
-# V7 Sprint 验收报告
+# V7 Sprint 验收报告（更新版）
 
-> 基线：main 89d2e5e（V6 hotfix 完成）→ V7 sprint
-> 验收时间：2026-07-30
+> 更新时间：2026-07-31 00:15 GMT+8
+> HEAD: e46ecb9
 
----
+## 1. 完成状态总览
 
-## 1. 编译验证
+| PRD 章节 | 功能 | 状态 | 编译 | 真机验证 |
+|---------|------|------|------|---------|
+| §1.1 回收站 | 后端 trash/restore/purge + 前端 TrashScreen | ✅ | ✅ | ✅ |
+| §1.2 分享链接 | 后端 create/view/stream/delete + 前端 UI（配置对话框+密码+有效期+复制URL） | ✅ | ✅ | 后端验证 ✅ / 前端待真机 |
+| §1.3 搜索排序 | 后端 sort=date\|size\|name gateway 后处理 | ✅ | ✅ | ✅ |
+| §1.4 时光相册 | MemoryDetailScreen + 回忆卡片横滚 | ✅ | ✅ | ✅ |
+| §1.5 备份通知 | BackupStatusNotifier + SettingsScreen 备份状态 | ✅ | ✅ | ✅ |
+| §2.1 照片编辑 | 涂鸦/马赛克/文字（单文件 ImageEditor.kt） | ✅ | ✅ | 编译验证 ✅ |
+| §2.2 视频编辑 | — | ❌ 未做 | — | — |
+| §2.3 共享相册 | 后端 API（子 agent 进行中） | 🔄 | — | — |
+| §2.4 存储清理 | CleanupScreen + 分析（重复/大文件/老照片） | ✅ | ✅ | 编译验证 ✅ |
+| §3.1 RN 页面容器 | RnContainer.android.kt AndroidView 嵌入 ReactSurfaceView | ✅ | ✅ | ✅ 真机渲染成功 |
+| §3.2 RN bundle 下载 | RnBundleDownloader + 后端 manifest/bundle 端点 | ✅ | ✅ | ✅ |
+| §3.3 RN 动态功能页 | 活动中心 RN 页面 + initialProps 注入 | ✅ | ✅ | ✅ |
 
-| 目标 | 命令 | 结果 |
-|---|---|---|
-| backend | `go build ./... && go test ./... -count=1` | PASS（auth/config/gateway/service/storage 全 ok） |
-| ops-server | `go build ./... && go vet ./...` | PASS |
-| frontend Android | `sh gradlew :composeApp:assembleDebug` | BUILD SUCCESSFUL |
-| frontend iOS | `sh gradlew :composeApp:compileKotlinIosArm64` | BUILD SUCCESSFUL |
+## 2. 本轮新增（V7 增量）
 
----
+### RN 动态功能下发（端到端打通）
+- composeApp/build.gradle.kts 加 RN SDK AAR + SoLoader + Fresco + okhttp 依赖
+- MediaApplication.onCreate 调 RNModuleInit.initialize(this)
+- rn-js/index.js: 活动中心页面（拉 promotions + 媒体统计展示）
+- Metro 打包 → assets/index.android.bundle (976KB Hermes)
+- RnContainer.android.kt: AndroidView 嵌入 ReactSurfaceView（Fabric 新架构）
+  - host.createSurface → surface.start → getView() → AndroidView
+  - initialProps 注入 backendUrl + authToken
+- RnActivityScreen + App.kt RN_ACTIVITY 路由 + SettingsScreen 入口
+- 真机验证：ReactNativeJS Running "MediaManagerApp" ✅
 
-## 2. V7 功能验收
+### 分享链接前端 UI
+- SelectionBottomBar 加「生成分享链接」按钮（仅云端源）
+- ShareLinkConfigDialog: 有效期(1h/24h/7d/30d) + 密码输入
+- ShareLinkDialog: URL 显示 + 复制剪贴板
+- MediaViewModel.createShareLinkForSelected 加 password 参数
 
-### §1.1 回收站
-- [x] 后端：GET /api/media/trash, POST /api/media/restore, POST /api/media/purge
-- [x] ListTrashByUser / UndeleteMediaForUser / PurgeMediaForUser (user_id 校验)
-- [ ] 前端回收站 UI（待后续补）
-- 验收：后端 API 编译+测试通过
+### 存储清理建议
+- MediaViewModel.analyzeCleanupSuggestions: 三类分析
+  - 疑似重复（filename + size 相同）
+  - 大文件 Top 10（> 10MB）
+  - 老照片（> 365 天前）
+- CleanupScreen: 概览卡片 + 分类列表 + 多选删除
+- App.kt CLEANUP 路由 + SettingsScreen 入口
 
-### §1.2 分享链接
-- [x] 后端：POST /api/share/create, GET /api/share/{token}, GET /share/{token}/stream/{id}, DELETE /api/share/{token}
-- [x] share_tokens 表 + bcrypt 密码 + 过期 + 公开访问
-- [x] 9 个测试全通过
-- [ ] 前端分享 UI（待后续补）
-- 验收：后端 API 编译+测试通过
+## 3. 编译状态
 
-### §1.3 搜索排序
-- [x] 后端：GET /api/media/list?sort=size|name (gateway 层后处理排序)
-- [ ] 前端分类 UI（待后续补）
+- backend: go build + go test 全 PASS
+- ops-server: go build + go vet 全 PASS
+- frontend: assembleDebug + compileKotlinIosArm64 BUILD SUCCESSFUL
 
-### §1.4 时光相册
-- [x] MediaViewModel.memoryMonths 按月分组 + getMediaByMonth
-- [x] MemoryDetailScreen 回忆详情页
-- [x] MediaListScreen 已上传 Tab 顶部回忆卡片横滚
-- [x] App.kt 导航 MEMORY_DETAIL
-- 验收：assembleDebug + compileKotlinIosArm64 PASS
+## 4. 待办
 
-### §1.5 备份进度通知
-- [x] BackupStatusNotifier (commonMain expect + Android NotificationManager actual + iOS 占位)
-- [x] MediaViewModel 集成 notifyBackupProgress/Paused/Complete
-- [x] SettingsScreen 待备份 N 项 + 上次备份时间
-- [x] SettingsState.lastBackupTime + saveLastBackupTime + SettingsKeys.LAST_BACKUP_TIME
-- 验收：assembleDebug PASS
+1. §2.2 视频编辑（需平台原生 API MediaCodec/AVAssetExportSession）
+2. §2.3 共享相册后端（子 agent 进行中）
+3. iOS RN 容器（当前占位，需 UIKitView + RCTRootView）
+4. V8 PRD 规划
 
-### §3.1 RN 页面容器
-- [x] RnContainer Composable (commonMain)
-- [x] PlatformRnView expect/actual (Android 占位 + iOS 占位)
-- 验收：编译通过，Android 需配 RN 运行时依赖后启用实际 Surface 嵌入
+## 5. 已知限制
 
-### §3.2 RN bundle 下载
-- [x] RnBundleDownloader (commonMain + Android actual + iOS actual)
-- [x] MediaService.getRawJson / getRawBytes / rnBackendBaseUrl
-- [x] fetchRnManifest + ensureBundle (下载+缓存)
-- [x] 后端 GET /api/rn/manifest, GET /api/rn/bundle/{name}, GET /api/promotions
-- 验收：后端 14 个测试通过，前端编译通过
-
-### §2.1 照片编辑增强
-- [x] 子 agent 实现（涂鸦/马赛克/文字 + EditOverlays）
-- [ ] 编译问题回退——EditOverlays commonMain/actual 类型不匹配
-- 状态：回退到 V6 版本，留作后续 sprint
-
----
-
-## 3. 改动统计
-
-| 域 | 新增文件 | 修改文件 | 行数 |
-|---|---|---|---|
-| backend | 4 (trash_handlers, share_handlers, rn_handlers + tests) | 4 (server.go, db.go, model.go, repository.go) | +1851 |
-| frontend | 9 (MemoryDetailScreen, BackupStatusNotifier×3, RnContainer×3, RnBundleDownloader×3) | 5 (App.kt, MediaListScreen, MediaViewModel, SettingsScreen, SettingsStorage, MediaService) | +1238 |
-| docs | 1 (PRD-v7) | 0 | +208 |
-
----
-
-## 4. 待办与已知限制
-
-1. **照片编辑增强回退**：EditOverlays 编译问题（commonMain expect/actual 类型不匹配），需后续修复
-2. **前端回收站/分享 UI 未补**：后端 API 已就绪，前端页面待后续
-3. **RN Android 嵌入占位**：RnContainer.android.kt 需 composeApp 配置 react-native 依赖后替换为实际 Surface
-4. **iOS RN 嵌入占位**：需 Xcode bridging 配置
-5. **§2.2-2.4 未做**：视频编辑、共享相册、存储清理建议留作后续 sprint
+- iOS RN 容器是占位实现（Text "iOS RN 容器待实现"）
+- iOS BackupPolicy isOnWifi 恒 true（NWPathMonitor K/N interop 复杂）
+- 照片编辑的涂鸦/马赛克/文字为预览不持久化（保存只走 Crop/Filter/Rotate）
+- RN bundle 当前从 assets 打包加载，热更新（版本检测+远程下载替换）未对接
