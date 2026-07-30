@@ -221,7 +221,8 @@ func (as *AlbumStore) ListAlbums(uid string) []*Album {
 	for _, a := range pa.albums {
 		// 返回副本，避免调用方修改内部状态
 		copy := *a
-		copy.MediaIDs = append([]string(nil), a.MediaIDs...)
+		// V7 修复：确保 MediaIDs 不为 nil（前端 JsonArray 解析会 crash）
+		copy.MediaIDs = append([]string{}, a.MediaIDs...)
 		list = append(list, &copy)
 	}
 	sort.Slice(list, func(i, j int) bool {
@@ -243,7 +244,7 @@ func (as *AlbumStore) GetAlbum(uid, albumID string) *Album {
 		return nil
 	}
 	copy := *a
-	copy.MediaIDs = append([]string(nil), a.MediaIDs...)
+	copy.MediaIDs = append([]string{}, a.MediaIDs...) // V7 修复：确保非 nil
 	return &copy
 }
 
