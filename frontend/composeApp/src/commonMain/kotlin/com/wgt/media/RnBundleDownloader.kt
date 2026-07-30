@@ -26,7 +26,9 @@ data class RnBundleManifest(
     val name: String,
     val version: String,
     val description: String,
-    val entry: String
+    val entry: String,
+    val size: Long = 0,
+    val sha256: String = ""
 )
 
 /**
@@ -45,7 +47,9 @@ suspend fun fetchRnManifest(): List<RnBundleManifest> {
                 name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
                 version = o["version"]?.jsonPrimitive?.contentOrNull ?: "",
                 description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                entry = o["entry"]?.jsonPrimitive?.contentOrNull ?: "index.android.bundle"
+                entry = o["entry"]?.jsonPrimitive?.contentOrNull ?: "index.android.bundle",
+                size = o["size"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0,
+                sha256 = o["sha256"]?.jsonPrimitive?.contentOrNull ?: ""
             )
         }
     } catch (e: Exception) {
@@ -85,6 +89,17 @@ suspend fun ensureBundleWithVersion(bundleName: String): BundleResult? {
         // 版本不同或无缓存，从后端下载
         val bytes = MediaService.getRawBytes("${MediaService.rnBackendBaseUrl()}/api/rn/bundle/$bundleName")
             ?: return null
+
+        // V7：SHA256 完整性校验
+        if (manifest.sha256.isNotEmpty()) {
+            val actualSha = sha256Hex(bytes)
+            if (actualSha != manifest.sha256) {
+                logger.error(TAG, "bundle SHA256 mismatch for $bundleName: expected=${manifest.sha256}, actual=$actualSha")
+                return null
+            }
+            logger.info(TAG, "bundle SHA256 verified: $bundleName ($actualSha)")
+        }
+
         val path = writeBundleToCache(bundleName, bytes)
         writeCachedBundleVersion(bundleName, manifest.version)
         logger.info(TAG, "bundle downloaded: $bundleName v${manifest.version} -> $path (${bytes.size} bytes)")
