@@ -64,3 +64,20 @@ type ShareToken struct {
 	HasPassword  bool      `json:"has_password"`   // 派生字段：PasswordHash != ""（供公开响应）
 	CreatedAt    time.Time `json:"created_at"`
 }
+
+// AlbumShare 对应 album_shares 表的一行（PRD-v7 §2.3 共享相册）。
+// 把相册邀请共享给另一用户：被共享者获得该相册的查看与添加权限。
+//   - ID              : 本关联记录的主键（UUID），仅供内部管理与删除定位。
+//   - AlbumID         : 被共享的相册 ID。相册元数据本身存于所有者名下的 JSON 文件
+//     （service.AlbumStore），非本库表，故 AlbumID 不带外键。
+//   - OwnerUserID     : 相册所有者（发起共享的人）。冗余存储以便列出共享相册时
+//     不必回查相册文件即可判定归属，也用于撤销/级联时按所有者过滤。
+//   - SharedWithUserID: 被共享的目标用户。
+//   - SharedAt        : 共享发起时间，供列表排序与审计。
+type AlbumShare struct {
+	ID              string    `json:"id"`
+	AlbumID         string    `json:"album_id"`
+	OwnerUserID     string    `json:"owner_user_id"`
+	SharedWithUserID string   `json:"shared_with_user_id"`
+	SharedAt        time.Time `json:"shared_at"`
+}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ErrNotFound 表示按主键查询未命中行。调用方可用 errors.Is 判别。
@@ -438,6 +440,135 @@ func (s *Store) DeleteShareToken(ctx context.Context, token, userID string) erro
 	res, err := s.db.ExecContext(ctx, `DELETE FROM share_tokens WHERE token = ? AND user_id = ?`, token, userID)
 	if err != nil {
 		return fmt.Errorf("delete share token: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ===== AlbumShare =====（PRD-v7 §2.3 共享相册）
+
+// CreateAlbumShare 把一个相册共享给 sharedWithUserID。ownerUserID 为相册所有者
+// （发起共享的人）。若该 (album_id, shared_with_user_id) 已存在则幂等返回，
+// 不报错也不更新 shared_at（语义：重复邀请是 no-op）。
+//
+// ownerUserID 与 sharedWithUserID 不可相同（禁止把相册共享给自己），否则视作
+// 参数错误——调用方应在上游校验，此处兜底返回 ErrSelfShare。
+//
+// SharedAt 零值时置当前时间。返回完整记录（含生成的 ID 与落库时间）。
+func (s *Store) CreateAlbumShare(ctx context.Context, as *AlbumShare) error {
+	if as == nil {
+		return fmt.Errorf("album share is nil")
+	}
+	if as.AlbumID == "" || as.OwnerUserID == "" || as.SharedWithUserID == "" {
+		return fmt.Errorf("album_id, owner_user_id and shared_with_user_id are required")
+	}
+	if as.SharedWithUserID == as.OwnerUserID {
+		return ErrSelfShare
+	}
+	if as.ID == "" {
+		as.ID = uuid.NewString()
+	}
+	sharedAt := as.SharedAt
+	if sharedAt.IsZero() {
+		sharedAt = time.Now()
+	}
+	// ON CONFLICT DO NOTHING：联合唯一约束 (album_id, shared_with_user_id) 命中时
+	// 跳过插入，幂等。注意：modernc.org/sqlite 支持 UPSERT 语法。
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO album_shares (id, album_id, owner_user_id, shared_with_user_id, shared_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (album_id, shared_with_user_id) DO NOTHING`,
+		as.ID, as.AlbumID, as.OwnerUserID, as.SharedWithUserID, timeToVal(sharedAt))
+	if err != nil {
+		return fmt.Errorf("insert album share: %w", err)
+	}
+	// 回填记录的真实时间，供调用方返回。
+	as.SharedAt = sharedAt
+	// 若因冲突跳过，回查已有记录的 shared_at 以保证返回一致（可选；此处简化为
+	// 不再回查，调用方据 rowsAffected==0 判定为已是共享状态）。
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAlreadyShared
+	}
+	return nil
+}
+
+// ErrSelfShare 表示试图把相册共享给所有者自己。
+var ErrSelfShare = errors.New("cannot share album with self")
+
+// ErrAlreadyShared 表示该 (album_id, user) 共享关系已存在（CreateAlbumShare 幂等跳过）。
+var ErrAlreadyShared = errors.New("album already shared with this user")
+
+// ListAlbumSharesSharedWith 返回 sharedWithUserID 被共享的全部相册关联记录，
+// 按 shared_at 降序（最近共享在前）。供 GET /api/media/albums/shared 列出被共享
+// 给当前用户的相册。空 sharedWithUserID 直接返回空切片（不查库）。
+func (s *Store) ListAlbumSharesSharedWith(ctx context.Context, sharedWithUserID string) ([]*AlbumShare, error) {
+	if sharedWithUserID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, album_id, owner_user_id, shared_with_user_id, shared_at
+FROM album_shares WHERE shared_with_user_id = ?
+ORDER BY shared_at DESC`, sharedWithUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list album shares shared with: %w", err)
+	}
+	defer rows.Close()
+	var out []*AlbumShare
+	for rows.Next() {
+		var a AlbumShare
+		var sharedAt string
+		if err := rows.Scan(&a.ID, &a.AlbumID, &a.OwnerUserID, &a.SharedWithUserID, &sharedAt); err != nil {
+			return nil, fmt.Errorf("scan album share: %w", err)
+		}
+		a.SharedAt = timeFromVal(sharedAt)
+		out = append(out, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows album shares: %w", err)
+	}
+	return out, nil
+}
+
+// IsAlbumSharedWith 判断 albumID 是否已共享给 sharedWithUserID（即该用户对该相册
+// 有访问权）。
+//
+// 仅校验"被共享"关系，不含所有者自身权限（owner 访问自己的相册不走此方法）。
+// 供 handleAlbumResource/handleAlbumAdd 等端点判定 sharee 是否可访问相册。
+// 任一参数为空返回 false（不报错），保持调用方逻辑简洁。
+func (s *Store) IsAlbumSharedWith(ctx context.Context, albumID, sharedWithUserID string) bool {
+	if albumID == "" || sharedWithUserID == "" {
+		return false
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM album_shares WHERE album_id = ? AND shared_with_user_id = ?`,
+		albumID, sharedWithUserID).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// DeleteAlbumShare 撤销共享：仅当 album_id 与 owner_user_id 同时匹配才删除——
+// 只有所有者能撤销自己发起的共享。sharedWithUserID 非空时进一步按目标用户过滤
+// （撤销指定 sharee）；为空时撤销该相册的所有共享（用于 DeleteAlbum 级联清理）。
+//
+// 未命中或不属于该用户均返回 ErrNotFound（不区分不存在与无权，避免泄露）。
+// ownerUserID 为空时直接 ErrNotFound，防止误以空串匹配。
+func (s *Store) DeleteAlbumShare(ctx context.Context, albumID, ownerUserID, sharedWithUserID string) error {
+	if albumID == "" || ownerUserID == "" {
+		return ErrNotFound
+	}
+	q := `DELETE FROM album_shares WHERE album_id = ? AND owner_user_id = ?`
+	args := []any{albumID, ownerUserID}
+	if sharedWithUserID != "" {
+		q += ` AND shared_with_user_id = ?`
+		args = append(args, sharedWithUserID)
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("delete album share: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound

@@ -89,6 +89,30 @@ CREATE INDEX IF NOT EXISTS idx_media_user_sha  ON "media"(user_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_media_user_sync ON "media"(user_id, deleted, updated_at);
 CREATE INDEX IF NOT EXISTS idx_media_user_list ON "media"(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_device_user     ON "device"(user_id);
+
+-- 共享相册关联（PRD-v7 §2.3）：把相册邀请共享给其它用户。
+--   - album_id            : 被共享的相册 ID（相册元数据存于各用户名下的 JSON 文件，
+--                           非本库表，故此处不做外键；删除相册时由 gateway 层级联清理此表）。
+--   - owner_user_id       : 相册所有者（发起共享的人），与相册 JSON 文件归属用户一致。
+--                           冗余存储以便 ListAlbumsShared 不必回查相册文件即可判定归属。
+--   - shared_with_user_id : 被共享的目标用户。
+--   - shared_at           : 共享发起时间（RFC3339），供列表排序与审计。
+-- 联合唯一约束 (album_id, shared_with_user_id) 防止同一用户被重复邀请；二次邀请
+-- 由 CreateAlbumShare 用 ON CONFLICT DO NOTHING 幂等处理。
+CREATE TABLE IF NOT EXISTS album_shares (
+    id                  TEXT PRIMARY KEY,
+    album_id            TEXT NOT NULL,
+    owner_user_id       TEXT NOT NULL,
+    shared_with_user_id TEXT NOT NULL,
+    shared_at           TEXT NOT NULL,
+    UNIQUE (album_id, shared_with_user_id)
+);
+
+--   idx_album_shares_target : 按被共享用户列出其可见相册（ListAlbumsShared）。
+--   idx_album_shares_album  : 按相册列出所有被共享者（判定某用户是否对某相册有访问权；
+--                             撤销共享、DeleteAlbum 级联清理均走此索引）。
+CREATE INDEX IF NOT EXISTS idx_album_shares_target ON album_shares(shared_with_user_id);
+CREATE INDEX IF NOT EXISTS idx_album_shares_album  ON album_shares(album_id);
 `
 
 // columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。
