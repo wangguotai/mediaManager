@@ -61,12 +61,21 @@ actual fun PlatformRnView(
         // 幂等初始化 SoLoader + Bridgeless FeatureFlags
         runCatching { RNModuleInit.initialize(app) }
 
-        // 创建/获取 ReactHost
+        // V7 §3.2：热更新——尝试从后端拉取最新 bundle 到 cache
+        var overridePath: String? = null
+        runCatching {
+            overridePath = kotlinx.coroutines.runBlocking {
+                ensureBundleWithVersion("activity-bundle")?.path
+            }
+        }
+
+        // 创建/获取 ReactHost（传入 overridePath 优先用热更新 bundle）
         val manager = RNContainerManager.getInstance(app)
         val host = manager.getOrCreateReactHost(
             hostId = hostId,
             bundleAssetName = bundleAssetName,
-            mainComponentName = componentName
+            mainComponentName = componentName,
+            bundleOverridePath = overridePath
         ) as ReactHostImpl
         hostImpl = host
 

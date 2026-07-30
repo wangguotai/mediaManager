@@ -46,7 +46,9 @@ class RNContainerManager private constructor(private val application: Applicatio
         val bundleAssetName: String,
         val mainComponentName: String,
         val jsMainModulePath: String = "index",
-        val useDeveloperSupport: Boolean = BuildConfig.DEBUG
+        val useDeveloperSupport: Boolean = BuildConfig.DEBUG,
+        // V7 §3.2：热更新 override 路径——非空时优先从该路径加载 bundle（跳过 assets 复制）
+        val bundleOverridePath: String? = null
     )
 
     /**
@@ -103,8 +105,17 @@ class RNContainerManager private constructor(private val application: Applicatio
     private fun createReactHost(config: HostConfig): ReactHost {
         android.util.Log.d("RNContainerManager", "创建 ReactHost: hostId=${config.hostId}, bundleName=${config.bundleAssetName}, useDevSupport=${config.useDeveloperSupport}")
         
-        // 使用 createFileLoader 从文件系统加载 bundle
-        val bundleFilePath = copyBundleFromAssets(config.bundleAssetName)
+        // V7 §3.2：热更新——优先用 override 路径（从后端下载的 cache bundle），无则从 assets 复制
+        val bundleFilePath = config.bundleOverridePath?.let { path ->
+            val f = java.io.File(path)
+            if (f.exists() && f.length() > 0) {
+                android.util.Log.d("RNContainerManager", "使用热更新 bundle: $path (${f.length()} bytes)")
+                path
+            } else {
+                android.util.Log.w("RNContainerManager", "override path 不存在, 回退 assets: $path")
+                copyBundleFromAssets(config.bundleAssetName)
+            }
+        } ?: copyBundleFromAssets(config.bundleAssetName)
         
         val bundleLoader = JSBundleLoader.createFileLoader(
             bundleFilePath,
@@ -149,7 +160,9 @@ class RNContainerManager private constructor(private val application: Applicatio
         bundleAssetName: String = "index.android.bundle",
         mainComponentName: String = "MediaManagerApp",
         jsMainModulePath: String = "index",
-        useDevelopmentSupport: Boolean? = null
+        useDevelopmentSupport: Boolean? = null,
+        // V7 §3.2：热更新 bundle 路径（优先于 assets）
+        bundleOverridePath: String? = null
     ): ReactHost {
         return reactHostMap.getOrPut(hostId) {
             val config = HostConfig(
@@ -157,7 +170,8 @@ class RNContainerManager private constructor(private val application: Applicatio
                 bundleAssetName = bundleAssetName,
                 mainComponentName = mainComponentName,
                 jsMainModulePath = jsMainModulePath,
-                useDeveloperSupport = useDevelopmentSupport ?: BuildConfig.DEBUG
+                useDeveloperSupport = useDevelopmentSupport ?: BuildConfig.DEBUG,
+                bundleOverridePath = bundleOverridePath
             )
             hostConfigMap[hostId] = config
             createReactHost(config).apply {
