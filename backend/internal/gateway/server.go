@@ -226,6 +226,10 @@ func (s *Server) OpenClawBaseURL() string { return s.openClaw.BaseURL }
 
 // ListenAndServe blocks.
 func (s *Server) ListenAndServe() error {
+	// V7：启动回收站自动清理 goroutine（每 6 小时清理 >30 天的回收站项目）
+	if s.store != nil {
+		go s.startTrashPurger(30*24*time.Hour, 6*time.Hour)
+	}
 	// 中间件链：CORS → requestID → auth → accessLog → mux（PRD §2.6 可观测性）。
 	//   - corsMiddleware：跨域头 + OPTIONS 短路（最外层，确保预检不被内层 401 拦截）。
 	//   - requestIDMiddleware：每请求生成/透传 X-Request-ID，注入 context 供日志关联。
@@ -240,6 +244,26 @@ func (s *Server) ListenAndServe() error {
 			s.requestIDMiddleware(
 				s.authMiddleware(
 					s.accessLogMiddleware(s.mux)))))
+}
+
+// startTrashPurger V7：后台定期清理回收站。
+// maxAge: 回收站最大保留时长；interval: 清理周期。
+func (s *Server) startTrashPurger(maxAge, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	// 启动时先清理一次
+	if n, err := s.store.PurgeExpiredTrash(context.Background(), maxAge); err != nil {
+		slog.Error("trash purge failed", "error", err)
+	} else if n > 0 {
+		slog.Info("trash purged on startup", "count", n)
+	}
+	for range ticker.C {
+		if n, err := s.store.PurgeExpiredTrash(context.Background(), maxAge); err != nil {
+			slog.Error("trash purge failed", "error", err)
+		} else if n > 0 {
+			slog.Info("trash purged", "count", n)
+		}
+	}
 }
 
 // userIDFromContext 取出中间件注入的 user_id；未认证请求返回空串。

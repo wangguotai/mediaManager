@@ -379,6 +379,19 @@ func (s *Store) PurgeMediaForUser(ctx context.Context, userID, id string) error 
 	return nil
 }
 
+// PurgeExpiredTrash V7：自动清理回收站中超过 maxAge 的记录。
+// 返回清理的条数。物理删除 DB 记录（文件由调用方决定是否删）。
+func (s *Store) PurgeExpiredTrash(ctx context.Context, maxAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-maxAge)
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM "media" WHERE deleted = 1 AND updated_at < ?`, cutoff.Format(time.RFC3339))
+	if err != nil {
+		return 0, fmt.Errorf("purge expired trash: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
