@@ -1011,4 +1011,59 @@ object MediaService {
             0
         }
     }
+
+    // ---- V7 §1.2 分享链接 API ----
+
+    /** 分享链接信息。 */
+    data class ShareLink(
+        val token: String,
+        val url: String,
+        val expiresAt: Long,
+        val mediaCount: Int
+    )
+
+    /** POST /api/share/create — 创建分享链接。返回 token + url。 */
+    suspend fun createShareLink(
+        mediaIds: List<String>,
+        expiresInHours: Int = 24,
+        password: String? = null
+    ): ShareLink? {
+        if (mediaIds.isEmpty()) return null
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+                put("expires_in_hours", expiresInHours)
+                if (password != null) put("password", password)
+            }
+            val response: HttpResponse = jsonClient.post("${rnBackendBaseUrl()}/api/share/create") {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                val obj = Json.parseToJsonElement(respBody).jsonObject
+                ShareLink(
+                    token = obj["token"]?.jsonPrimitive?.contentOrNull ?: return null,
+                    url = obj["url"]?.jsonPrimitive?.contentOrNull
+                        ?: "${rnBackendBaseUrl()}/s/${obj["token"]?.jsonPrimitive?.contentOrNull}",
+                    expiresAt = obj["expires_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    mediaCount = obj["media_count"]?.jsonPrimitive?.intOrNull ?: mediaIds.size
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "createShareLink failed: ${e.message}")
+            null
+        }
+    }
+
+    /** DELETE /api/share/{token} — 撤销分享链接。 */
+    suspend fun revokeShareLink(token: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.delete("${rnBackendBaseUrl()}/api/share/$token")
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "revokeShareLink failed: ${e.message}")
+            false
+        }
+    }
 }

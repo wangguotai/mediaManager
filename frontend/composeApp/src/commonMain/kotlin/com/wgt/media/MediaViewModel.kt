@@ -1128,6 +1128,43 @@ class MediaViewModel {
      * 直接以传入的 mediaId 调 [MediaService.deleteMedia]，
      * 成功后从 [mediaList] 移除该条目并清理可能的选中态。
      */
+
+    /**
+     * V7 §1.2：为当前选中的云端媒体创建分享链接。
+     * 仅对 BACKEND 源的 media 有效。
+     * 成功后回调 onCreated(url, expiresAt)。
+     */
+    fun createShareLinkForSelected(
+        expiresInHours: Int = 24,
+        onCreated: (url: String, expiresAt: Long) -> Unit = { _, _ -> },
+        onError: (msg: String) -> Unit = {}
+    ) {
+        val ids = selectedMediaIds.toList()
+        if (ids.isEmpty()) {
+            onError("请先选择媒体")
+            return
+        }
+        if (currentSource != MediaSource.BACKEND) {
+            onError("仅云端媒体支持分享链接")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val link = MediaService.createShareLink(ids, expiresInHours)
+                if (link != null) {
+                    onCreated(link.url, link.expiresAt)
+                } else {
+                    onError("创建分享链接失败")
+                }
+            } catch (e: Exception) {
+                onError("分享失败: ${'$'}{e.message}")
+            }
+        }
+    }
+
+    /**
+     * 删除单条媒体。
+     */
     fun deleteSingleMedia(mediaId: String) {
         viewModelScope.launch {
             try {
