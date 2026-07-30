@@ -131,6 +131,8 @@ func (s *Server) registerRoutes() {
 
 	// Media REST endpoints (proxy to gRPC service)
 	s.mux.HandleFunc("/api/media/list", s.handleMediaList)
+	// V7：按类型分组的存储统计端点
+	s.mux.HandleFunc("/api/media/storage-stats", s.handleMediaStorageStats)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -1583,6 +1585,72 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"thumbnail_cache": thumbStats,
 		"list_cache":      listStats,
+	})
+}
+
+// handleMediaStorageStats 处理 GET /api/media/storage-stats，
+// 返回按媒体类型分组的存储统计（数量 + 总字节数）。
+// gateway 层聚合，避免改 proto/service 层。
+func (s *Server) handleMediaStorageStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+
+	// 分页拉取当前用户全部媒体（page_size=100，循环至无更多）。
+	uid := userIDFromContext(r.Context())
+	typeStats := map[string]map[string]any{
+		"image":      {"count": 0, "total_bytes": int64(0)},
+		"video":      {"count": 0, "total_bytes": int64(0)},
+		"live_photo": {"count": 0, "total_bytes": int64(0)},
+	}
+	var totalCount int
+	var totalBytes int64
+
+	page := int32(1)
+	for {
+		resp, err := s.mediaSvc.GetMediaList(r.Context(), &gen.GetMediaListRequest{
+			Page:       page,
+			PageSize:   100,
+			FilterType: gen.MediaType_IMAGE, // 不按类型过滤，取全部
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		for _, m := range resp.MediaList {
+			var key string
+			switch m.Type {
+			case gen.MediaType_VIDEO:
+				key = "video"
+			case gen.MediaType_LIVE_PHOTO:
+				key = "live_photo"
+			default:
+				key = "image"
+			}
+			ts := typeStats[key]
+			ts["count"] = ts["count"].(int) + 1
+			ts["total_bytes"] = ts["total_bytes"].(int64) + m.Size
+			totalCount++
+			totalBytes += m.Size
+		}
+		// 判断是否还有更多页
+		if int32(len(resp.MediaList)) < 100 {
+			break
+		}
+		page++
+		// 安全上限：最多 100 页（10000 条）
+		if page > 100 {
+			break
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"by_type":     typeStats,
+		"total_count":  totalCount,
+		"total_bytes":  totalBytes,
+		"total_mb":     float64(totalBytes) / (1024 * 1024),
+		"user_id":      uid,
 	})
 }
 
