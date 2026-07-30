@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,6 +140,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
+	// V7：批量下载（zip）
+	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -1866,6 +1869,82 @@ func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
 		"media_id": req.MediaID,
 		"filename": req.Filename,
 	})
+}
+
+// handleMediaBatchDownload 处理 POST /api/media/batch-download，
+// 将多个媒体文件打包成 zip 流式返回。
+func (s *Server) handleMediaBatchDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids required"})
+		return
+	}
+	if len(req.MediaIDs) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 100 files per batch"})
+		return
+	}
+
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"media-batch-%d.zip\"", time.Now().Unix()))
+	zipWriter := zip.NewWriter(w)
+	defer zipWriter.Close()
+
+	for _, mediaID := range req.MediaIDs {
+		if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+			continue
+		}
+		// 验证归属
+		media, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || media == nil || media.UserID != uid || media.Deleted {
+			continue
+		}
+		// 定位文件
+		files, err := filepath.Glob(filepath.Join(uploadsDir, mediaID+".*"))
+		if err != nil || len(files) == 0 {
+			if s.cloudDir != "" {
+				files, err = filepath.Glob(filepath.Join(s.cloudDir, mediaID+".*"))
+			}
+			if err != nil || len(files) == 0 {
+				continue
+			}
+		}
+		// 读文件写入 zip
+		data, err := os.ReadFile(files[0])
+		if err != nil {
+			continue
+		}
+		fw, err := zipWriter.Create(media.Filename)
+		if err != nil {
+			continue
+		}
+		fw.Write(data)
+	}
 }
 
 // ============ Helpers ============
