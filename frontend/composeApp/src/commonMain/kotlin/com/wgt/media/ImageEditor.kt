@@ -3,9 +3,12 @@ package com.wgt.media
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,12 +26,14 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -43,15 +50,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -71,12 +87,15 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 
 /**
- * 编辑模式：裁剪 / 旋转 / 滤镜。底部 FilterChip 切换。
+ * 编辑模式：裁剪 / 旋转 / 滤镜 / 涂鸦 / 马赛克 / 文字。底部 FilterChip 切换。
  */
 private enum class EditMode(val label: String) {
     CROP("裁剪"),
     ROTATE("旋转"),
-    FILTER("滤镜")
+    FILTER("滤镜"),
+    DRAW("涂鸦"),
+    MOSAIC("马赛克"),
+    TEXT("文字")
 }
 
 /**
@@ -126,18 +145,24 @@ private val ASPECT_OPTIONS = listOf(
 private enum class SaveState { IDLE, SAVING, SUCCESS, FAILED }
 
 /**
- * 图片编辑器全屏对话框：裁剪（宽高比 + 拖拽裁剪框）+ 旋转（90°）+ 滤镜 + 保存到本地相册。
+ * 图片编辑器全屏对话框：裁剪（宽高比 + 拖拽裁剪框）+ 旋转（90°）+ 滤镜 + 涂鸦 + 马赛克 + 文字 + 保存到本地相册。
  *
- * 底部用 FilterChip 切换 裁剪/旋转/滤镜 三个模式：
+ * 底部用 FilterChip 切换 裁剪/旋转/滤镜/涂鸦/马赛克/文字 六个模式：
  * - 裁剪：宽高比选择条 + 拖拽裁剪框 + 重置按钮
  * - 旋转：左转90° / 右转90° 两个大按钮，点触即转
  * - 滤镜：原图/黑白/暖色/冷色 4 种，用 ColorFilter.colorMatrix 实现
+ * - 涂鸦：手指拖动绘制线条，红/白两色可选，清除按钮
+ * - 马赛克：手指拖动涂抹灰色方格区域，视觉模拟低分辨率马赛克，清除按钮
+ * - 文字：点击图片弹出输入框，确认后在点击位置叠加文字标注，清除按钮
  *
  * 保存流程：
  * 1. 用户点保存 → 进入 SAVING 状态，显示加载动画
  * 2. 异步执行 cropAndRotateImageBitmap + saveImageBitmapToGallery
  * 3. 成功 → SUCCESS 状态，短暂显示成功提示后关闭
  * 4. 失败 → FAILED 状态，显示错误提示，允许重试
+ *
+ * 注：涂鸦/马赛克/文字作为编辑预览叠加层；保存时仅持久化 Crop/Filter/Rotate
+ * 的结果（视听叠加可视化不持久化，受 commonMain 渲染能力限制）。
  *
  * 取消编辑（点返回）不修改原文件。
  *
@@ -166,6 +191,17 @@ fun ImageEditor(
     // 当前滤镜索引。
     var filterIndex by remember { mutableIntStateOf(0) }
     val filterMatrix by remember { derivedStateOf { FILTER_OPTIONS[filterIndex].matrix } }
+
+    // 涂鸦：当前颜色（红/白）+ 所有笔触
+    var drawColor by remember { mutableStateOf(Color.Red) }
+    val drawStrokes = remember { mutableStateListOf<List<Offset>>() }
+    // 马赛克：所有笔触（每条笔触用粗灰色方格笔刷绘制）
+    val mosaicStrokes = remember { mutableStateListOf<List<Offset>>() }
+    // 文字：所有标注 (位置, 文本)
+    val textOverlays = remember { mutableStateListOf<Pair<Offset, String>>() }
+    // 文字输入对话框：点击位置 + 当前正在输入的文本
+    var textInputDialog by remember { mutableStateOf<Offset?>(null) }
+    var textInputValue by remember { mutableStateOf("") }
 
     // 显示区像素尺寸：由 BoxWithConstraints 测得，用于裁剪框初始化与几何换算。
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -277,8 +313,19 @@ fun ImageEditor(
                     cropRect = cropRect,
                     editMode = editMode,
                     filterMatrix = filterMatrix,
+                    drawColor = drawColor,
+                    drawStrokes = drawStrokes,
+                    mosaicStrokes = mosaicStrokes,
+                    textOverlays = textOverlays,
                     onViewport = { viewport = it },
                     onCropRect = { cropRect = it },
+                    onTapAt = { offset ->
+                        // 文字模式：点击图片弹出输入框
+                        if (editMode == EditMode.TEXT) {
+                            textInputValue = ""
+                            textInputDialog = offset
+                        }
+                    },
                     density = density
                 )
             }
@@ -286,15 +333,75 @@ fun ImageEditor(
             // 底部模式 + 选项条。
             BottomBar(
                 editMode = editMode,
-                onModeChange = { editMode = it },
+                onModeChange = { newMode ->
+                    // 切换模式时清空该模式的临时状态
+                    when (newMode) {
+                        EditMode.DRAW -> {
+                            mosaicStrokes.clear()
+                            textInputDialog = null
+                        }
+                        EditMode.MOSAIC -> {
+                            drawStrokes.clear()
+                            textInputDialog = null
+                        }
+                        EditMode.TEXT -> {
+                            drawStrokes.clear()
+                            mosaicStrokes.clear()
+                        }
+                        else -> {
+                            // 进入裁剪/旋转/滤镜时不清空涂鸦等，用户可能仍想保留叠加
+                        }
+                    }
+                    editMode = newMode
+                },
                 aspectIndex = aspectIndex,
                 onAspectChange = { aspectIndex = it },
                 filterIndex = filterIndex,
                 onFilterChange = { filterIndex = it },
                 onRotateLeft = { if (src != null) rotation = (rotation - 90 + 360) % 360 },
                 onRotateRight = { if (src != null) rotation = (rotation + 90) % 360 },
+                drawColor = drawColor,
+                onDrawColorChange = { drawColor = it },
+                onClearOverlays = {
+                    // 涂鸦/马赛克/文字的清除按钮
+                    drawStrokes.clear()
+                    mosaicStrokes.clear()
+                    textOverlays.clear()
+                    textInputDialog = null
+                },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
+
+            // 文字输入对话框（TEXT 模式点触图片后弹出）
+            val tapPos = textInputDialog
+            if (tapPos != null) {
+                AlertDialog(
+                    onDismissRequest = { textInputDialog = null },
+                    title = { Text("添加文字标注") },
+                    text = {
+                        OutlinedTextField(
+                            value = textInputValue,
+                            onValueChange = { textInputValue = it },
+                            singleLine = true,
+                            label = { Text("输入文字") },
+                            placeholder = { Text("") }
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (textInputValue.isNotBlank()) {
+                                textOverlays.add(tapPos to textInputValue.trim())
+                            }
+                            textInputDialog = null
+                        }) { Text("确认", color = MaterialTheme.colorScheme.primary) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { textInputDialog = null }) {
+                            Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                )
+            }
 
             // 保存中遮罩
             AnimatedVisibility(
@@ -392,7 +499,7 @@ fun ImageEditor(
 /**
  * 编辑画布：根据源图尺寸与 [viewAspect] 在可用区内 Fit 渲染图片，叠加 [CropOverlay]。
  * 旋转用 [graphicsLayer].rotationZ 应用到图片本身；滤镜用 [ColorFilter.colorMatrix]。
- * 裁剪 overlay 仅在 CROP 模式下显示。
+ * 裁剪 overlay 仅在 CROP 模式下显示；涂鸦/马赛克/文字 overlay 仅在对应模式下显示。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -407,8 +514,13 @@ private fun EditorCanvas(
     cropRect: Rect?,
     editMode: EditMode,
     filterMatrix: FloatArray?,
+    drawColor: Color,
+    drawStrokes: MutableList<List<Offset>>,
+    mosaicStrokes: MutableList<List<Offset>>,
+    textOverlays: MutableList<Pair<Offset, String>>,
     onViewport: (IntSize) -> Unit,
     onCropRect: (Rect) -> Unit,
+    onTapAt: (Offset) -> Unit,
     density: androidx.compose.ui.unit.Density
 ) {
     BoxWithConstraints(
@@ -462,9 +574,195 @@ private fun EditorCanvas(
                         )
                     }
                 }
+                // 涂鸦 / 马赛克：叠加 Canvas 接收拖动并绘制已有笔触。
+                // 两个模式共用同一段 Canvas，区别只在笔触来源与绘制样式。
+                if (editMode == EditMode.DRAW || editMode == EditMode.MOSAIC) {
+                    val isMosaic = editMode == EditMode.MOSAIC
+                    OverlaysCanvas(
+                        drawStrokes = drawStrokes,
+                        mosaicStrokes = mosaicStrokes,
+                        isMosaic = isMosaic,
+                        drawColor = drawColor,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                // 文字 overlay：所有已确认文本均显示（无论模式，便于查看效果）。
+                // 点击逻辑仅在 TEXT 模式下生效。
+                if (textOverlays.isNotEmpty()) {
+                    // 用一个透明 Box 承载文字标注定位
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        textOverlays.forEach { (pos, text) ->
+                            Text(
+                                text = text,
+                                color = Color.White,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .offset {
+                                        IntOffset(
+                                            pos.x.toInt() - (text.length * 11),
+                                            pos.y.toInt() - 14
+                                        )
+                                    }
+                                    .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+                // TEXT 模式：点击空白处弹出输入框
+                if (editMode == EditMode.TEXT) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = { offset ->
+                                        onTapAt(offset)
+                                    }
+                                )
+                            }
+                    )
+                }
             }
         }
     }
+}
+
+/**
+ * 涂鸦/马赛克叠加 Canvas：捕获拖动并绘制已有笔触。
+ * - 涂鸦：用 [drawColor] 细线绘制每条笔触。
+ * - 马赛克：用粗灰色半透明方格笔刷绘制（视觉上模拟低分辨率马赛克）。
+ */
+@Composable
+private fun OverlaysCanvas(
+    drawStrokes: MutableList<List<Offset>>,
+    mosaicStrokes: MutableList<List<Offset>>,
+    isMosaic: Boolean,
+    drawColor: Color,
+    modifier: Modifier = Modifier
+) {
+    // 当前正在绘制中的笔触（拖动结束前不提交到外层 list）
+    val currentStroke = remember { mutableStateListOf<Offset>() }
+
+    Canvas(
+        modifier = modifier
+            .pointerInput(isMosaic) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        currentStroke.clear()
+                        currentStroke.add(offset)
+                    },
+                    onDrag = { change: PointerInputChange, dragAmount: Offset ->
+                        currentStroke.add(change.position)
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        if (currentStroke.size > 1) {
+                            val snapshot = currentStroke.toList()
+                            if (isMosaic) mosaicStrokes.add(snapshot)
+                            else drawStrokes.add(snapshot)
+                        }
+                        currentStroke.clear()
+                    },
+                    onDragCancel = {
+                        currentStroke.clear()
+                    }
+                )
+            }
+    ) {
+        // 绘制已完成笔触
+        if (isMosaic) {
+            // 马赛克：粗灰色方格风格
+            mosaicStrokes.forEach { stroke -> drawMosaicStroke(this, stroke) }
+            // 当前正在画的部分
+            if (currentStroke.size > 1) drawMosaicStroke(this, currentStroke)
+        } else {
+            // 涂鸦：当前颜色的细线
+            drawStrokes.forEach { stroke -> drawDrawStroke(this, stroke, drawColor) }
+            if (currentStroke.size > 1) drawDrawStroke(this, currentStroke, drawColor)
+        }
+    }
+}
+
+/** 绘制一条涂鸦笔触：用 [color] 连接相邻点。 */
+private fun drawDrawStroke(
+    scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+    stroke: List<Offset>,
+    color: Color
+) {
+    if (stroke.size < 2) return
+    val path = Path()
+    path.moveTo(stroke[0].x, stroke[0].y)
+    for (i in 1 until stroke.size) {
+        path.lineTo(stroke[i].x, stroke[i].y)
+    }
+    scope.drawPath(
+        path = path,
+        color = color,
+        style = Stroke(
+            width = 6f,
+            cap = StrokeCap.Round,
+            join = StrokeJoin.Round
+        )
+    )
+}
+
+/**
+ * 绘制一条马赛克笔触：粗灰色半透明方格。视觉上模拟低分辨率马赛克效果——
+ * 不真正做像素采样（commonMain 无位图采样 API），用方格网格表示。
+ */
+private fun drawMosaicStroke(
+    scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+    stroke: List<Offset>
+) {
+    if (stroke.size < 2) return
+    val cell = 14f  // 方格大小
+    val radius = cell / 2f
+    // 用粗半透明灰线把笔触连起来（连续轨迹）
+    val path = Path()
+    path.moveTo(stroke[0].x, stroke[0].y)
+    for (i in 1 until stroke.size) {
+        path.lineTo(stroke[i].x, stroke[i].y)
+    }
+    scope.drawPath(
+        path = path,
+        color = Color.Gray.copy(alpha = 0.55f),
+        style = Stroke(width = cell, cap = StrokeCap.Square, join = StrokeJoin.Bevel)
+    )
+    // 沿笔触按 cell 间隔画方格网格（增强马赛克观感）
+    var accum = 0f
+    var last: Offset = stroke[0]
+    scope.drawSquare(last, radius, Color.Gray.copy(alpha = 0.55f))
+    for (i in 1 until stroke.size) {
+        val cur = stroke[i]
+        val seg = (cur - last).getDistance()
+        accum += seg
+        // 每累计 cell 距离画一个方格
+        while (accum >= cell) {
+            last = Offset(
+                last.x + (cur.x - last.x) * (cell / (accum + 0.0001f)),
+                last.y + (cur.y - last.y) * (cell / (accum + 0.0001f))
+            )
+            accum -= cell
+            scope.drawSquare(last, radius, Color.Gray.copy(alpha = 0.55f))
+        }
+        last = cur
+    }
+}
+
+/** 在 DrawScope 画一个边长 2r 的方形（方格网格单元）。 */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSquare(
+    center: Offset,
+    r: Float,
+    color: Color
+) {
+    drawRect(
+        color = color,
+        topLeft = Offset(center.x - r, center.y - r),
+        size = androidx.compose.ui.geometry.Size(r * 2f, r * 2f)
+    )
 }
 
 /** 加载中占位：居中圆圈。 */
@@ -568,11 +866,14 @@ private fun TopToolbar(
 
 /**
  * 底部栏：两行结构。
- * 第一行：模式切换 FilterChip（裁剪/旋转/滤镜）。
+ * 第一行：模式切换 FilterChip（裁剪/旋转/滤镜/涂鸦/马赛克/文字）。
  * 第二行：根据当前模式显示对应选项：
  * - CROP: 宽高比选择条
  * - ROTATE: 左转90° / 右转90° 大按钮
  * - FILTER: 滤镜选择
+ * - DRAW: 红/白 颜色选择 + 清除按钮
+ * - MOSAIC: 清除按钮
+ * - TEXT: 清除按钮
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -585,6 +886,9 @@ private fun BottomBar(
     onFilterChange: (Int) -> Unit,
     onRotateLeft: () -> Unit,
     onRotateRight: () -> Unit,
+    drawColor: Color,
+    onDrawColorChange: (Color) -> Unit,
+    onClearOverlays: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -663,6 +967,94 @@ private fun BottomBar(
                     )
                 }
             }
+            EditMode.DRAW -> Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 颜色选择：红 / 白
+                ColorDot(
+                    color = Color.Red,
+                    selected = drawColor == Color.Red,
+                    onClick = { onDrawColorChange(Color.Red) }
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                ColorDot(
+                    color = Color.White,
+                    selected = drawColor == Color.White,
+                    onClick = { onDrawColorChange(Color.White) }
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                // 清除按钮
+                TextButton(onClick = onClearOverlays) {
+                    Text("清除", color = Color.White, fontSize = 14.sp)
+                }
+            }
+            EditMode.MOSAIC -> Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "拖动手指涂抹马赛克区域",
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onClearOverlays) {
+                    Text("清除", color = Color.White, fontSize = 14.sp)
+                }
+            }
+            EditMode.TEXT -> Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "点击图片添加文字",
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onClearOverlays) {
+                    Text("清除", color = Color.White, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 颜色选择圆点：点击切换涂鸦颜色。参考小米相册风格。
+ */
+@Composable
+private fun ColorDot(
+    color: Color,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(if (selected) Color.White.copy(alpha = 0.3f) else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        if (selected) {
+            // 选中态外圈描边
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(Color.Transparent)
+            )
         }
     }
 }

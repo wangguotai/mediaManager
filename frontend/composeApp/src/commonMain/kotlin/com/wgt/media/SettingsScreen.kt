@@ -27,6 +27,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -250,7 +251,8 @@ object SettingsState {
 @Composable
 fun SettingsScreen(
     viewModel: MediaViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNavigateToTrash: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -585,6 +587,22 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(modeLabel(mode), style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ---- 回收站入口（V7 §1.1）----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("回收站", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = onNavigateToTrash) {
+                    Text("查看已删除文件")
                 }
             }
 

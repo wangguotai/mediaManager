@@ -26,6 +26,7 @@ import com.wgt.media.MemoryDetailScreen
 import com.wgt.media.RegisterScreen
 import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
+import com.wgt.media.TrashScreen
 import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
 import com.wgt.applyAmoledOverride
@@ -156,7 +157,8 @@ fun App() {
                         )
                         Screen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
-                            onBack = { screen = Screen.MEDIA }
+                            onBack = { screen = Screen.MEDIA },
+                            onNavigateToTrash = { screen = Screen.TRASH }
                         )
                         Screen.ALBUM -> AlbumScreen(
                             viewModel = viewModel,
@@ -166,6 +168,9 @@ fun App() {
                             viewModel = viewModel,
                             onBack = { screen = Screen.MEDIA }
                         )
+                        Screen.TRASH -> TrashScreen(
+                            onBack = { screen = Screen.SETTINGS }
+                        )
                     }
                 }
             }
@@ -174,7 +179,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }

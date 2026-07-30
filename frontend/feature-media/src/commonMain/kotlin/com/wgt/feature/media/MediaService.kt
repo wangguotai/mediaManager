@@ -931,4 +931,84 @@ object MediaService {
             null
         }
     }
+
+    // ---- V7 §1.1 回收站 API ----
+
+    /** 回收站条目（已软删的 media 元数据）。 */
+    data class TrashItem(
+        val id: String,
+        val filename: String,
+        val type: String,
+        val size: Long,
+        val updatedAt: Long
+    )
+
+    /** GET /api/media/trash — 返回回收站列表。失败返回空列表。 */
+    suspend fun getTrash(): List<TrashItem> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${rnBackendBaseUrl()}/api/media/trash")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["items"] as? JsonArray ?: return emptyList()
+                arr.mapNotNull { el ->
+                    val o = el.jsonObject
+                    TrashItem(
+                        id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "IMAGE",
+                        size = o["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        updatedAt = o["updated_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else emptyList()
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTrash failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** POST /api/media/restore — 恢复指定 media。返回成功数。 */
+    suspend fun restoreMedia(mediaIds: List<String>): Int {
+        if (mediaIds.isEmpty()) return 0
+        return try {
+            val body = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+            })
+            val response: HttpResponse = jsonClient.post("${rnBackendBaseUrl()}/api/media/restore") {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                val obj = Json.parseToJsonElement(respBody).jsonObject
+                obj["restored"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "restoreMedia failed: ${e.message}")
+            0
+        }
+    }
+
+    /** POST /api/media/purge — 彻底删除。返回成功数。 */
+    suspend fun purgeMedia(mediaIds: List<String>): Int {
+        if (mediaIds.isEmpty()) return 0
+        return try {
+            val body = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+            })
+            val response: HttpResponse = jsonClient.post("${rnBackendBaseUrl()}/api/media/purge") {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                val obj = Json.parseToJsonElement(respBody).jsonObject
+                obj["purged"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "purgeMedia failed: ${e.message}")
+            0
+        }
+    }
 }
