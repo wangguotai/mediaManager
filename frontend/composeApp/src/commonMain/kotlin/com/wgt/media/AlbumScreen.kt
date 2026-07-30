@@ -194,6 +194,12 @@ private fun AlbumListPage(
 ) {
     val albums = viewModel.albumList
     val isLoading = viewModel.isAlbumLoading
+    var sortByName by remember { mutableStateOf(false) }
+
+    // 排序后的相册列表
+    val sortedAlbums = remember(albums, sortByName) {
+        if (sortByName) albums.sortedBy { it.name.lowercase() } else albums
+    }
 
     Scaffold(
         topBar = {
@@ -210,6 +216,15 @@ private fun AlbumListPage(
                     }
                 },
                 actions = {
+                    // V7：排序切换按钮
+                    IconButton(onClick = { sortByName = !sortByName }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_sort),
+                            contentDescription = if (sortByName) "按名称排序" else "按时间排序",
+                            tint = if (sortByName) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
                     IconButton(
                         onClick = { viewModel.loadAlbums(forceRefresh = true) },
                         enabled = !isLoading
@@ -253,7 +268,7 @@ private fun AlbumListPage(
                 )
             }
 
-            val displayAlbums = if (selectedTab == 0) albums else sharedAlbums
+            val displayAlbums = if (selectedTab == 0) sortedAlbums else sharedAlbums
             val displayLoading = if (selectedTab == 0) isLoading else false
 
             Box(modifier = Modifier.fillMaxSize()) {
