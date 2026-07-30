@@ -82,6 +82,14 @@ fun TrashScreen(onBack: () -> Unit) {
                                 items = emptyList()
                             }
                         }) { Text("恢复全部") }
+                        // V7：清空回收站
+                        TextButton(onClick = {
+                            scope.launch {
+                                val count = MediaService.purgeMedia(items.map { it.id })
+                                snackbarMsg = "已清空 $count 项"
+                                items = emptyList()
+                            }
+                        }) { Text("清空", color = MaterialTheme.colorScheme.error) }
                     }
                 }
             )
