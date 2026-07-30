@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "bundle": "npx react-native bundle --platform android --dev false --entry-file index.js --bundle-output ../composeApp/src/androidMain/assets/index.android.bundle --assets-dest ../composeApp/src/androidMain/assets"
+    "bundle": "react-native bundle --platform android --dev false --entry-file index.js --bundle-output ../composeApp/src/androidMain/assets/index.android.bundle --assets-dest ../composeApp/src/androidMain/assets"
   },
   "dependencies": {
     "@react-native-community/cli": "^20.2.0",
