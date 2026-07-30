@@ -50,7 +50,7 @@ func newAlbumShareGateway(t *testing.T) (*Server, string, string, string, string
 	// 计数式 ID 生成器：每个用户分配确定且唯一的 uid，便于断言。
 	idSeq := 0
 	authSvc, err := auth.New(
-		auth.NewStoreBridge(store), "album-share-test-secret", 3600, config.SignupFirst,
+		auth.NewStoreBridge(store), "album-share-test-secret", 3600, config.SignupOpen,
 		withCountingIDGen(&idSeq),
 		auth.WithClock(func() time.Time { return time.Now().Add(time.Hour) }),
 	)
@@ -167,18 +167,18 @@ func TestAlbumShareCreateSuccess(t *testing.T) {
 }
 
 func TestAlbumShareCreateNoAuth(t *testing.T) {
-	srv, aliceToken, _, _, _ := newAlbumShareGateway(t)
+	srv, aliceToken, _, _, _, _ := newAlbumShareGateway(t)
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 无 token → authMiddleware 返回 401。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "username": "bob"})
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/share", "", body))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/share", "", body))
 	if code != http.StatusUnauthorized {
 		t.Fatalf("share without token: want 401, got %d", code)
 	}
 }
 
 func TestAlbumShareCreateNonOwnerRejected(t *testing.T) {
-	srv, aliceToken, _, bobToken, _ := newAlbumShareGateway(t)
+	srv, aliceToken, _, bobToken, _, _ := newAlbumShareGateway(t)
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// bob 不是所有者，试图共享 alice 的相册 → 404（不区分不存在与无权）。
 	code, _ := shareAlbumViaAPI(t, srv, bobToken, albumID, "alice")
@@ -188,7 +188,7 @@ func TestAlbumShareCreateNonOwnerRejected(t *testing.T) {
 }
 
 func TestAlbumShareCreateRejectsSelfShare(t *testing.T) {
-	srv, aliceToken, _, _, _ := newAlbumShareGateway(t)
+	srv, aliceToken, _, _, _, _ := newAlbumShareGateway(t)
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// alice 试图把相册共享给自己 → 400。
 	code, _ := shareAlbumViaAPI(t, srv, aliceToken, albumID, "alice")
@@ -198,7 +198,7 @@ func TestAlbumShareCreateRejectsSelfShare(t *testing.T) {
 }
 
 func TestAlbumShareCreateUnknownUser(t *testing.T) {
-	srv, aliceToken, _, _, _ := newAlbumShareGateway(t)
+	srv, aliceToken, _, _, _, _ := newAlbumShareGateway(t)
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 共享给不存在的用户 → 404。
 	code, _ := shareAlbumViaAPI(t, srv, aliceToken, albumID, "nobody")
@@ -208,7 +208,7 @@ func TestAlbumShareCreateUnknownUser(t *testing.T) {
 }
 
 func TestAlbumShareCreateIdempotent(t *testing.T) {
-	srv, aliceToken, _, _, _ := newAlbumShareGateway(t)
+	srv, aliceToken, _, _, _, _ := newAlbumShareGateway(t)
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 第一次共享 → 200 already_shared=false。
 	code, resp := shareAlbumViaAPI(t, srv, aliceToken, albumID, "bob")
@@ -227,7 +227,7 @@ func TestAlbumShareCreateByUserID(t *testing.T) {
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 用 user_id 而非 username 共享 → 成功。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "user_id": bobUID})
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/share", aliceToken, body))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/share", aliceToken, body))
 	if code != http.StatusOK {
 		t.Fatalf("share by user_id: want 200, got %d body=%v", code, resp)
 	}
@@ -242,13 +242,13 @@ func TestAlbumShareCreateMissingFields(t *testing.T) {
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 缺 album_id → 400。
 	body, _ := json.Marshal(map[string]any{"username": "bob"})
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/share", aliceToken, body))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/share", aliceToken, body))
 	if code != http.StatusBadRequest {
 		t.Fatalf("share missing album_id: want 400, got %d", code)
 	}
 	// 缺 username/user_id → 400。
 	body2, _ := json.Marshal(map[string]any{"album_id": albumID})
-	code2, _ := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/share", aliceToken, body2))
+	code2, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/share", aliceToken, body2))
 	if code2 != http.StatusBadRequest {
 		t.Fatalf("share missing target: want 400, got %d", code2)
 	}
@@ -263,12 +263,12 @@ func TestAlbumShareDeleteByOwner(t *testing.T) {
 
 	// 撤销共享。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "username": "bob"})
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodDelete, "/api/media/album/share", aliceToken, body))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodDelete, "/api/media/album/share", aliceToken, body))
 	if code != http.StatusOK {
 		t.Fatalf("unshare: want 200, got %d body=%v", code, resp)
 	}
 	// 撤销后 bob 不再能 GET 相册详情 → 404。
-	code2, _ := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
+	code2, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
 	if code2 != http.StatusNotFound {
 		t.Fatalf("bob GET after unshare: want 404, got %d", code2)
 	}
@@ -280,7 +280,7 @@ func TestAlbumShareDeleteNonOwnerRejected(t *testing.T) {
 	_, _ = shareAlbumViaAPI(t, srv, aliceToken, albumID, "bob")
 	// bob（被共享者）试图撤销共享 → 404（仅所有者可撤销）。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "username": "bob"})
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodDelete, "/api/media/album/share", bobToken, body))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodDelete, "/api/media/album/share", bobToken, body))
 	if code != http.StatusNotFound {
 		t.Fatalf("unshare by non-owner: want 404, got %d", code)
 	}
@@ -291,7 +291,7 @@ func TestAlbumShareDeleteNotFound(t *testing.T) {
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 撤销一个从未存在的共享关系 → 404。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "username": "bob"})
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodDelete, "/api/media/album/share", aliceToken, body))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodDelete, "/api/media/album/share", aliceToken, body))
 	if code != http.StatusNotFound {
 		t.Fatalf("unshare nonexistent: want 404, got %d", code)
 	}
@@ -306,7 +306,7 @@ func TestAlbumsSharedList(t *testing.T) {
 	_, _ = shareAlbumViaAPI(t, srv, aliceToken, album1, "bob")
 	_, _ = shareAlbumViaAPI(t, srv, aliceToken, album2, "bob")
 
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
 	if code != http.StatusOK {
 		t.Fatalf("list shared: want 200, got %d body=%v", code, resp)
 	}
@@ -327,7 +327,7 @@ func TestAlbumsSharedList(t *testing.T) {
 func TestAlbumsSharedListEmpty(t *testing.T) {
 	srv, _, _, bobToken, _, _ := newAlbumShareGateway(t)
 	// bob 无任何被共享相册 → 200 + 空列表。
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
 	if code != http.StatusOK {
 		t.Fatalf("list shared empty: want 200, got %d", code)
 	}
@@ -339,7 +339,7 @@ func TestAlbumsSharedListEmpty(t *testing.T) {
 
 func TestAlbumsSharedListNoAuth(t *testing.T) {
 	srv, _, _, _, _, _ := newAlbumShareGateway(t)
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/albums/shared", "", nil))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/albums/shared", "", nil))
 	if code != http.StatusUnauthorized {
 		t.Fatalf("list shared no auth: want 401, got %d", code)
 	}
@@ -350,7 +350,7 @@ func TestAlbumsSharedListExcludesOwnAlbums(t *testing.T) {
 	// alice 创建相册但不共享给 bob。
 	createAlbumViaAPI(t, srv, aliceToken, "Private")
 	// bob 查共享列表 → 空（alice 的相册未共享给 bob）。
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
 	if code != http.StatusOK {
 		t.Fatalf("list shared: want 200, got %d", code)
 	}
@@ -368,7 +368,7 @@ func TestShareeCanViewAlbumDetail(t *testing.T) {
 	_, _ = shareAlbumViaAPI(t, srv, aliceToken, albumID, "bob")
 
 	// bob 以被共享者身份 GET 相册详情 → 200。
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
 	if code != http.StatusOK {
 		t.Fatalf("sharee view: want 200, got %d body=%v", code, resp)
 	}
@@ -387,12 +387,12 @@ func TestShareeCanAddMediaToAlbum(t *testing.T) {
 
 	// bob 向相册添加一个 media_id → 200（被共享者有添加权限）。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "media_id": "bob-media-1"})
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/add", bobToken, body))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/add", bobToken, body))
 	if code != http.StatusOK {
 		t.Fatalf("sharee add: want 200, got %d body=%v", code, resp)
 	}
 	// 验证媒体确实加入了相册：alice（所有者）GET 详情应包含该 media_id。
-	code2, resp2 := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/album/"+albumID, aliceToken, nil))
+	code2, resp2 := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/album/"+albumID, aliceToken, nil))
 	if code2 != http.StatusOK {
 		t.Fatalf("owner view after sharee add: want 200, got %d", code2)
 	}
@@ -414,7 +414,7 @@ func TestNonShareeCannotViewAlbum(t *testing.T) {
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 不共享给 bob。
 	// bob 访问 → 404（无权，不区分不存在与无权）。
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/album/"+albumID, bobToken, nil))
 	if code != http.StatusNotFound {
 		t.Fatalf("non-sharee view: want 404, got %d", code)
 	}
@@ -425,7 +425,7 @@ func TestNonShareeCannotAddMedia(t *testing.T) {
 	albumID := createAlbumViaAPI(t, srv, aliceToken, "Trip")
 	// 不共享给 bob；bob 试图添加 → 404。
 	body, _ := json.Marshal(map[string]any{"album_id": albumID, "media_id": "bob-media-1"})
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/add", bobToken, body))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/add", bobToken, body))
 	if code != http.StatusNotFound {
 		t.Fatalf("non-sharee add: want 404, got %d", code)
 	}
@@ -439,13 +439,13 @@ func TestDeleteAlbumCascadesShareCleanup(t *testing.T) {
 	_, _ = shareAlbumViaAPI(t, srv, aliceToken, albumID, "bob")
 
 	// alice 删除相册 → 200。
-	code, _ := doAlbumShare(t, srv, authedReq(http.MethodDelete, "/api/media/album/"+albumID, aliceToken, nil))
+	code, _ := doAlbumShare(t, srv, authedAlbumReq(http.MethodDelete, "/api/media/album/"+albumID, aliceToken, nil))
 	if code != http.StatusOK {
 		t.Fatalf("delete album: want 200, got %d", code)
 	}
 	// bob 查共享列表 → 不再包含已删除相册（悬空共享已被级联清理，或即便未清理也因
 	// 相册不存在而被 list 跳过）。两种实现下结果一致：空列表。
-	code2, resp2 := doAlbumShare(t, srv, authedReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
+	code2, resp2 := doAlbumShare(t, srv, authedAlbumReq(http.MethodGet, "/api/media/albums/shared", bobToken, nil))
 	if code2 != http.StatusOK {
 		t.Fatalf("list shared after album delete: want 200, got %d", code2)
 	}
@@ -462,7 +462,7 @@ func TestAlbumShareRouteNotCapturedByResource(t *testing.T) {
 	// POST /api/media/album/share 缺 body → 经 handleAlbumShare（而非 handleAlbumResource）。
 	// handleAlbumShare 解析空 body → 400 invalid body；handleAlbumResource 会因 albumID="share"
 	// 走 GET/DELETE 分支并返回不同错误。此处验证走的是 share handler（400 invalid body）。
-	code, resp := doAlbumShare(t, srv, authedReq(http.MethodPost, "/api/media/album/share", aliceToken, []byte("{}")))
+	code, resp := doAlbumShare(t, srv, authedAlbumReq(http.MethodPost, "/api/media/album/share", aliceToken, []byte("{}")))
 	// 空 body {} 缺 album_id → 400 album_id is required（证明走 share handler）。
 	if code != http.StatusBadRequest {
 		t.Fatalf("POST /api/media/album/share routing: want 400, got %d body=%v", code, resp)
