@@ -75,11 +75,8 @@ actual fun PlatformRnView(
         val surface = host.createSurface(app, componentName, Bundle.EMPTY)
         surfaceState = surface
 
-        // 启动 Surface 渲染 + attach 到 Host
+        // 启动 Surface 渲染（start() 内部会自动 attach 到 host）
         surface.start()
-        if (surface is ReactSurfaceImpl) {
-            surface.attach(host)
-        }
     }
 
     // 嵌入 ReactSurfaceView 到 Compose
