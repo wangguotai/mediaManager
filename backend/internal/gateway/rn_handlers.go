@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -47,6 +49,8 @@ type rnBundleView struct {
 	Version     string `json:"version"`
 	Description string `json:"description"`
 	Entry       string `json:"entry"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
 }
 
 // rnManifestResponse 是 /api/rn/manifest 的响应体。
@@ -133,11 +137,24 @@ func (s *Server) handleRNManifest(w http.ResponseWriter, r *http.Request) {
 		if m.EntryFile == "" {
 			m.EntryFile = "index.android.bundle"
 		}
+		// V7：计算 bundle 文件大小 + SHA256 校验和
+		bundlePath := filepath.Join(dir, e.Name(), m.EntryFile)
+		var fileSize int64
+		var fileSHA string
+		if info, err := os.Stat(bundlePath); err == nil {
+			fileSize = info.Size()
+			if data, err := os.ReadFile(bundlePath); err == nil {
+				h := sha256.Sum256(data)
+				fileSHA = hex.EncodeToString(h[:])
+			}
+		}
 		bundles = append(bundles, rnBundleView{
 			Name:        m.Name,
 			Version:     m.Version,
 			Description: m.Description,
 			Entry:       m.EntryFile,
+			Size:        fileSize,
+			SHA256:      fileSHA,
 		})
 	}
 	// 按 name 排序，稳定输出顺序（便于人工 diff 与测试断言）。
