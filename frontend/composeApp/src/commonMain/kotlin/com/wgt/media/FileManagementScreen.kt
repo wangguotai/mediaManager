@@ -215,7 +215,9 @@ fun FileManagementScreen(
             TopAppBar(
                 title = {
                     Text(
-                        if (inSelectionMode) "已选择 ${selectedIds.size} 项" else "文件管理",
+                        if (inSelectionMode) "已选择 ${selectedIds.size} 项"
+                        else if (mediaList.isNotEmpty()) "文件管理 (${mediaList.size} 项)"
+                        else "文件管理",
                         fontWeight = FontWeight.Bold
                     )
                 },
