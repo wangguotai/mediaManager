@@ -1,9 +1,11 @@
 package com.wgt.feature.gallery
 
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import com.wgt.platform.AppContext
 import com.wgt.platform.applicationContext
@@ -216,6 +218,95 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
             deleted
         }
     }
+
+    /**
+     * 把字节流写入系统相册 —— 按 mimeType 区分图片 / 视频 MediaStore 集合。
+     *
+     * Android 10+（scoped storage）下用 RELATIVE_PATH（如 Pictures/、Movies/）；
+     * Android 9 及以下用 DATA 绝对路径。统一用 ContentValues + insert + openOutputStream，
+     * 写完后不再 createRequest（新增条目无需用户授权，仅删除才需）。
+     *
+     * 注意：新写入的文件需通过 [MediaStore.setIncludePending] 等机制立即可见，但本方法
+     * 仅返回写入是否成功，调用方（批量下载）无需立即查询确认。
+     *
+     * @return true 写入成功，false 写入失败
+     */
+    override suspend fun saveMediaToGallery(data: ByteArray, filename: String, mimeType: String): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                val isVideo = mimeType.startsWith("video/")
+                val collection = if (isVideo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else if (isVideo) {
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+
+                val displayName = sanitizeDisplayName(filename, mimeType)
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    // scoped storage（API 29+）用子目录；旧版用绝对路径 DATA。
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val relPath = if (isVideo) "${Environment.DIRECTORY_MOVIES}/media-manager" else "${Environment.DIRECTORY_PICTURES}/media-manager"
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    } else {
+                        val dir = if (isVideo) {
+                            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "media-manager")
+                        } else {
+                            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "media-manager")
+                        }
+                        if (!dir.exists()) dir.mkdirs()
+                        put(MediaStore.MediaColumns.DATA, File(dir, displayName).absolutePath)
+                    }
+                }
+
+                val uri = context.contentResolver.insert(collection, values)
+                    ?: return@withContext false
+
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(data)
+                    out.flush()
+                } ?: run {
+                    // 插入成功但打不开输出流，清理刚插入的空记录。
+                    context.contentResolver.delete(uri, null, null)
+                    return@withContext false
+                }
+
+                // scoped storage 下标记 IS_PENDING=0 让其对其他应用可见。
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val updateValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                    context.contentResolver.update(uri, updateValues, null, null)
+                }
+                true
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+    /**
+     * 规范化展示名：确保带正确扩展名。
+     * 若 filename 已含合理扩展名则直接用；否则按 mimeType 补默认扩展名。
+     */
+    private fun sanitizeDisplayName(filename: String, mimeType: String): String {
+        val lower = filename.lowercase()
+        return when {
+            mimeType.startsWith("video/") && !lower.endsWith(".mp4") && !lower.endsWith(".mov") ->
+                "${filename}.mp4"
+            mimeType == "image/jpeg" && !lower.endsWith(".jpg") && !lower.endsWith(".jpeg") ->
+                "${filename}.jpg"
+            mimeType == "image/png" && !lower.endsWith(".png") ->
+                "${filename}.png"
+            else -> filename
+        }
+    }
+
 
     /** 把 mediaId 列表转为 MediaStore content uri 列表，跳过无法解析为 Long 的 id。 */
     private fun mediaListToUris(mediaIds: List<String>): List<Uri> {

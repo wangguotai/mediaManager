@@ -28,6 +28,15 @@ private const val MAX_THUMBNAIL_CACHE_ENTRIES = 60
 private const val MAX_FULLIMAGE_CACHE_ENTRIES = 10
 
 /**
+ * 原图降采样长边像素上限。
+ *
+ * 大图全尺寸解码（如 4000×3000 → ~48MB Bitmap）是 MIUI OOM kill 的根因。
+ * [loadFullImage] 经 [decodeImageBitmapDownsampled] 把长边限制在此值（2048px），
+ * 像素内存降至 ~16MB，足以预览且控内存防 OOM。注释此常量使降采样阈值可追溯。
+ */
+private const val FULL_IMAGE_MAX_DIMENSION = 2048
+
+/**
  * 从后端 REST 端点加载并解码图片 —— 供"网盘图片" / "已上传" Tab 使用。
  *
  * 与 [loadThumbnail] / [loadFullImage]（走平台相册 MediaStore/PHAsset）互补：
@@ -133,7 +142,7 @@ object BackendImageLoader {
         if (cached != null) return cached
         return try {
             val bytes = MediaService.getMediaStream(mediaId)
-            val decoded = decodeImageBitmap(bytes)
+            val decoded = decodeImageBitmapDownsampled(bytes, FULL_IMAGE_MAX_DIMENSION)
             if (decoded != null) cacheLock.withLock { fullImageCache.putBounded(mediaId, decoded, MAX_FULLIMAGE_CACHE_ENTRIES) }
             decoded
         } catch (e: Exception) {

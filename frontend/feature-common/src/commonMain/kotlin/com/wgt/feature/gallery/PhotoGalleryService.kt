@@ -49,6 +49,20 @@ internal interface PhotoGalleryService {
      * @return 成功删除的数量
      */
     suspend fun deleteMedia(mediaIds: List<String>): Int
+
+    /**
+     * 把字节流写入系统相册（批量下载场景：云端字节 → 本地相册）。
+     *
+     * 按 mimeType 区分图片 / 视频：Android 走 MediaStore.Images 或 MediaStore.Video 的
+     * content uri + OutputStream；iOS 走 PHAssetCreationRequest。调用方负责传入正确的
+     * mimeType（图片通常 image/jpeg、image/png 等；视频通常 video/mp4）。
+     *
+     * @param data     原始字节流
+     * @param filename 展示名（不含扩展名亦可，mimeType 决定实际写入位置）
+     * @param mimeType 标准 MIME 类型，决定图片 / 视频集合
+     * @return true 写入成功，false 失败
+     */
+    suspend fun saveMediaToGallery(data: ByteArray, filename: String, mimeType: String): Boolean
 }
 
 /**

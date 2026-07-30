@@ -88,6 +88,18 @@ object SettingsKeys {
      * updated_at，冷启动续拉增量；0 表示从未同步。见 [SettingsState.syncCursor]。
      */
     const val SYNC_CURSOR = "sync_cursor"
+
+    /**
+     * 仅 WiFi 备份开关（V6 §2.1）。"true"时自动备份仅在 WiFi 网络下执行，移动数据下暂停。
+     * 默认 "true"（对标小米「仅 WiFi 备份」默认策略，避免用户流量被偷跑）。
+     */
+    const val BACKUP_WIFI_ONLY = "backup_wifi_only"
+
+    /**
+     * 仅充电备份开关（V6 §2.1）。"true"时自动备份仅在充电状态下执行，电池供电时暂停。
+     * 默认 "false"（不强制充电，WiFi 下即可备份；用户可按需开启省电）。
+     */
+    const val BACKUP_CHARGING_ONLY = "backup_charging_only"
 }
 
 /**

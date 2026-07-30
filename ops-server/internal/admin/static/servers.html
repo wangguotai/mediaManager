@@ -28,6 +28,18 @@
   .empty{color:var(--muted);font-size:13px;padding:10px 0}
   .err{color:var(--err);font-size:13px;margin-bottom:12px}
   button.refresh{padding:8px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;cursor:pointer}
+  /* 写操作表单 */
+  .form-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+  .form-row input,.form-row select{padding:8px 10px;border-radius:6px;border:1px solid #2c333d;background:#12161c;color:var(--fg);font-size:13px}
+  .form-row input{flex:1;min-width:200px}
+  .btn-primary{padding:8px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;cursor:pointer}
+  .btn-primary:disabled{opacity:.6;cursor:default}
+  .btn-sm{padding:3px 10px;border:0;border-radius:5px;background:#2c333d;color:var(--fg);font-size:12px;cursor:pointer;margin-left:6px}
+  .btn-sm:hover{background:#3a424d}
+  .result{margin-top:10px;padding:10px;border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+  .result.ok{background:rgba(62,199,122,.1);color:var(--ok);border:1px solid rgba(62,199,122,.3)}
+  .result.err{background:rgba(239,91,91,.1);color:var(--err);border:1px solid rgba(239,91,91,.3)}
+  .tok-cell{max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -45,6 +57,18 @@
   <h2>受管服务端在线状态</h2>
   <p class="sub">注册过的运营服务端实例。在线判定基于 last_seen 心跳新鲜度（阈值 90s）。</p>
   <div class="err" id="err"></div>
+
+  <!-- 手动登记 server 写操作（PRD §2.8） -->
+  <div class="card">
+    <h3 style="margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">手动登记受管服务端</h3>
+    <div class="form-row">
+      <input id="srvName" type="text" placeholder="server 名称（可空，如 home-nas）" autocomplete="off">
+      <button class="btn-primary" id="btnRegister">登记并获取 token</button>
+    </div>
+    <div id="regResult"></div>
+    <div class="legend" style="margin-top:8px">注册成功后返回 server_id 与一次性明文 server_token（仅此一次，请妥善保存）。</div>
+  </div>
+
   <div class="card">
     <div class="legend"><button class="refresh" id="btnRefresh">刷新</button> <span style="margin-left:10px">在线：心跳 < 90s · 超时：心跳 ≥ 90s · 离线：无心跳或注册未上线</span></div>
     <div id="table"></div>
@@ -58,17 +82,63 @@
     e.preventDefault(); localStorage.removeItem("ops_token"); location.href="index.html";
   });
   var errEl = document.getElementById("err");
-  function api(path){
+  // apiGet: 仅 GET 带鉴权。
+  function apiGet(path){
     return fetch(path,{headers:{"Authorization":"Bearer "+tok}})
       .then(function(r){ if(r.status===401){location.href="index.html";throw new Error("unauth");} return r.json(); });
   }
+  // apiPost: POST JSON 带鉴权（写操作专用）。
+  function apiPost(path, body){
+    return fetch(path,{
+      method:"POST",
+      headers:{"Authorization":"Bearer "+tok,"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    }).then(function(r){ if(r.status===401){location.href="index.html";throw new Error("unauth");} return r.json(); });
+  }
   function fmtTime(s){ if(!s) return "—"; var d=new Date(s); return isNaN(d)?s:d.toLocaleString(); }
   function fmtAgo(s){ if(!s) return "—"; var d=new Date(s); if(isNaN(d)) return s; var sec=(Date.now()-d.getTime())/1000; if(sec<0) return "刚刚"; if(sec<60) return Math.floor(sec)+"s 前"; if(sec<3600) return Math.floor(sec/60)+"m 前"; if(sec<86400) return Math.floor(sec/3600)+"h 前"; return Math.floor(sec/86400)+"d 前"; }
-  function escapeHtml(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+  function shortToken(s){ if(!s) return "—"; return s.slice(0,10)+"…"+s.slice(-4); }
 
+  // 复制文本到剪贴板（navigator.clipboard 优先，降级 execCommand）。
+  function copyText(text, btn){
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){ flashBtn(btn,"已复制"); }, function(){ fallbackCopy(text); flashBtn(btn,"已复制"); });
+    } else { fallbackCopy(text); flashBtn(btn,"已复制"); }
+  }
+  function fallbackCopy(text){
+    var ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta); ta.select();
+    try{document.execCommand("copy");}catch(e){} document.body.removeChild(ta);
+  }
+  function flashBtn(btn,txt){ var o=btn.textContent; btn.textContent=txt; setTimeout(function(){btn.textContent=o;},1200); }
+
+  // 缓存最近一次注册返回的明文 token，便于"复制 token"。仅驻留内存，刷新页即失。
+  var recentTokens = {}; // server_id -> plain token
+
+  // ---- 手动登记 server ----
+  document.getElementById("btnRegister").addEventListener("click", function(){
+    var btn=this; btn.disabled=true; btn.textContent="登记中…";
+    var body = { name: document.getElementById("srvName").value.trim() };
+    apiPost("api/server/register", body).then(function(j){
+      var box=document.getElementById("regResult");
+      if (j && j.error){ box.innerHTML='<div class="result err">登记失败：'+escapeHtml(j.error)+'</div>'; return; }
+      if (j && j.server_id){
+        recentTokens[j.server_id] = j.server_token;
+        box.innerHTML='<div class="result ok">✓ 登记成功<br>server_id：<b>'+escapeHtml(j.server_id)+'</b>'+
+          '<br>server_token：<b>'+escapeHtml(j.server_token)+'</b>'+
+          '<br><button class="btn-sm" id="copyNew">复制 token</button> · 请立即保存，关闭后不可再读</div>';
+        document.getElementById("copyNew").addEventListener("click", function(){
+          copyText(j.server_token, this);
+        });
+      }
+    }).catch(function(e){ if(e.message!=="unauth") document.getElementById("regResult").innerHTML='<div class="result err">网络错误：'+escapeHtml(e.message)+'</div>'; })
+    .finally(function(){ btn.disabled=false; btn.textContent="登记并获取 token"; load(); });
+  });
+
+  // ---- 列表渲染 ----
   function load(){
     errEl.textContent = "";
-    api("api/servers").then(function(j){
+    apiGet("api/servers").then(function(j){
       var list = j.servers || [];
       var box = document.getElementById("table");
       if (!list.length){ box.innerHTML = '<div class="empty">尚无注册的服务端</div>'; return; }
@@ -78,14 +148,23 @@
         else if (s.status === "stale")    { cls="warn"; txt="心跳超时"; }
         else                              { cls="off";  txt="离线"; }
         var p = '<span class="pill '+cls+'">'+txt+'</span>';
+        // token 列：优先用本次注册缓存的明文，否则只展示 hash 指纹（DB 仅存 hash，明文不可读）。
+        var plain = recentTokens[s.id];
+        var tokShow = plain ? escapeHtml(plain) : '<span style="color:var(--muted)">'+escapeHtml(shortToken(s.token_hash||s.fingerprint||""))+'</span>';
+        var copyBtn = plain ? '<button class="btn-sm" data-copy="'+escapeHtml(plain)+'">复制 token</button>' : '';
         return '<tr><td class="mono">'+escapeHtml(s.id)+'</td>'+
           '<td>'+escapeHtml(s.name||"(未命名)")+'</td>'+
           '<td>'+p+'</td>'+
+          '<td class="mono tok-cell" title="'+(plain?escapeHtml(plain):'只有注册时可看到完整 token')+'">'+tokShow+copyBtn+'</td>'+
           '<td>'+fmtAgo(s.last_seen)+'</td>'+
           '<td>'+fmtTime(s.created_at)+'</td>'+
           '<td>'+(s.device_count ?? "0")+'</td></tr>';
       }).join("");
-      box.innerHTML = '<table><thead><tr><th class="mono">Server ID</th><th>名称</th><th>状态</th><th>最近心跳</th><th>注册时间</th><th>设备数</th></tr></thead><tbody>'+body+'</tbody></table>';
+      box.innerHTML = '<table><thead><tr><th class="mono">Server ID</th><th>名称</th><th>状态</th><th>Token</th><th>最近心跳</th><th>注册时间</th><th>设备数</th></tr></thead><tbody>'+body+'</tbody></table>';
+      // 绑定复制按钮
+      Array.prototype.forEach.call(box.querySelectorAll("button[data-copy]"), function(b){
+        b.addEventListener("click", function(){ copyText(b.getAttribute("data-copy"), b); });
+      });
     }).catch(function(e){ if(e.message!=="unauth") errEl.textContent="加载失败："+e.message; });
   }
   document.getElementById("btnRefresh").addEventListener("click", load);

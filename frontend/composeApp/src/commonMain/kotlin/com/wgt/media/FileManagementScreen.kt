@@ -37,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -50,11 +51,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.wgt.common.util.formatBytesToMB
+import com.wgt.architecture.manager.claim.feature
+import com.wgt.architecture.manager.manager
+import com.wgt.feature.gallery.gallery
 import com.wgt.feature.media.MediaService
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
 import mediamanager.composeapp.generated.resources.ic_close
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import media.MediaMetadata
 import media.MediaType
 import org.jetbrains.compose.resources.ExperimentalResourceApi
@@ -97,6 +102,13 @@ fun FileManagementScreen(
     val inSelectionMode = selectedIds.isNotEmpty()
     var isDeleting by remember { mutableStateOf(false) }
     var snack by remember { mutableStateOf<String?>(null) }
+
+    // —— 批量下载：把选中的云端媒体字节流写入本地相册 ——
+    // galleryFeature 直接从全局 manager 获取（与 MediaViewModel 一致），
+    // 避免给 viewModel 暴露 galleryFeature 造成职责扩散。
+    val galleryFeature = remember { manager.feature.gallery }
+    val downloadScope = rememberCoroutineScope()
+    var isDownloading by remember { mutableStateOf(false) }
 
     // —— 拉取云端变更 ——
     LaunchedEffect(Unit) {
@@ -154,6 +166,30 @@ fun FileManagementScreen(
         viewModel.deleteSelectedMedia()
     }
 
+    /**
+     * 批量下载：遍历选中项，经 [BackendImageLoader.loadFullImageBytes] 拉取云端原始字节，
+     * 调 [galleryFeature.saveMediaToGallery] 写入本地相册。
+     *
+     * 在 downloadScope（rememberCoroutineScope，跟随 Composable 生命周期）中执行；
+     * 逐个串行下载（不做并发，避免大文件并发下载导致内存峰值过高 / 网络拥塞）。
+     * 完成后以 snack 提示成功数量，不清除选中态（用户可继续删除等操作）。
+     */
+    fun downloadSelected() {
+        if (selectedIds.isEmpty() || isDownloading) return
+        val toDownload = mediaList.filter { it.id in selectedIds }
+        isDownloading = true
+        downloadScope.launch {
+            var success = 0
+            for (media in toDownload) {
+                val bytes = BackendImageLoader.loadFullImageBytes(media.id) ?: continue
+                val mimeType = detectMimeType(media)
+                if (galleryFeature.saveMediaToGallery(bytes, media.filename, mimeType)) success++
+            }
+            isDownloading = false
+            snack = "已下载 $success 项"
+        }
+    }
+
     LaunchedEffect(Unit) {
         snapshotFlow { viewModel.errorMessage }
             .distinctUntilChanged()
@@ -202,12 +238,18 @@ fun FileManagementScreen(
                                 selectedIds.clear()
                                 viewModel.deselectAll()
                             },
-                            enabled = !isDeleting
+                            enabled = !isDeleting && !isDownloading
                         ) { Text("取消") }
+                        Spacer(Modifier.width(4.dp))
+                        // 批量下载：下载中禁用删除；删除中禁用下载。二者互斥避免状态竞争。
+                        TextButton(
+                            onClick = { downloadSelected() },
+                            enabled = !isDeleting && !isDownloading
+                        ) { Text(if (isDownloading) "下载中…" else "下载") }
                         Spacer(Modifier.width(4.dp))
                         TextButton(
                             onClick = { deleteSelected() },
-                            enabled = !isDeleting
+                            enabled = !isDeleting && !isDownloading
                         ) { Text(if (isDeleting) "删除中…" else "删除") }
                     } else if (mediaList.isNotEmpty()) {
                         TextButton(onClick = {
@@ -492,6 +534,24 @@ private fun typeLabel(type: MediaType): String = when (type) {
     MediaType.IMAGE -> "图片"
     MediaType.LIVE_PHOTO -> "动态照片"
     MediaType.VIDEO -> "视频"
+}
+
+/**
+ * 按 media.type 和 filename 扩展名推断 MIME 类型，用于 [saveMediaToGallery] 写入相册。
+ * 视频统一按 video/mp4（云端存储格式惯例）；图片按扩展名细分，缺省 image/jpeg。
+ * Live Photo 在此按图片主帧处理（仅写图，不写配对视频，保持批量下载简单）。
+ */
+private fun detectMimeType(media: MediaMetadata): String {
+    if (media.type == MediaType.VIDEO) return "video/mp4"
+    val name = media.filename.lowercase()
+    return when {
+        name.endsWith(".png") -> "image/png"
+        name.endsWith(".heic") -> "image/heic"
+        name.endsWith(".heif") -> "image/heif"
+        name.endsWith(".webp") -> "image/webp"
+        name.endsWith(".gif") -> "image/gif"
+        else -> "image/jpeg"
+    }
 }
 
 /** 类型 → 圆点首字母占位。 */

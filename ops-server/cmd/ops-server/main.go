@@ -127,8 +127,8 @@ func run() error {
 		return fmt.Errorf("init opapi: %w", err)
 	}
 
-	// admin 前端 + API。
-	adminH, err := admin.New(admin.Deps{Auther: auther, Store: store})
+	// admin 前端 + API。注入 relay 以支持 POST /admin/api/session/close 主动断开会话。
+	adminH, err := admin.New(admin.Deps{Auther: auther, Store: store, Relay: relaySvc})
 	if err != nil {
 		return fmt.Errorf("init admin: %w", err)
 	}

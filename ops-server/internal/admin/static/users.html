@@ -28,6 +28,18 @@
   .pill.off{background:rgba(239,91,91,.15);color:var(--err)}
   .empty{color:var(--muted);font-size:13px;padding:10px 0}
   .err{color:var(--err);font-size:13px;margin-bottom:12px}
+  /* 写操作样式（PRD §2.8）*/
+  .card{margin-bottom:18px}
+  .card h3{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .form-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+  .form-row select,.form-row input{padding:8px 10px;border-radius:6px;border:1px solid #2c333d;background:#12161c;color:var(--fg);font-size:13px}
+  .form-row select{flex:1;min-width:160px}
+  .btn-primary{padding:8px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:13px;cursor:pointer}
+  .btn-primary:disabled{opacity:.6;cursor:default}
+  .result{margin-top:8px;padding:8px;border-radius:6px;font-size:12px}
+  .result.ok{background:rgba(62,199,122,.1);color:var(--ok);border:1px solid rgba(62,199,122,.3)}
+  .result.err{background:rgba(239,91,91,.1);color:var(--err);border:1px solid rgba(239,91,91,.3)}
+  td .pill + small{color:var(--muted);font-size:11px;margin-left:6px}
 </style>
 </head>
 <body>
@@ -45,6 +57,19 @@
   <h2>终端用户（设备）</h2>
   <p class="sub">受管服务端名下登记的设备。按 server 隔离，online 由心跳/WS 连接态驱动。</p>
   <div class="err" id="err"></div>
+
+  <!-- 运营账号绑定 server 写操作（PRD §2.8）-->
+  <div class="card">
+    <h3>运营账号绑定受管服务端</h3>
+    <div class="legend" style="color:var(--muted);font-size:12px;margin-bottom:10px">选择运营账号 → 选择受管服务端 → 提交绑定（POST /api/user/bind-server）。空选项=解绑。</div>
+    <div class="form-row">
+      <select id="bindAccount"><option value="">选择运营账号…</option></select>
+      <select id="bindServer"><option value="">（解绑）</option></select>
+      <button class="btn-primary" id="btnBind">绑定</button>
+    </div>
+    <div id="bindResult"></div>
+  </div>
+
   <div class="card">
     <div class="bar">
       <select id="fServer"><option value="">全部服务端</option></select>

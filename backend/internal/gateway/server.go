@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,11 +52,22 @@ type Server struct {
 	authSvc    *auth.AuthService // 为 nil 时认证中间件放行所有请求（仅开发/测试用）
 	store      *storage.Store    // 元数据库；为 nil 时 sync/device/usage/dedup 端点返回 503
 
+	// metrics 是进程级可观测指标收集器（请求计数/延迟/上传字节/sync 拉取量等），
+	// 供 /metrics 端点与 accessLog 中间件写入。NewServer 中初始化。
+	metrics *metricsRegistry
+	// slogLevel 控制结构化日志级别（默认 Info）。NewServer 初始化 initLogger 用。
+	slogLevel slog.Level
+
 	// healthz 降频缓存：/healthz 每次请求都跑 countAllUserMedia 全量目录扫描会造成
 	// IO 放大，且该端点无认证可被外部刷。缓存统计结果（30s TTL），过期才重扫。
 	mediaCountMu        sync.Mutex
 	mediaCountCache     int
 	mediaCountCachedAt  time.Time
+
+	// loginLimiter 是 /api/auth/login 的 IP+username 滑动窗口限速器（PRD §2.7）。
+	// 防暴力撞库：每 (ip,username) 每分钟最多 loginRateMax 次，超限返回 429。
+	// 为 nil 时（未配置认证的纯测试 server）跳过限速，保持既有测试兼容。
+	loginLimiter *loginRateLimiter
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -78,6 +90,17 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 		userDirs:   userDirs,
 		startTime:  time.Now(),
 		authSvc:    authSvc,
+		// 可观测性：初始化结构化日志（slog，JSON handler）与进程级指标收集器。
+		// slogLevel 默认 Info；测试/NewServer 可覆盖。metrics 始终非空，
+		// 保证 accessLog 与 /metrics 在任何部署形态下都能正常工作。
+		slogLevel: slog.LevelInfo,
+		metrics:   newMetricsRegistry(),
+	}
+	initLogger(s.slogLevel)
+	// 登录暴力限速器：authSvc 配置时启用，后台 goroutine 周期清理过期条目。
+	// authSvc 为 nil（纯测试/无认证开发场景）时不创建，handleAuthLogin 据此跳过。
+	if authSvc != nil {
+		s.loginLimiter = NewLoginRateLimiter()
 	}
 	s.registerRoutes()
 	return s
@@ -131,8 +154,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/device/register", s.handleDeviceRegister)
 	s.mux.HandleFunc("/api/device/list", s.handleDeviceList)
 
-	// Stats: 缩略图缓存命中率等可观测性指标。
+	// Stats: 缩略图缓存命中率等可观测性指标（JSON，兼容旧前端，保留）。
 	s.mux.HandleFunc("/api/stats", s.handleStats)
+
+	// Metrics: Prometheus 文本格式指标暴露（PRD §2.6）。无认证（authMiddleware 豁免，
+	// 与 /healthz 一致），供 Prometheus 抓取。与 /api/stats 并存——前者面向采集系统，
+	// 后者面向人眼/前端。Status 类指标、计数器、延迟桶见 metrics.go。
+	s.mux.HandleFunc("/metrics", s.handleMetrics)
 
 	// Health
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
@@ -143,8 +171,19 @@ func (s *Server) OpenClawBaseURL() string { return s.openClaw.BaseURL }
 
 // ListenAndServe blocks.
 func (s *Server) ListenAndServe() error {
-	// 中间件链：CORS → JWT 认证 → mux。authMiddleware 内部对 /api/auth/* 与 /healthz 放行。
-	return http.ListenAndServe(s.addr, s.corsMiddleware(s.authMiddleware(s.mux)))
+	// 中间件链：CORS → requestID → accessLog → auth → mux（PRD §2.6 可观测性）。
+	//   - corsMiddleware：跨域头 + OPTIONS 短路（最外层，确保预检不被内层 401 拦截）。
+	//   - requestIDMiddleware：每请求生成/透传 X-Request-ID，注入 context 供日志关联。
+	//   - accessLogMiddleware：slog 结构化访问日志（method/path/status/latency/脱敏 user）+
+	//     更新 metrics 计数/延迟。置于 auth 之前，但在 next 返回后读 context 中的 user_id
+	//     （auth 已注入），故能记录已认证身份。
+	//   - authMiddleware：JWT 校验 + user_id 注入（/api/auth/*、/healthz、/metrics 豁免）。
+	// authMiddleware 内部对 /api/auth/login、/api/auth/register、/healthz、/metrics 放行。
+	return http.ListenAndServe(s.addr,
+		s.corsMiddleware(
+			s.requestIDMiddleware(
+				s.accessLogMiddleware(
+					s.authMiddleware(s.mux)))))
 }
 
 // userIDFromContext 取出中间件注入的 user_id；未认证请求返回空串。
@@ -155,9 +194,9 @@ func userIDFromContext(ctx context.Context) string {
 }
 
 // authMiddleware 解析 Bearer token，校验后将 user_id 注入请求 context。
-// 豁免路径：/api/auth/login、/api/auth/register（获取 token 本身）与 /healthz（健康检查）。
-// 其余路径（含 /api/auth/change-password）无有效 token 返回 401。
-// s.authSvc 为 nil 时（未配置认证）直接放行，便于无认证的开发/测试场景。
+// 豁免路径：/api/auth/login、/api/auth/register（获取 token 本身）、/healthz（健康检查）、
+// /metrics（Prometheus 抓取，PRD §2.6）。其余路径（含 /api/auth/change-password）无有效
+// token 返回 401。s.authSvc 为 nil 时（未配置认证）直接放行，便于无认证的开发/测试场景。
 //
 // user_id 通过 service.WithUserID 注入，使用 service 包的 context key —— 这样
 // MediaService 与 gateway handler 用同一把 key 取回 user_id（service.UserIDFromContext），
@@ -169,11 +208,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// 豁免登录/注册与健康检查：这些端点本身就是获取 token 或探活用的。
+		// 豁免登录/注册、健康检查与 metrics 抓取：这些端点本身不涉用户数据或用于探活/采集。
 		// 注意：仅豁免 login 与 register 两条；change-password 必须带 token（走认证），
 		// 故不再用宽泛的 /api/auth/ 前缀豁免，避免新增的改密端点被误放行。
+		// /metrics 与 /healthz 同为无认证端点，供 Prometheus 与健康探针抓取。
 		switch r.URL.Path {
-		case "/api/auth/login", "/api/auth/register", "/healthz":
+		case "/api/auth/login", "/api/auth/register", "/healthz", "/metrics":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -577,6 +617,17 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
 		return
 	}
+	// PRD §2.7 上传滥用限速：每用户最多 uploadConcurrentMax 个并发上传。用
+	// buffered-channel 信号量（非阻塞 acquire）限制在途数；超限直接 429。
+	// 必须在确认 uid 有效后再占槽（否则匿名请求也会消耗配额），且用 defer
+	// 保证所有返回路径都释放槽，避免泄漏导致用户被永久拒上传。
+	if !AcquireUploadSlot(uid) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "too many concurrent uploads, please retry shortly",
+		})
+		return
+	}
+	defer ReleaseUploadSlot(uid)
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
 		filename = "upload.dat"
@@ -711,6 +762,10 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if storeWarn != "" {
 		resp["store_warning"] = storeWarn
+	}
+	// 可观测性：累计本次实际上传字节数（不含秒传/去重命中，那些路径未真正落盘新内容）。
+	if s.metrics != nil {
+		s.metrics.RecordUploadBytes(written)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

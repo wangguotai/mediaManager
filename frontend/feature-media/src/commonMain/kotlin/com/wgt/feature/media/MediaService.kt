@@ -378,7 +378,7 @@ object MediaService {
      *
      * 去重扩展参数同样经 query 传递（body 是 raw bytes，无法放 JSON）：
      *   - [sha256]：内容指纹。后端按 (user_id, sha256) 查库，命中则秒传不落盘，
-     *     直接返回既有 media_id。这正是服务端权威去重——即便本端 DedupStore 未命中，
+     *     直接返回既有 media_id。这正是服务端权威去重——即便本端 Sha256Dedup 未命中，
      *     只要云端已有同内容即可省去落盘。留空则后端自行实测 sha256 落库（不去重查询）。
      *   - [clientId]：客户端幂等键，原样入库供多端冲突排查，留空不传。
      *   - [takenAt]：内容拍摄时间（ms），>0 时透传，0 表未知。

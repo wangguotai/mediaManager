@@ -20,17 +20,30 @@ import (
 // 超出但非零视为心跳超时(stale)，无心跳视为离线。与前端 servers.html 提示保持一致。
 const onlineFreshness = 90 * time.Second
 
+// relayCloser 抽象"主动断开中继会话"能力，供 POST /admin/api/session/close 使用。
+// 由 *relay.Service 实现；admin 包不直接 import relay（避免 admin→relay 的下层依赖扩散），
+// main 在组装时注入。未注入时 session/close 端点回 503 提示不可用。
+//
+// 仅抽象关闭动作：活跃会话列表仍从 storage（relay_session 表 ended_at='' 过滤）读取，
+// 与既有 GET /api/sessions 数据源一致，避免内存态与 DB 态双写。
+type relayCloser interface {
+	CloseSession(sessionID string) error
+}
+
 // Handler 封装运营管理前端 + /admin/* API。
-// 依赖：auther 用于登录签发与 token 校验；store 用于查询服务端/设备/会话数据。
+// 依赖：auther 用于登录签发与 token 校验；store 用于查询服务端/设备/会话数据；
+// relay 用于主动断开中继会话（可空，未注入时 session/close 端点返回 503）。
 type Handler struct {
 	auther *auth.AuthService
 	store  *storage.Store
+	relay  relayCloser
 }
 
-// Deps 注入参数；零值不可用，必须经 New 构造。
+// Deps 注入参数；零值不可用，必须经 New 构造。Relay 可空（session/close 端点降级）。
 type Deps struct {
 	Auther *auth.AuthService
 	Store  *storage.Store
+	Relay  relayCloser
 }
 
 // New 构造 admin Handler。auther/store 均须非 nil。
@@ -38,7 +51,7 @@ func New(d Deps) (*Handler, error) {
 	if d.Auther == nil || d.Store == nil {
 		return nil, errors.New("admin: auther and store are required")
 	}
-	return &Handler{auther: d.Auther, store: d.Store}, nil
+	return &Handler{auther: d.Auther, store: d.Store, relay: d.Relay}, nil
 }
 
 // Handler 返回挂在 /admin/ 下的 http.Handler（自含子路由）。
@@ -57,10 +70,17 @@ func (h *Handler) Handler() http.Handler {
 	// 鉴权后的 JSON API（GET /api/*）。
 	mux.HandleFunc("GET /api/overview", h.requireAuth(h.apiOverview))
 	mux.HandleFunc("GET /api/users", h.requireAuth(h.apiUsers))
+	mux.HandleFunc("GET /api/users/list", h.requireAuth(h.apiUsersList)) // 运营账号列表（含 server_id）
 	mux.HandleFunc("GET /api/servers", h.requireAuth(h.apiServers))
 	mux.HandleFunc("GET /api/sessions", h.requireAuth(h.apiSessions))
+	mux.HandleFunc("GET /api/sessions/active", h.requireAuth(h.apiActiveSessions)) // 活跃会话+在线设备
 	mux.HandleFunc("GET /api/traffic/summary", h.requireAuth(h.apiTrafficSummary))
 	mux.HandleFunc("GET /api/account", h.requireAuth(h.apiAccount))
+
+	// 鉴权后的写 API（POST /api/*）。PRD §2.8 运营前端写操作。
+	mux.HandleFunc("POST /api/server/register", h.requireAuth(h.apiServerRegister))
+	mux.HandleFunc("POST /api/session/close", h.requireAuth(h.apiSessionClose))
+	mux.HandleFunc("POST /api/user/bind-server", h.requireAuth(h.apiUserBindServer))
 
 	return http.StripPrefix("/admin", mux)
 }

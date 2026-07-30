@@ -27,7 +27,7 @@ import kotlinx.serialization.json.longOrNull
  *
  * @param localMediaId 本地相册 mediaId（重放时据此取字节）
  * @param filename 原始文件名（后端取扩展名）
- * @param sha256 内容指纹（命中 DedupStore 可直接跳过，省去取字节+上传）
+ * @param sha256 内容指纹（命中 Sha256Dedup 可直接跳过，省去取字节+上传）
  * @param isLivePhoto 是否为 Live Photo
  * @param takenAt 拍摄时间 ms（排序/时序用，0 表未知）
  * @param clientId 客户端幂等键

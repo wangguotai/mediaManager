@@ -128,6 +128,45 @@ func New(addr string, auther Authenticator, store RelayStore, idGen IDGen, nowFu
 	}, nil
 }
 
+// errSessionNotFound 按 sessionID 未找到活跃会话。
+var errSessionNotFound = errors.New("relay: session not found or already ended")
+
+// CloseSession 主动结束一个进行中的中继会话，供运营管理写操作（POST /admin/api/session/close）调用。
+//
+// 查找策略：遍历 s.pairs 按 sessionID 匹配（活跃会话数量有限，遍历开销可接受）。
+// 找到后置 closed=true 并关闭两端连接，促使双向 io.Copy 退出并经 endSession 落账。
+// 关闭原因由 relay 正常收尾路径写入（finishReason 把"被对端关闭"归为 peer_error）；
+// 若需在 DB 中显式标注 "admin_close"，可在 CloseSession 后另调 store.FinalizeRelaySession，
+// 此处保持轻量，不直接写 DB 以避免与 handleConn 的 endSession 双写竞争。
+func (s *Service) CloseSession(sessionID string) error {
+	s.mu.Lock()
+	var found *pairSlots
+	for _, slot := range s.pairs {
+		slot.mu.Lock()
+		if slot.sessionID == sessionID && !slot.closed {
+			found = slot
+			slot.mu.Unlock()
+			break
+		}
+		slot.mu.Unlock()
+	}
+	s.mu.Unlock()
+	if found == nil {
+		return errSessionNotFound
+	}
+
+	found.mu.Lock()
+	found.closed = true
+	if found.a != nil && found.a.conn != nil {
+		_ = found.a.conn.Close()
+	}
+	if found.b != nil && found.b.conn != nil {
+		_ = found.b.conn.Close()
+	}
+	found.mu.Unlock()
+	return nil
+}
+
 // ListenAndServe 开始接受中继连接，阻塞直到 Shutdown。
 func (s *Service) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)

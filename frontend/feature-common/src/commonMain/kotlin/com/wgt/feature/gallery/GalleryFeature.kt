@@ -38,6 +38,13 @@ class GalleryFeature() : Feature() {
      * 删除本地照片图库中的媒体文件
      */
     suspend fun deleteMedia(mediaIds: List<String>): Int = photoGalleryService.deleteMedia(mediaIds)
+
+    /**
+     * 把字节流写入系统相册（批量下载：云端字节 → 本地相册）。
+     * 按 mimeType 区分图片 / 视频集合，委托平台实现。
+     */
+    suspend fun saveMediaToGallery(data: ByteArray, filename: String, mimeType: String): Boolean =
+        photoGalleryService.saveMediaToGallery(data, filename, mimeType)
 }
 
 /**

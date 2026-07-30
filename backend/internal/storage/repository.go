@@ -368,22 +368,30 @@ func (s *Store) GetMediaByUserAndSHA256(ctx context.Context, userID, sha256 stri
 }
 
 // ListMediaChanges 返回某用户 updated_at 严格大于 sinceCursor 的全部 media 行，
-// 含软删除墓碑（deleted=1）。按 updated_at 升序排序，配合 limit/offset 实现
-// "拉取增量 → 用最后一条的 updated_at 作为下一次 cursor" 的增量同步。
+// 含软删除墓碑（deleted=1）。按 (updated_at, id) 升序排序，配合 limit/offset 实现
+// "拉取增量 → 用最后一条的 (updated_at, id) 作为下一次复合 cursor" 的增量同步。
 //
-// sinceCursor 为空串时从头拉取。返回值用于构造 {changes, next_cursor, has_more}。
-// 注：updated_at 以 RFC3339Nano 字符串比较；纳秒精度下同时间戳几乎不发生，
-// 严格大于保证每页边界不重不漏。若未来引入批量导入可能产生同时间戳，
-// 再以 id 作为次序键兜底。
-func (s *Store) ListMediaChanges(ctx context.Context, userID, sinceCursor string, limit, offset int) ([]*Media, error) {
+// sinceCursor 为空串时从头拉取。sinceID 非空时启用 (updated_at, id) 复合严格大于：
+// `(updated_at > ? OR (updated_at = ? AND id > ?))`，消除同时间戳边界的重/漏风险
+// （批量导入或并发写入可能产生相同 updated_at）。sinceID 为空时退化为仅时间戳
+// 严格大于，保持向下兼容（旧客户端仅传 since=ms，无 id）。
+// 返回值用于构造 {changes, next_cursor, next_cursor_id, has_more}。
+func (s *Store) ListMediaChanges(ctx context.Context, userID, sinceCursor, sinceID string, limit, offset int) ([]*Media, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	q := `SELECT ` + mediaColumns + ` FROM "media" WHERE user_id = ?`
 	args := []any{userID}
 	if sinceCursor != "" {
-		q += ` AND updated_at > ?`
-		args = append(args, sinceCursor)
+		if sinceID != "" {
+			// 复合游标：(updated_at, id) 严格大于，同时间戳按 id 续拉，无重无漏。
+			q += ` AND (updated_at > ? OR (updated_at = ? AND id > ?))`
+			args = append(args, sinceCursor, sinceCursor, sinceID)
+		} else {
+			// 向下兼容：纯时间戳严格大于（旧客户端或首次拉取无 id 续点）。
+			q += ` AND updated_at > ?`
+			args = append(args, sinceCursor)
+		}
 	}
 	q += ` ORDER BY updated_at ASC, id ASC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -394,14 +402,20 @@ func (s *Store) ListMediaChanges(ctx context.Context, userID, sinceCursor string
 	return scanMediaRows(rows)
 }
 
-// CountMediaChanges 返回 updated_at 严格大于 sinceCursor 的行数（含墓碑），
-// 供 changes 端点计算 has_more（总数 vs 已取）。
-func (s *Store) CountMediaChanges(ctx context.Context, userID, sinceCursor string) (int, error) {
+// CountMediaChanges 返回满足与 ListMediaChanges 相同游标条件的行数（含墓碑），
+// 供 changes 端点计算 has_more（总数 vs 已取）。游标判定逻辑与 ListMediaChanges
+// 保持一致（含 sinceID 的复合判定），确保 has_more 计算与实际剩余行数对齐。
+func (s *Store) CountMediaChanges(ctx context.Context, userID, sinceCursor, sinceID string) (int, error) {
 	q := `SELECT COUNT(*) FROM "media" WHERE user_id = ?`
 	args := []any{userID}
 	if sinceCursor != "" {
-		q += ` AND updated_at > ?`
-		args = append(args, sinceCursor)
+		if sinceID != "" {
+			q += ` AND (updated_at > ? OR (updated_at = ? AND id > ?))`
+			args = append(args, sinceCursor, sinceCursor, sinceID)
+		} else {
+			q += ` AND updated_at > ?`
+			args = append(args, sinceCursor)
+		}
 	}
 	var n int
 	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {

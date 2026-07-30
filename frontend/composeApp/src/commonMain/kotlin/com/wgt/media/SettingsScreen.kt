@@ -105,6 +105,20 @@ object SettingsState {
     var syncCursor by mutableStateOf(loadSyncCursor())
         private set
 
+    /**
+     * 仅 WiFi 备份开关（V6 §2.1）。开启后自动备份仅在 WiFi 网络下执行，移动数据下暂停。
+     * 默认 true（对标小米「仅 WiFi 备份」，避免用户流量被偷跑）。
+     */
+    var backupWifiOnly by mutableStateOf(loadBackupWifiOnly())
+        private set
+
+    /**
+     * 仅充电备份开关（V6 §2.1）。开启后自动备份仅在充电状态下执行，电池供电时暂停。
+     * 默认 false（不强制充电，WiFi 下即可备份）。
+     */
+    var backupChargingOnly by mutableStateOf(loadBackupChargingOnly())
+        private set
+
     private fun loadThemeMode(): ThemeMode {
         val raw = storage.getString(SettingsKeys.THEME_MODE, ThemeMode.SYSTEM.name)
         return runCatching { ThemeMode.valueOf(raw.uppercase()) }.getOrDefault(ThemeMode.SYSTEM)
@@ -120,6 +134,12 @@ object SettingsState {
 
     private fun loadSyncCursor(): Long =
         storage.getString(SettingsKeys.SYNC_CURSOR, "0").toLongOrNull() ?: 0L
+
+    private fun loadBackupWifiOnly(): Boolean =
+        storage.getString(SettingsKeys.BACKUP_WIFI_ONLY, "true").equals("true", ignoreCase = true)
+
+    private fun loadBackupChargingOnly(): Boolean =
+        storage.getString(SettingsKeys.BACKUP_CHARGING_ONLY, "false").equals("true", ignoreCase = true)
 
     /**
      * 持久化新的后端地址并更新内存状态。仅做存取，不做可达性校验——
@@ -168,6 +188,22 @@ object SettingsState {
         if (cursor <= 0 || cursor <= syncCursor) return
         syncCursor = cursor
         storage.putString(SettingsKeys.SYNC_CURSOR, cursor.toString())
+    }
+
+    /** V6 §2.1：持久化仅 WiFi 备份开关。 */
+    fun saveBackupWifiOnly(enabled: Boolean) {
+        if (backupWifiOnly == enabled) return
+        backupWifiOnly = enabled
+        storage.putString(SettingsKeys.BACKUP_WIFI_ONLY, if (enabled) "true" else "false")
+        logger.info(TAG, "backup wifi-only: $enabled")
+    }
+
+    /** V6 §2.1：持久化仅充电备份开关。 */
+    fun saveBackupChargingOnly(enabled: Boolean) {
+        if (backupChargingOnly == enabled) return
+        backupChargingOnly = enabled
+        storage.putString(SettingsKeys.BACKUP_CHARGING_ONLY, if (enabled) "true" else "false")
+        logger.info(TAG, "backup charging-only: $enabled")
     }
 
     /** 后端地址默认值——与 MediaService 既有的 10.0.2.2:8080 模拟器回环地址一致。 */

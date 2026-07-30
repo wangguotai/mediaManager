@@ -106,7 +106,7 @@ func TestListMediaChanges(t *testing.T) {
 	setUpdated(t, s, "m-2", time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC))
 
 	// 全量首拉（since 空）：3 条，按 updated_at 升序 m-1,m-3,m-2(墓碑最末)。
-	all, err := s.ListMediaChanges(ctx, "u-1", "", 100, 0)
+	all, err := s.ListMediaChanges(ctx, "u-1", "", "", 100, 0)
 	if err != nil || len(all) != 3 {
 		t.Fatalf("first pull: %v len=%d", err, len(all))
 	}
@@ -123,7 +123,7 @@ func TestListMediaChanges(t *testing.T) {
 
 	// 自 m-1 cursor（2026-01-01）之后：应含 m-3、m-2，共 2 条。
 	cursor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
-	part, err := s.ListMediaChanges(ctx, "u-1", cursor, 100, 0)
+	part, err := s.ListMediaChanges(ctx, "u-1", cursor, "", 100, 0)
 	if err != nil || len(part) != 2 {
 		t.Fatalf("since m-1: %v len=%d", err, len(part))
 	}
@@ -132,18 +132,74 @@ func TestListMediaChanges(t *testing.T) {
 	}
 
 	// 分页：limit=1 自该 cursor 取首条应为 m-3。
-	page1, err := s.ListMediaChanges(ctx, "u-1", cursor, 1, 0)
+	page1, err := s.ListMediaChanges(ctx, "u-1", cursor, "", 1, 0)
 	if err != nil || len(page1) != 1 || page1[0].ID != "m-3" {
 		t.Fatalf("page1: %v len=%d %+v", err, len(page1), page1)
 	}
 
 	// CountMediaChanges 与剩余行数一致；跨用户隔离。
-	n, err := s.CountMediaChanges(ctx, "u-1", cursor)
+	n, err := s.CountMediaChanges(ctx, "u-1", cursor, "")
 	if err != nil || n != 2 {
 		t.Fatalf("count since m-1: got %d err %v (want 2)", n, err)
 	}
-	if n2, err := s.CountMediaChanges(ctx, "u-99", cursor); err != nil || n2 != 0 {
+	if n2, err := s.CountMediaChanges(ctx, "u-99", cursor, ""); err != nil || n2 != 0 {
 		t.Fatalf("unknown user count: got %d err %v", n2, err)
+	}
+}
+
+// TestListMediaChangesCompoundCursor 验证 (updated_at, id) 复合游标在同时间戳
+// 边界不重不漏：两条 media 钉到同一 updated_at，用其中一条的 (时间, id) 作为
+// 复合 cursor 续拉，应只返回另一条（且 CountMediaChanges 同样不计已越过的那条）。
+func TestListMediaChangesCompoundCursor(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedUser(t, s, "u-1", "alice")
+
+	// 两条钉到同一时间戳，id 字典序 m-tie-a < m-tie-b。
+	same := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	if err := s.CreateMedia(ctx, &Media{ID: "m-tie-a", UserID: "u-1", Filename: "a.jpg", Type: "IMAGE", SHA256: "h-a"}); err != nil {
+		t.Fatalf("CreateMedia a: %v", err)
+	}
+	setUpdated(t, s, "m-tie-a", same)
+	if err := s.CreateMedia(ctx, &Media{ID: "m-tie-b", UserID: "u-1", Filename: "b.jpg", Type: "IMAGE", SHA256: "h-b"}); err != nil {
+		t.Fatalf("CreateMedia b: %v", err)
+	}
+	setUpdated(t, s, "m-tie-b", same)
+
+	cur := same.Format(time.RFC3339Nano)
+
+	// 全量首拉：2 条，按 id 升序 m-tie-a, m-tie-b。
+	all, err := s.ListMediaChanges(ctx, "u-1", "", "", 100, 0)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("first pull: %v len=%d", err, len(all))
+	}
+	if all[0].ID != "m-tie-a" || all[1].ID != "m-tie-b" {
+		t.Fatalf("order: %s %s", all[0].ID, all[1].ID)
+	}
+
+	// 仅时间戳 cursor（无 sinceID）：严格 updated_at > cur，应 0 条（两行都等于 cur）。
+	onlyT, err := s.ListMediaChanges(ctx, "u-1", cur, "", 100, 0)
+	if err != nil || len(onlyT) != 0 {
+		t.Fatalf("timestamp-only cursor should skip both tie rows: %v len=%d", err, len(onlyT))
+	}
+
+	// 复合 cursor (cur, m-tie-a)：updated_at>cur OR (updated_at=cur AND id>m-tie-a)
+	// → 仅 m-tie-b。
+	comp, err := s.ListMediaChanges(ctx, "u-1", cur, "m-tie-a", 100, 0)
+	if err != nil || len(comp) != 1 || comp[0].ID != "m-tie-b" {
+		t.Fatalf("compound cursor (cur,m-tie-a): got %v len=%d", comp, len(comp))
+	}
+	// 续点 (cur, m-tie-b) 后应 0 条。
+	comp2, err := s.ListMediaChanges(ctx, "u-1", cur, "m-tie-b", 100, 0)
+	if err != nil || len(comp2) != 0 {
+		t.Fatalf("compound cursor (cur,m-tie-b): should be empty, got %d", len(comp2))
+	}
+
+	// CountMediaChanges 与复合判定一致：自 (cur, m-tie-a) 起 1 条。
+	n, err := s.CountMediaChanges(ctx, "u-1", cur, "m-tie-a")
+	if err != nil || n != 1 {
+		t.Fatalf("count compound (cur,m-tie-a): got %d want 1", n)
 	}
 }
 

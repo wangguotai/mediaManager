@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// schemaSQL 是初始建表 DDL。四张表字段严格对应任务定义（见 model.go 包注释）。
+// schemaSQL 是初始建表 DDL。五张表字段严格对应任务定义（见 model.go 包注释）。
 //
 // 设计取舍：
 //   - 时间列用 TEXT 存 RFC3339 字符串。device/relay_session 的时间在 repository 层转换。
@@ -18,6 +18,9 @@ import (
 //     不同 server 的同名 device 各自独立，符合"设备发现按 server 隔离"语义。
 //   - relay_session.server_id 允许空串：跨 server 的中继对未必隶属单一 server；
 //     此处保留列以便在归属明确时记账，但不强制外键（避免收紧导致无法记账）。
+//   - op_account.server_id（PRD §2.8 新增）：运营账号可绑定一个受管服务端，用于
+//     "选 server" 类运营写操作；空串表示未绑定。CREATE TABLE IF NOT EXISTS 不改既有库，
+//     故另外用 ensureOpAccountServerColumn 做幂等 ALTER 迁移（见 migrate_extra.go）。
 //   - server.token_hash 唯一性不强制（仅作认证比对），username 不约束。
 //   - CREATE TABLE IF NOT EXISTS 保证迁移幂等。
 const schemaSQL = `
@@ -25,6 +28,7 @@ CREATE TABLE IF NOT EXISTS op_account (
     id            TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    server_id     TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL
 );
 
@@ -90,10 +94,13 @@ func Open(dbPath string) (*Store, error) {
 	return s, nil
 }
 
-// Migrate 执行建表 DDL（幂等）。
+// Migrate 执行建表 DDL（幂等），再补做针对既有库的列级迁移（如 op_account.server_id）。
 func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
+	}
+	if err := s.migrateExtra(ctx); err != nil {
+		return fmt.Errorf("migrate extra: %w", err)
 	}
 	return nil
 }

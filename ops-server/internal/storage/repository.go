@@ -29,6 +29,7 @@ func isUniqueViolation(err error) bool {
 // ---- 运营账号 ----
 
 // CreateOpAccount 落库一个新运营账号；username 唯一冲突返回 ErrUsernameTaken。
+// server_id 字段不在此处写入（默认空串），由 SetOpAccountServer 独立更新。
 func (s *Store) CreateOpAccount(ctx context.Context, a StoredOpAccount) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO op_account (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)`,
@@ -41,6 +42,31 @@ func (s *Store) CreateOpAccount(ctx context.Context, a StoredOpAccount) error {
 		return fmt.Errorf("insert op_account: %w", err)
 	}
 	return nil
+}
+
+// SetOpAccountServer 把运营账号绑定到指定受管服务端（更新 op_account.server_id）。
+// 空字符串表示解除绑定。PRD §2.8 运营写操作用。
+func (s *Store) SetOpAccountServer(ctx context.Context, accountID, serverID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE op_account SET server_id = ? WHERE id = ?`, serverID, accountID)
+	if err != nil {
+		return fmt.Errorf("set op_account server_id: %w", err)
+	}
+	return nil
+}
+
+// GetOpAccountServerID 返回运营账号绑定的 server_id（空串表示未绑定）。
+func (s *Store) GetOpAccountServerID(ctx context.Context, accountID string) (string, error) {
+	var sid string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT server_id FROM op_account WHERE id = ?`, accountID).Scan(&sid)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrAccountNotFound
+		}
+		return "", fmt.Errorf("get op_account server_id: %w", err)
+	}
+	return sid, nil
 }
 
 // GetOpAccountByUsername 按用户名查找运营账号；未命中返回 ErrAccountNotFound。
@@ -65,6 +91,43 @@ func (s *Store) CountOpAccounts(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count op_account: %w", err)
 	}
 	return n, nil
+}
+
+// OpAccountBrief 运营账号概览（不含密码哈希），供 admin 前端列出账号并选择绑定 server。
+// 与 storage.OpAccount 的差异：含 ServerID 字段，因为 PRD §2.8 的绑定操作需要展示当前归属。
+type OpAccountBrief struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	ServerID  string    `json:"server_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListOpAccounts 列出全部运营账号（含绑定的 server_id），按创建时间正序。
+func (s *Store) ListOpAccounts(ctx context.Context) ([]OpAccountBrief, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, username, server_id, created_at FROM op_account ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list op_account: %w", err)
+	}
+	defer rows.Close()
+	var out []OpAccountBrief
+	for rows.Next() {
+		var a OpAccountBrief
+		var createdStr string
+		if err := rows.Scan(&a.ID, &a.Username, &a.ServerID, &createdStr); err != nil {
+			return nil, fmt.Errorf("scan op_account row: %w", err)
+		}
+		t, err := parseTime(createdStr)
+		if err != nil {
+			return nil, err
+		}
+		a.CreatedAt = t
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate op_account: %w", err)
+	}
+	return out, nil
 }
 
 func scanOpAccount(row *sql.Row) (*StoredOpAccount, error) {
@@ -445,6 +508,19 @@ func (s *Store) ListAllDevices(ctx context.Context) ([]Device, error) {
 		 ORDER BY server_id, device_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list all devices: %w", err)
+	}
+	defer rows.Close()
+	return scanDevices(rows)
+}
+
+// ListAllOnlineDevices 返回全量在线设备（online=1，跨 server），按 last_seen 倒序。
+// 供 admin 流量页"在线设备列表"使用；只取在线，结果集远小于全量设备表。
+func (s *Store) ListAllOnlineDevices(ctx context.Context) ([]Device, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT server_id, device_id, online, last_seen, meta FROM device
+		 WHERE online = 1 ORDER BY last_seen DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list all online devices: %w", err)
 	}
 	defer rows.Close()
 	return scanDevices(rows)

@@ -46,11 +46,11 @@ object SyncManager {
      * 保证 (user_id,sha256) 秒传、client_id 幂等键、taken_at 时序真正生效。
      *
      * 去重分两层互补：
-     * 1. 本端 [DedupStore] 命中即直接短路——连后端往返都省（客户端早判）。
+     * 1. 本端 [Sha256Dedup.shared] 命中即直接短路——连后端往返都省（客户端早判）。
      * 2. 未命中或本端缓存不可信时，把 [sha256Hex] 算出的指纹透传给后端
      *    （POST /api/media/upload?sha256=...），由后端按 (user_id, sha256) 做权威秒传：
      *    命中则不落盘直接返回既有 media_id，命中软删记录还会复活。这样即便本端
-     *    DedupStore 未登记但云端实际已有同内容（如另一台设备刚传过），仍能秒传。
+     *    Sha256Dedup 未登记但云端实际已有同内容（如另一台设备刚传过），仍能秒传。
      *
      * [clientId]/[takenAt] 走 query param 透传给后端入库，供多端冲突排查与时序。
      * 默认值用于在线首传路径（无离线上下文）；重放路径 ([replayOfflineQueue]) 会
@@ -75,7 +75,7 @@ object SyncManager {
         precomputedSha: String = ""
     ): Boolean {
         val sha = if (precomputedSha.isNotEmpty()) precomputedSha else sha256Hex(data)
-        if (sha.isNotEmpty() && DedupStore.contains(sha)) {
+        if (sha.isNotEmpty() && Sha256Dedup.shared.contains(sha)) {
             return true // 本端已知云端有此内容，秒传（不落盘不入队）
         }
         val success = try {
@@ -95,7 +95,7 @@ object SyncManager {
             return false
         }
         if (success) {
-            if (sha.isNotEmpty()) DedupStore.add(sha)
+            if (sha.isNotEmpty()) Sha256Dedup.shared.markUploaded(sha)
             return true
         }
         // 显式失败入队：HTTP 非 200 / 网络异常（被 uploadMedia 吞成 false）均落离线队列。

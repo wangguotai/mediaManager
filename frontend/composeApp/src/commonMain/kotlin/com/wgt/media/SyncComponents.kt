@@ -2,9 +2,16 @@ package com.wgt.media
 
 import com.wgt.common.util.sha256
 import com.wgt.platform.logger.logger
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.time.Clock
 
 private const val TAG = "SyncComponents"
+
+/** 旧 DedupStore 的持久化文件名，迁移用（迁移后写 "[]" 标记完成）。 */
+private const val OLD_DEDUP_FILE = "dedup_sha256.json"
 
 /**
  * 已上传内容的 SHA-256 去重集合 —— 自动备份时避免把同一张图片重复传到云。
@@ -25,6 +32,7 @@ class Sha256Dedup(private val storage: SettingsStorage) {
 
     init {
         load()
+        migrateFromOldDedupStore()
     }
 
     /** 读取持久化的已传指纹集合到内存。 */
@@ -33,6 +41,36 @@ class Sha256Dedup(private val storage: SettingsStorage) {
         if (raw.isEmpty()) return
         raw.split(',').filter { it.isNotEmpty() }.forEach { seen.add(it) }
         logger.info(TAG, "dedup loaded ${seen.size} hashes")
+    }
+
+    /**
+     * 一次性迁移：把旧 DedupStore 的 JSON 指纹集合合并到本集合。
+     *
+     * V6 去重合一前，系统有两套去重（Sha256Dedup 经 SettingsStorage 逗号串 +
+     * DedupStore 经 PersistentFileStore JSON 数组）。两者双写、最终一致，但旧升级
+     * 用户可能在 DedupStore 侧有本集合缺的指纹。此处懒加载时把旧文件读回合并，
+     * 合并后写空覆盖旧文件（使其不再生效），避免日后重复迁移。
+     *
+     * 幂等：旧文件不存在/已清空时 read 返回 null 或空数组，无副作用。
+     */
+    private fun migrateFromOldDedupStore() {
+        val text = PersistentFileStore.read(OLD_DEDUP_FILE) ?: return
+        try {
+            val arr = Json.parseToJsonElement(text) as? JsonArray ?: return
+            var added = 0
+            for (el in arr) {
+                val s = el.jsonPrimitive.contentOrNull
+                if (s != null && s.isNotEmpty() && seen.add(s)) added++
+            }
+            if (added > 0) {
+                persist()
+                logger.info(TAG, "migrated $added hashes from old DedupStore, total=${seen.size}")
+            }
+            // 写空覆盖旧文件，标记迁移完成（下次 read 得 "[]"，as JsonArray 迭代无元素）。
+            PersistentFileStore.write(OLD_DEDUP_FILE, "[]")
+        } catch (e: Exception) {
+            logger.error(TAG, "migrateFromOldDedupStore failed: ${e.message}")
+        }
     }
 
     /** 持久化当前集合。批量上传后调用一次，避免逐条写盘。 */
@@ -49,16 +87,34 @@ class Sha256Dedup(private val storage: SettingsStorage) {
     }
 
     /**
+     * 从集合移除一个指纹（墓碑剔除语义）。
+     *
+     * 当云端某媒体被删除（墓碑 deleted=true）时，其 sha 应从去重集合移除，
+     * 使得用户在本地相册重新触发该图备份时不会被前端误判跳过——后端秒传命中
+     * 软删记录会复活（UndeleteMedia），前端需允许重新上传才能触达该路径。
+     *
+     * 幂等：不存在则无操作。空指纹忽略。
+     */
+    fun removeSha(hash: String) {
+        if (hash.isEmpty() || seen.remove(hash)) persist()
+    }
+
+    /**
      * 把一次增量同步返回的变更项指纹灌入集合。
      *
-     * 仅登记非删除（[deleted]=false）项的 sha256；删除项的指纹不剔除——保留历史记录
-     * 无害（用户删了又传同图，后端会按 sha256 去重，前端跳过上传也是合理行为，
-     * 避免把已删图重新传上去）。批量灌入后统一持久化一次。
+     * 墓碑剔除：删除项（[deleted]=true）的 sha 从集合移除，使删除后可重新上传
+     * （后端秒传命中软删记录会复活，server.go UndeleteMedia 已支持）。非删除项
+     * 的非空 sha 登记入集合。批量灌入后统一持久化一次。
      */
     fun loadFromSync(changes: List<com.wgt.feature.media.MediaService.SyncChange>) {
         var changed = false
         for (c in changes) {
-            if (!c.deleted && c.sha256.isNotEmpty() && seen.add(c.sha256)) changed = true
+            if (c.sha256.isEmpty()) continue
+            if (c.deleted) {
+                if (seen.remove(c.sha256)) changed = true
+            } else {
+                if (seen.add(c.sha256)) changed = true
+            }
         }
         if (changed) {
             persist()
@@ -68,6 +124,18 @@ class Sha256Dedup(private val storage: SettingsStorage) {
 
     /** 当前已登记指纹数（调试/展示用）。 */
     val size: Int get() = seen.size
+
+    companion object {
+        /**
+         * 全局共享实例 —— 供 [SyncManager]（object 单例）与 [MediaViewModel] 共用同一份
+         * 去重集合，避免两套实例各自持久化导致状态分裂。
+         *
+         * 懒初始化：首次访问时创建，底层 [SettingsStorage] 由平台 expect/actual 提供线程安全
+         * 的读写，故实例本身线程安全。V6 去重合一：旧 [DedupStore]（独立 JSON 持久化）已废弃，
+         * 其墓碑剔除语义合并到此处。
+         */
+        val shared: Sha256Dedup by lazy { Sha256Dedup(SettingsStorage()) }
+    }
 }
 
 /**

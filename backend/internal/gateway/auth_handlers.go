@@ -47,6 +47,19 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PRD §2.7 登录暴力限速：按 (IP, username) 滑动窗口限速，防暴力撞库。
+	// 解析出 username 后再检查（限速维度含用户名）；超限直接 429 不进认证逻辑，
+	// 避免暴露"用户名是否存在"的侧信道。loginLimiter 为 nil 时（纯测试）跳过。
+	if s.loginLimiter != nil {
+		ip := clientIP(r)
+		if !s.loginLimiter.Allow(ip, req.Username) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error": "too many login attempts, please try again later",
+			})
+			return
+		}
+	}
+
 	result, err := s.authSvc.Login(r.Context(), auth.LoginRequest{
 		Username: req.Username,
 		Password: req.Password,

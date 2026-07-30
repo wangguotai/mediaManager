@@ -12,7 +12,7 @@ package com.wgt.media
  * 为文件名读写，跨进程安全（仅本 App 可访问）。
  *
  * 线程安全：write 内部串行写盘；读不持有状态。调用方若需并发顺序，应在更高层加锁
- * （见 [SyncStateStore] / [DedupStore] / [OfflineQueueStore] 各自的同步控制）。
+ * （见 [SyncStateStore] / [Sha256Dedup] / [OfflineQueueStore] 各自的同步控制）。
  */
 expect object PersistentFileStore {
 

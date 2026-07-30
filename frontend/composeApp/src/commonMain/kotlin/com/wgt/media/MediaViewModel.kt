@@ -227,6 +227,15 @@ class MediaViewModel {
     var isSyncing by mutableStateOf(false)
         private set
 
+    /**
+     * 云端是否还有更多增量页未拉取（V6 §2.3 分页）。
+     *
+     * 后端 getSyncChanges 返回 hasMore=true 时表示后续还有变更页。云端 Tab 滚动到底时
+     * 据此判断是否触发 [loadMoreCloudChanges] 续拉下一页；false 时不触发，避免无效请求。
+     */
+    var hasMoreCloudChanges by mutableStateOf(false)
+        private set
+
     /** 云端用量（[loadSyncUsage] 成功后填充，设置页/已上传页可展示）。 */
     var cloudUsage by mutableStateOf<MediaService.SyncUsage?>(null)
         private set
@@ -238,8 +247,11 @@ class MediaViewModel {
 
     /**
      * SHA-256 去重集合：增量同步返回的指纹 + 本设备已传指纹，自动备份时据此跳过已传图。
+     *
+     * V6 去重合一：使用 [Sha256Dedup.shared] 全局单例，与 [SyncManager] 共用同一份集合，
+     * 不再维护独立实例。旧 [DedupStore] 已废弃删除。
      */
-    private val dedup = Sha256Dedup(SettingsStorage())
+    private val dedup = Sha256Dedup.shared
 
     /**
      * 自动备份已知本地 id 快照。开启自动备份后首次建立；之后 [checkAndBackupNewLocalMedia]
@@ -349,12 +361,18 @@ class MediaViewModel {
     /**
      * 增量拉取云端变更并累积到 [cloudMedia]。
      *
-     * 以持久化游标 [syncCursor] 为 since 起点循环调 [MediaService.getSyncChanges]，
-     * 逐页 [mergeCloudChanges]（upsert + 软删移除），[hasMore]=false 即完成一轮同步；
-     * 每页成功后推进游标并落盘，失败页提前返回且**不前进游标**（下次重试从原位置续拉，
-     * 避免丢增量）。指纹同步灌入 [dedup]（非删除项），使自动备份能跳过他设备已传图。
+     * 以持久化游标 [syncCursor] 为 since 起点调 [MediaService.getSyncChanges] 拉取**一页**
+     * 增量变更，[mergeCloudChanges] 合并到 [cloudMedia]，推进游标并落盘。
      *
-     * 由 App 启动（[onSessionReady]）与进入"已上传"Tab 时调用。重入安全：
+     * V6 §2.3 云端分页：不再 while 循环一次性拉完全部增量页——改为每次只拉一页（pageSize=100），
+     * 拉完即停，[hasMoreCloudChanges] 记录后端是否还有更多。云端 Tab 滚动到底时经
+     * [loadMoreCloudChanges] 触发再拉下一页，实现无限滚动分页体验。首次进入 Tab 或
+     * App 启动时仍调本方法拉首页（秒开），后续页由用户滚动驱动。
+     *
+     * 失败页提前返回且不推进游标（下次重试从原位置续拉，避免丢增量）。指纹同步灌入
+     * [dedup]（含墓碑剔除），使自动备份能跳过他设备已传图。
+     *
+     * 由 App 启动（[onSessionReady]）与进入已上传 Tab 时调用。重入安全：
      * [isSyncing] 置位期间直接返回，避免 Tab 来回切换并发起多次同步。网络/未登录失败静默。
      */
     fun loadCloudChanges() {
@@ -363,26 +381,22 @@ class MediaViewModel {
         if (isSyncing) return
         isSyncing = true
         viewModelScope.launch {
-            var cursor = syncCursor
             try {
-                while (true) {
-                    val page = MediaService.getSyncChanges(since = cursor, pageSize = 100)
-                        ?: return@launch // 网络/HTTP 错误：不推进游标，下次重试
-                    // 指纹灌入去重集合（非删除项），覆盖他设备已传内容。
-                    dedup.loadFromSync(page.changes)
-                    // 合并到云端累积视图（upsert + 软删移除）。
-                    cloudMedia = mergeCloudChanges(cloudMedia, page.changes)
-                    cursor = page.nextCursor
-                    // nextCursor 推进后立即落盘，保证中途失败也只丢未拉部分而非已拉进度。
-                    if (cursor > syncCursor) {
-                        SettingsState.saveSyncCursor(cursor)
-                        syncCursor = cursor
-                    }
-                    if (!page.hasMore) break
+                val page = MediaService.getSyncChanges(since = syncCursor, pageSize = 100)
+                    ?: return@launch // 网络/HTTP 错误：不推进游标，下次重试
+                // 指纹灌入去重集合（含墓碑剔除），覆盖他设备已传内容。
+                dedup.loadFromSync(page.changes)
+                // 合并到云端累积视图（upsert + 软删移除）。
+                cloudMedia = mergeCloudChanges(cloudMedia, page.changes)
+                // nextCursor 推进后立即落盘，保证中途失败也只丢未拉部分而非已拉进度。
+                if (page.nextCursor > syncCursor) {
+                    SettingsState.saveSyncCursor(page.nextCursor)
+                    syncCursor = page.nextCursor
                 }
-                logger.info(TAG, "loadCloudChanges done, cloud=${cloudMedia.size} cursor=$cursor")
+                hasMoreCloudChanges = page.hasMore
+                logger.info(TAG, "loadCloudChanges page done, cloud=${cloudMedia.size} cursor=$syncCursor hasMore=$hasMoreCloudChanges")
             } catch (e: Exception) {
-                // 非预期异常（如合并逻辑）：记录，游标已在 try 内按页推进过，下次续拉。
+                // 非预期异常（如合并逻辑）：记录，游标不变，下次续拉。
                 logger.error(TAG, "loadCloudChanges failed: ${e::class.simpleName} ${e.message}")
             } finally {
                 isSyncing = false
@@ -447,6 +461,17 @@ class MediaViewModel {
         mediaList = cloudMedia
         loadCloudChanges()
         if (forceRefresh) loadSyncUsage()
+    }
+
+    /**
+     * 云端 Tab 滚动到底时触发续拉下一页增量（V6 §2.3 分页）。
+     *
+     * 仅当 [hasMoreCloudChanges] 为 true 且未在同步中时才触发，避免无效请求与重入。
+     * 内部直接调 [loadCloudChanges]（它会从当前 [syncCursor] 续拉下一页）。
+     */
+    fun loadMoreCloudChanges() {
+        if (!hasMoreCloudChanges || isSyncing) return
+        loadCloudChanges()
     }
 
     /**
@@ -540,7 +565,7 @@ class MediaViewModel {
      * 比对当前图库全量 id 与 [knownLocalIds]：差集即新增图（含快照建立后用户拍的/导入的）。
      * 逐项取字节 → 算 sha256 → 经 [SyncManager.uploadLocal] 上传（**唯一上传通路**，带
      * sha256/client_id/taken_at 全量字段，使 (user_id,sha256) 秒传、client_id 幂等、
-     * taken_at 时序生效）。uploadLocal 内部做本端去重（[DedupStore]）与后端权威秒传，
+     * taken_at 时序生效）。uploadLocal 内部做本端去重（[Sha256Dedup]）与后端权威秒传，
      * 成功登记指纹，失败入持久化离线队列 [OfflineQueueStore]。
      *
      * 这里不再直接调 [MediaService.uploadMedia]（3 参版会丢全量字段），也不再用内存
@@ -550,6 +575,12 @@ class MediaViewModel {
      */
     private suspend fun checkAndBackupNewLocalMedia() {
         if (!galleryFeature.hasPermission()) return
+        // V6 §2.1：网络电量策略前置检查。仅 WiFi / 仅充电开关未满足时跳过本轮备份，
+        // 不清空待备份项——下一轮轮询时条件满足即续传。
+        if (!shouldBackupByPolicy()) {
+            logger.info(TAG, "backup skipped by policy (wifiOnly=${SettingsState.backupWifiOnly} chargingOnly=${SettingsState.backupChargingOnly})")
+            return
+        }
         val current: List<MediaMetadata>
         try {
             current = galleryFeature.getMediaFromGallery()
@@ -562,13 +593,14 @@ class MediaViewModel {
         for (m in newOnes) {
             // 无论后续上传成败，先记入快照，避免下轮重复处理同一项。
             knownLocalIds.add(m.id)
-            // 仅自动备份图片与 Live Photo；视频跳过（体积/策略另有考量）。
-            if (m.type == MediaType.VIDEO) continue
+            // V6 §2.1：视频纳入自动备份（解除旧的 continue 跳过）。
+            // 后端已流式落盘支持大文件（v5-perf），视频走同一 uploadLocal 通路，
+            // 经 sha256 秒传去重，重复视频不重复落盘。
             try {
                 val bytes = galleryFeature.getMediaData(m.id) ?: continue
                 val hash = computeSha256(bytes)
                 // 本端去重命中（本设备或他设备已传过）：登记并跳过，连 uploadLocal 往返都省。
-                // uploadLocal 内部也会再判一次 DedupStore，这里提前短路纯为省一次函数调用，
+                // uploadLocal 内部也会再判一次 Sha256Dedup.shared，这里提前短路纯为省一次函数调用，
                 // 两者读同一持久化集合，结果一致。
                 if (dedup.contains(hash)) {
                     dedup.markUploaded(hash)
@@ -588,7 +620,7 @@ class MediaViewModel {
                     precomputedSha = hash
                 )
                 if (ok) {
-                    // 登记指纹供下轮本端秒传（uploadLocal 内部也已登记 DedupStore，
+                    // 登记指纹供下轮本端秒传（uploadLocal 内部也已登记 Sha256Dedup.shared，
                     // 此处同步本 ViewModel 的 dedup 视图，保持 loadCloudChanges 灌入与本地上传
                     // 两路指纹视图一致）。
                     dedup.markUploaded(hash)
