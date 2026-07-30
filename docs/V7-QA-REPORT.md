@@ -1,8 +1,8 @@
 # V7+V8 Sprint 验收报告（最终版）
 
-> 更新时间：2026-07-31 02:40 GMT+8
-> HEAD: 6a0bbd8
-> 总 commit 数：66
+> 更新时间：2026-07-31 03:00 GMT+8
+> HEAD: 139a69b
+> 总 commit 数：74
 
 ## 完成状态总览
 
@@ -26,7 +26,26 @@
 | 文件管理快捷筛选（大文件+近30天） | ✅ | ✅ | ✅ |
 | 检查RN更新（manifest版本号） | ✅ | ✅ | ✅ |
 | 图片预览左右导航箭头 | ✅ | ✅ | ✅ |
+| 相册封面（设置+显示） | ✅ | ✅ | 真机 ✅ |
+| 相册长按移除照片 | ✅ | ✅ | 编译 ✅ |
+| 相册预览设为封面按钮 | ✅ | ✅ | 编译 ✅ |
+| media_ids null 修复 | ✅ | ✅ | 真机 ✅ |
 | 清除缓存 + 版本号 v0.4.0 | ✅ | ✅ | ✅ |
+
+## 本次新增（c37b3e8 → 139a69b）
+
+1. 回收站自动清理 goroutine（30天 + 6小时扫描）
+2. 过期分享链接自动清理
+3. RN manifest checksum（size + SHA256）
+4. RN 热更新 SHA256 完整性校验
+5. healthz v0.4.0
+6. 图片预览左右导航箭头（ic_arrow_back/forward）
+7. drawable 颜色 crash 修复（@android:color/white → #FFFFFFFF）
+8. /api/media/list has_more 字段
+9. /api/media/album/cover 端点 + 前端 API
+10. 相册详情长按移除照片对话框
+11. 相册详情预览"设为封面"按钮
+12. media_ids null 修复（前端 JsonArray crash）
 
 ## 编译状态
 
@@ -43,3 +62,4 @@
 - 设置页：v0.4.0 + 检查RN更新（最新版本 1.1.0）
 - 图片预览重命名对话框
 - 图片预览左右导航箭头（上一张/下一张）
+- 相册列表显示 test-cover-album（media_ids null 修复后）
