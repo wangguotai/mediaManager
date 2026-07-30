@@ -453,7 +453,9 @@ class MediaViewModel {
      * 开启自动备份：按需注册设备 + 启动后台轮询。
      *
      * 轮询协程周期性 [checkAndBackupNewLocalMedia]：比对图库 id 快照检测本会话新增图，
-     * sha256 去重后上传，失败入离线队列。轮询前先 [replayUploadQueue] 重放历史失败项。
+     * sha256 去重后经 [SyncManager.uploadLocal] 上传（带 sha256/client_id/taken_at 全量字段，
+     * 使秒传/幂等/时序生效），失败由 [SyncManager] 入持久化离线队列 [OfflineQueueStore]。
+     * 轮询前先 [replayOfflineUploads] 重放历史失败项（进程重启后也续传）。
      * 幂等：重复调用不重复起协程（[autoBackupJob] 非空即返回）。
      */
     fun startAutoBackup() {
@@ -466,8 +468,10 @@ class MediaViewModel {
         registerDeviceIfNeeded()
         autoBackupJob = viewModelScope.launch {
             logger.info(TAG, "auto backup poll started")
+            // 进程重启后首重放：把上一次弱网积压的持久化队列清一遍。
+            replayOfflineUploads()
             while (isActive) {
-                retryUploadQueue()
+                replayOfflineUploads()
                 checkAndBackupNewLocalMedia()
                 // 固定轮询间隔：频繁轮询耗电、过稀落后；30s 在两者间取平衡。
                 delay(AUTO_BACKUP_INTERVAL_MS)
@@ -534,8 +538,13 @@ class MediaViewModel {
      * 检测本地图库新增图片并增量上传（自动备份核心）。
      *
      * 比对当前图库全量 id 与 [knownLocalIds]：差集即新增图（含快照建立后用户拍的/导入的）。
-     * 逐项取字节 → 算 sha256 → [dedup] 命中则跳过 → 否则上传：成功登记指纹 + 加入 knownLocalIds；
-     * 失败（弱网）入 [uploadQueue] 待重放。新增 id 无论上传成败都加入快照，避免下轮重复处理。
+     * 逐项取字节 → 算 sha256 → 经 [SyncManager.uploadLocal] 上传（**唯一上传通路**，带
+     * sha256/client_id/taken_at 全量字段，使 (user_id,sha256) 秒传、client_id 幂等、
+     * taken_at 时序生效）。uploadLocal 内部做本端去重（[DedupStore]）与后端权威秒传，
+     * 成功登记指纹，失败入持久化离线队列 [OfflineQueueStore]。
+     *
+     * 这里不再直接调 [MediaService.uploadMedia]（3 参版会丢全量字段），也不再用内存
+     * [UploadQueue] 入队（杀进程即丢）。新增 id 无论上传成败都加入快照，避免下轮重复处理。
      *
      * 仅处理图片与 Live Photo（视频体积大、备份策略另议）；纯视频跳过。
      */
@@ -558,25 +567,35 @@ class MediaViewModel {
             try {
                 val bytes = galleryFeature.getMediaData(m.id) ?: continue
                 val hash = computeSha256(bytes)
-                // 去重命中（本设备或他设备已传过）：跳过上传。
-                if (dedup.contains(hash)) continue
-                val ok = MediaService.uploadMedia(bytes, m.filename, m.is_live_photo)
+                // 本端去重命中（本设备或他设备已传过）：登记并跳过，连 uploadLocal 往返都省。
+                // uploadLocal 内部也会再判一次 DedupStore，这里提前短路纯为省一次函数调用，
+                // 两者读同一持久化集合，结果一致。
+                if (dedup.contains(hash)) {
+                    dedup.markUploaded(hash)
+                    continue
+                }
+                // 经 SyncManager 上传：带 sha256/client_id/taken_at，失败由其入 OfflineQueueStore。
+                // client_id 用设备注册 id（幂等键）；taken_at 用图库拍摄时间（created_at，
+                // Android=DATE_ADDED*1000），无可靠 EXIF DateTimeOriginal 解析时以此兜底，
+                // 由后端在 taken_at<=0 时用上传时间。
+                val ok = SyncManager.uploadLocal(
+                    mediaId = m.id,
+                    filename = m.filename,
+                    data = bytes,
+                    isLivePhoto = m.is_live_photo,
+                    clientId = SettingsState.deviceId,
+                    takenAt = m.created_at,
+                    precomputedSha = hash
+                )
                 if (ok) {
+                    // 登记指纹供下轮本端秒传（uploadLocal 内部也已登记 DedupStore，
+                    // 此处同步本 ViewModel 的 dedup 视图，保持 loadCloudChanges 灌入与本地上传
+                    // 两路指纹视图一致）。
                     dedup.markUploaded(hash)
                     // 上传成功后触发一次增量同步，让云端视图即时纳入新图（轻量：仅拉增量）。
                     loadCloudChanges()
-                } else {
-                    // 上传失败（多半弱网）：入离线队列，网络恢复后 [retryUploadQueue] 重放。
-                    uploadQueue.enqueue(
-                        PendingUpload(
-                            mediaId = m.id,
-                            filename = m.filename,
-                            sha256 = hash,
-                            isLivePhoto = m.is_live_photo,
-                            enqueuedAt = Clock.System.now().toEpochMilliseconds()
-                        )
-                    )
                 }
+                // 失败：SyncManager.uploadLocal 已入 OfflineQueueStore，下一轮 replayOfflineUploads 重放。
             } catch (e: Exception) {
                 logger.error(TAG, "backup upload failed id=${m.id}: ${e.message}")
             }
@@ -584,40 +603,20 @@ class MediaViewModel {
     }
 
     /**
-     * 重放离线上传队列。
+     * 重放持久化离线上传队列。
      *
-     * 逐条出队 → 重取图库字节（入队时未存字节，进程内仍可取）→ 去重再判断（[dedup] 可能已
-     * 由同步补齐）→ 上传：成功登记指纹并 remove；失败重回队尾重试下一轮。队列空则直接返回。
-     * 串行执行，避免突发打满后端。仅在网络可用语义下有意义，但此处不强检网络——
-     * 失败自然重新入队，与"恢复后重放"等价且更简单。
+     * 转发到 [SyncManager.replayOfflineQueue]：逐项从 [OfflineQueueStore] 取快照 → 经
+     * galleryFeature 重读图库字节 → 走 [SyncManager.uploadLocal]（带原 sha256/client_id/taken_at）
+     * 。成功撤离、源已删撤离、失败保留待下轮。本方法不另维护内存队列——以 [OfflineQueueStore]
+     * 为唯一待办表，进程重启不丢。
+     *
+     * 由自动备份轮询每轮开头（[startAutoBackup]）及进程重启后首次调用。字节获取由本
+     * ViewModel 提供（它持有 galleryFeature）。
      */
-    private suspend fun retryUploadQueue() {
-        if (!uploadQueue.isNotEmpty) return
-        // 出队快照后再逐条处理，避免处理过程中 enqueue 造成无限增长。
-        val snapshot = ArrayList(uploadQueue.items)
-        for (item in snapshot) {
-            // 去重集合可能在同步后被补齐；命中则直接清掉该任务。
-            if (dedup.contains(item.sha256)) {
-                uploadQueue.remove(item.mediaId)
-                continue
-            }
-            try {
-                val bytes = galleryFeature.getMediaData(item.mediaId) ?: run {
-                    // 图库里已取不到（被删）：从队列移除，避免永久重试。
-                    uploadQueue.remove(item.mediaId)
-                    continue
-                }
-                val ok = MediaService.uploadMedia(bytes, item.filename, item.isLivePhoto)
-                if (ok) {
-                    dedup.markUploaded(item.sha256)
-                    uploadQueue.remove(item.mediaId)
-                    loadCloudChanges()
-                }
-                // 失败：保留在队列中，下一轮再试。
-            } catch (e: Exception) {
-                logger.error(TAG, "replay upload failed id=${item.mediaId}: ${e.message}")
-            }
-        }
+    private suspend fun replayOfflineUploads() {
+        if (OfflineQueueStore.size() == 0) return
+        SyncManager.replayOfflineQueue { mediaId -> galleryFeature.getMediaData(mediaId) }
+        // 重放后若队列变空则无需进一步动作；若仍有项则下轮再试。
     }
 
 
@@ -873,13 +872,24 @@ class MediaViewModel {
                     if (mediaData != null) {
                         val media = mediaList.find { it.id == mediaId }
                         if (media != null) {
+                            // 手动上传同样透传 sha256/client_id/taken_at 走后端权威秒传：
+                            // 服务端按 (user_id,sha256) 命中即秒传不落盘，省时间省流量。
+                            // 与自动备份的区别：手动上传不走 SyncManager/离线队列——
+                            // 失败直接报错给用户（errorMessage），不隐式入队后台重试，
+                            // 符合"用户主动操作应有明确反馈"的预期。
+                            val hash = computeSha256(mediaData)
                             val success = MediaService.uploadMedia(
-                                mediaData,
-                                media.filename,
-                                media.is_live_photo
+                                fileData = mediaData,
+                                filename = media.filename,
+                                isLivePhoto = media.is_live_photo,
+                                sha256 = hash,
+                                clientId = SettingsState.deviceId,
+                                takenAt = media.created_at
                             )
                             if (success) {
                                 successCount++
+                                // 登记指纹，后续自动备份可本端秒传跳过。
+                                dedup.markUploaded(hash)
                             }
                         }
                     }

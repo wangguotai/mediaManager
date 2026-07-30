@@ -1,8 +1,8 @@
 package com.wgt.media
 
-import androidx.compose.runtime.mutableStateListOf
 import com.wgt.common.util.sha256
 import com.wgt.platform.logger.logger
+import kotlin.time.Clock
 
 private const val TAG = "SyncComponents"
 
@@ -71,67 +71,74 @@ class Sha256Dedup(private val storage: SettingsStorage) {
 }
 
 /**
- * 单条待上传离线任务。
+ * 单条待上传离线任务（UI 投影模型）。
  *
- * 自动备份在弱网下上传失败时入队。持有上传所需全部材料：图库内 mediaId（用于取字节）、
- * 文件名、内容指纹、Live Photo 标记。bytes 暂存内存；进程被杀则丢失（任务约定内存队列）。
+ * **注意：此 data class 仅用于 UI 展示快照，不再是上传待办的数据源。** V5 上传路径统一后，
+ * 唯一的持久化待办表是 [OfflineQueueStore]（落盘 JSON，进程重启不丢）；[OnlineUploadQueue]
+ * 退化为其只读镜像，供设置页"待上传 N 项"等 UI 展示。
+ *
+ * 字段补齐 PRD §2.4 要求的元数据，避免重放丢拍摄时间/客户端幂等键/本地引用。这些字段
+ * 与 [OfflineQueueItem] 一一对应，由 [OnlineUploadQueue.snapshot] 从持久化层映射而来。
  *
  * @param mediaId 本地图库媒体 id（galleryFeature.getMediaData 取字节用）
  * @param filename 原始文件名
  * @param sha256 内容指纹（入队前算好，重放时复用做去重判断）
  * @param isLivePhoto 是否 Live Photo
+ * @param takenAt 拍摄时间 ms（排序/时序用，0 表未知）
+ * @param clientId 客户端幂等键（device register 的 id），重放透传
+ * @param enqueuedAt 入队时刻（UI 展示"积压多久"用；[OfflineQueueItem] 未存此字段，
+ *        故此处为读取快照时刻，仅近似）
  */
 data class PendingUpload(
     val mediaId: String,
     val filename: String,
     val sha256: String,
     val isLivePhoto: Boolean,
+    val takenAt: Long = 0L,
+    val clientId: String = "",
     val enqueuedAt: Long
 )
 
 /**
- * 离线上传队列 —— 弱网失败入队，恢复后重放。
+ * 离线上传队列（UI 投影层）—— 弱网失败入队、恢复后重放的**唯一持久化表**是 [OfflineQueueStore]。
  *
- * 任务明确"简单内存队列即可，不需要 SQLite"：用 [mutableStateListOf] 让 UI 可观察
- * 队列长度（设置页/已上传页展示"待上传 N 项"）。进程重启丢失，可接受——下次自动备份
- * 轮询会重新检测未传项并入队。
+ * V5 上传路径统一后，本类不再是内存待办表（旧实现用 [mutableStateListOf]，杀进程即丢，
+ * 与 PRD §2.4"离线队列持久化"要求冲突）。现退化为 [OfflineQueueStore] 的只读视图：
+ * - [size] / [isNotEmpty] / [items] 均直接读持久化层，UI（设置页"待上传 N 项"）观察到的
+ *   永远是落盘真实值，进程重启后仍准确。
+ * - 入队/出队/重放由 [SyncManager] 经 [OfflineQueueStore] 直接操作，不经本类，避免两套语义
+ *   混乱（旧 UI 队列与持久化队列计数不一致的历史问题）。
+ * - [clear] 转发到 [OfflineQueueStore.clear]（登出/切账号时丢弃本端待传项）。
  *
- * 不在此类内自行重放：网络恢复时机与字节获取由 [MediaViewModel] 编排（它持有 galleryFeature
- * 与网络状态），本类只管进队/出队/查询。幂等：入队时按 mediaId 去重，避免同一项多次入队。
+ * [syncFromStore] 在 UI 需要刷新快照时调用，把持久化项映射为 [PendingUpload] 投影。
+ * 不持有可变内存集合——所有状态以 [OfflineQueueStore] 为准。
  */
 class UploadQueue {
-    private val pending = mutableStateListOf<PendingUpload>()
-
-    /** 当前待上传条目（UI 观察用）。 */
-    val items: List<PendingUpload> get() = pending
+    /** 当前待上传条目（UI 观察用，从持久化层映射）。 */
+    val items: List<PendingUpload> get() = snapshot()
 
     /** 队列是否非空。 */
-    val isNotEmpty: Boolean get() = pending.isNotEmpty()
+    val isNotEmpty: Boolean get() = OfflineQueueStore.size() > 0
 
     /** 待上传条数。 */
-    val size: Int get() = pending.size
+    val size: Int get() = OfflineQueueStore.size()
 
-    /**
-     * 入队一条待上传项。同一 mediaId 已在队列则不重复加入（幂等）。
-     */
-    fun enqueue(item: PendingUpload) {
-        if (pending.none { it.mediaId == item.mediaId }) {
-            pending.add(item)
-            logger.info(TAG, "enqueue ${item.filename} (queue=${pending.size})")
+    /** 从持久化层取快照并映射为 UI 投影模型。 */
+    private fun snapshot(): List<PendingUpload> =
+        OfflineQueueStore.snapshot().map {
+            PendingUpload(
+                mediaId = it.localMediaId,
+                filename = it.filename,
+                sha256 = it.sha256,
+                isLivePhoto = it.isLivePhoto,
+                takenAt = it.takenAt,
+                clientId = it.clientId,
+                enqueuedAt = Clock.System.now().toEpochMilliseconds()
+            )
         }
-    }
 
-    /** 取出并移除队首项；队列空返回 null。 */
-    fun dequeue(): PendingUpload? =
-        if (pending.isEmpty()) null else pending.removeAt(0)
-
-    /** 按 mediaId 移除一条（上传成功后清理）。 */
-    fun remove(mediaId: String) {
-        pending.removeAll { it.mediaId == mediaId }
-    }
-
-    /** 清空队列（如切账号/手动取消）。 */
-    fun clear() = pending.clear()
+    /** 清空队列（如切账号/手动取消）—— 转发到持久化层。 */
+    fun clear() = OfflineQueueStore.clear()
 }
 
 /**
