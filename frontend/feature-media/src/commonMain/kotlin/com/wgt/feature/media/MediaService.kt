@@ -1175,6 +1175,30 @@ object MediaService {
         }
     }
 
+    /**
+     * V7：POST /api/media/album/batch-remove — 批量从相册移除媒体。
+     * 返回实际移除数量。
+     */
+    suspend fun batchRemoveMediaFromAlbum(albumId: String, mediaIds: List<String>): Int? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/batch-remove") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_ids", JsonArray(mediaIds.map { JsonPrimitive(it) }))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["removed_count"]?.jsonPrimitive?.intOrNull
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRemoveMediaFromAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /** V7：设备信息 */
     data class DeviceInfo(
         val deviceId: String,
