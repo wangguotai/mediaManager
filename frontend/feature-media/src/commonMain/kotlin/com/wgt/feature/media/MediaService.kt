@@ -1085,7 +1085,7 @@ object MediaService {
      */
     suspend fun getBackendInfo(): String? {
         return try {
-            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/healthz") {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/healthz") {
                 getAuthToken()?.let { header("Authorization", "Bearer $it") }
             }
             if (response.status == HttpStatusCode.OK) {
