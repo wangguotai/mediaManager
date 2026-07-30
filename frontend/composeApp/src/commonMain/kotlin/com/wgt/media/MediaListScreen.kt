@@ -734,6 +734,46 @@ private fun MyTabContent(
             }
         }
 
+        // V7：媒体库综合摘要（时间跨度）
+        var mediaSummary by remember { mutableStateOf<MediaService.MediaSummary?>(null) }
+        LaunchedEffect(Unit) { mediaSummary = MediaService.getMediaSummary() }
+        mediaSummary?.let { summary ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "媒体时间线",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "共 ${summary.totalCount} 项媒体",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (summary.earliestTs > 0) {
+                        Text(
+                            "最早: ${formatPreviewDate(summary.earliestTs * 1000)}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (summary.latestTs > 0) {
+                        Text(
+                            "最新: ${formatPreviewDate(summary.latestTs * 1000)}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
