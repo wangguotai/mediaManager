@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS "device" (
     FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
 
+-- 分享链接（PRD-v7 §1.2）：把一组 media 以短链形式公开访问，可选过期与密码保护。
+--   - token         : 12 字符随机短链，作为主键也是 URL 标识。
+--   - user_id       : 创建者，用于撤销时鉴权（仅创建者可 DELETE）。
+--   - media_ids     : JSON 数组字符串，如 ["id1","id2"]，存 TEXT 避免多对多表。
+--   - expires_at    : RFC3339 过期时间；空串表示永不过期。
+--   - password_hash : bcrypt 哈希；空串表示无密码保护。
+--   - created_at    : 创建时间，供审计/列表排序。
+-- 不设 user 外键：分享链接在用户删除后仍可独立访问（语义为\"已分享的快照\"），
+-- 故与 user 的级联删除解耦；撤销仅由创建者显式 DELETE。
+CREATE TABLE IF NOT EXISTS share_tokens (
+    token         TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    media_ids     TEXT NOT NULL,
+    expires_at    TEXT,
+    password_hash TEXT,
+    created_at    TEXT NOT NULL
+);
+
 -- 性能索引（IF NOT EXISTS 保证幂等，旧库迁移时自动补建）。
 --   idx_media_user_sha   : 上传秒传按 (user_id, sha256) 查询（repository GetMediaByUserAndSHA256）。
 --   idx_media_user_sync  : 增量同步 ListMediaChanges 按 (user_id, deleted, updated_at) 过滤+排序游标。

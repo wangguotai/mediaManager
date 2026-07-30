@@ -287,6 +287,164 @@ func (s *Store) DeleteMedia(ctx context.Context, id string) error {
 	return nil
 }
 
+// ===== 回收站（PRD-v7 §1.1） =====
+
+// ListTrashByUser 返回某用户已软删除（deleted=1）的媒体列表，按 updated_at 降序，
+// 分页。供回收站列表端点 GET /api/media/trash 使用。limit<=0 时默认 100（与
+// ListMediaChanges 一致）；offset<0 视为 0。空 userID 直接报错（回收站必须按用户隔离）。
+func (s *Store) ListTrashByUser(ctx context.Context, userID string, limit, offset int) ([]*Media, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+mediaColumns+` FROM "media" WHERE user_id = ? AND deleted = 1 ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+		userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list trash by user: %w", err)
+	}
+	return scanMediaRows(rows)
+}
+
+// CountTrashByUser 返回某用户回收站（deleted=1）的总条数，供 /api/media/trash
+// 填充 total 与前端翻页判定。与 ListTrashByUser 同条件（user_id + deleted=1）。
+func (s *Store) CountTrashByUser(ctx context.Context, userID string) (int, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("user id is required")
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM "media" WHERE user_id = ? AND deleted = 1`, userID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count trash by user: %w", err)
+	}
+	return n, nil
+}
+
+// UndeleteMediaForUser 复活一行被软删的 media（deleted=0），且仅当其 user_id 等于
+// userID 且 deleted=1 时才生效。供 POST /api/media/restore 使用。
+//
+// 防横向越权：恢复端点按 (id, user_id) 校验归属，非己有或不存在均返回 ErrNotFound
+// （不区分两者，避免泄露 media_id 是否存在）。刷新 updated_at 使恢复后的记录重新
+// 出现在常规列表与增量同步流中。userID 为空直接 ErrNotFound，避免空串误匹配。
+func (s *Store) UndeleteMediaForUser(ctx context.Context, userID, id string) error {
+	if userID == "" || id == "" {
+		return ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE "media" SET deleted = 0, updated_at = ? WHERE id = ? AND user_id = ? AND deleted = 1`,
+		timeToVal(time.Now()), id, userID)
+	if err != nil {
+		return fmt.Errorf("undelete media for user: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PurgeMediaForUser 物理删除一行 media（DELETE row），且仅当其 user_id 等于 userID
+// 且 deleted=1 时才生效。供 POST /api/media/purge 使用——仅能从回收站彻底清空。
+//
+// 实现：先 GetMedia 确认归属与软删状态，再 DELETE（WHERE 含 user_id 双键，即便在
+// GetMedia 与 DELETE 之间被并发修改也不会误删他人记录）。未命中、归属不符、未软删
+// 均返回 ErrNotFound（不区分，避免泄露）。
+//
+// 注意：本方法仅删除数据库行；磁盘文件清理由 gateway 层负责（需 userDirs 定位该
+// 用户的 uploads 目录，filepath.Glob 查找 id.* 后 os.Remove）。storage 层是纯 SQL
+// 层，不持有任何文件路径信息，与现有 Store 设计一致（CreateMedia/DeleteMedia 均不
+// 触碰文件）。
+func (s *Store) PurgeMediaForUser(ctx context.Context, userID, id string) error {
+	if userID == "" || id == "" {
+		return ErrNotFound
+	}
+	// 先确认归属 + 已软删：仅能从回收站彻底删除，不能误删活跃媒体或他人记录。
+	m, err := s.GetMedia(ctx, id)
+	if err != nil {
+		return err // ErrNotFound（不存在）或包装后的扫描错误
+	}
+	if m.UserID != userID || !m.Deleted {
+		return ErrNotFound
+	}
+	// 物理删除该行；WHERE 含 user_id 双键。未命中不报错（幂等），前置校验已保证存在。
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM "media" WHERE id = ? AND user_id = ?`, id, userID); err != nil {
+		return fmt.Errorf("purge media for user: %w", err)
+	}
+	return nil
+}
+
+// ===== ShareToken =====（PRD-v7 §1.2 分享链接）
+
+// CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
+// ExpiresAt 零值落空串表示永不过期；PasswordHash 空串表示无密码保护。
+// CreatedAt 零值时置当前时间。
+func (s *Store) CreateShareToken(ctx context.Context, st *ShareToken) error {
+	if st == nil {
+		return fmt.Errorf("share token is nil")
+	}
+	if st.Token == "" || st.UserID == "" || st.MediaIDs == "" {
+		return fmt.Errorf("share token, user_id and media_ids are required")
+	}
+	created := st.CreatedAt
+	if created.IsZero() {
+		created = time.Now()
+	}
+	// expires_at：零值 → 空串（永不过期）；非零 → RFC3339。
+	expiresVal := ""
+	if !st.ExpiresAt.IsZero() {
+		expiresVal = st.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO share_tokens (token, user_id, media_ids, expires_at, password_hash, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		st.Token, st.UserID, st.MediaIDs, expiresVal, st.PasswordHash, timeToVal(created)); err != nil {
+		return fmt.Errorf("insert share token: %w", err)
+	}
+	return nil
+}
+
+// GetShareToken 按 token 取单行 share_tokens。未命中返回 ErrNotFound。
+// 公开访问端点（无需认证）据此获取分享元数据。
+func (s *Store) GetShareToken(ctx context.Context, token string) (*ShareToken, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT token, user_id, media_ids, expires_at, password_hash, created_at
+FROM share_tokens WHERE token = ?`, token)
+	var st ShareToken
+	var expiresAt, createdAt string
+	// password_hash 可能为空串（无密码保护）；expires_at 可能为空串（永不过期）。
+	if err := row.Scan(&st.Token, &st.UserID, &st.MediaIDs, &expiresAt, &st.PasswordHash, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get share token: %w", err)
+	}
+	st.ExpiresAt = timeFromVal(expiresAt) // 空串 → 零值（永不过期）
+	st.HasPassword = st.PasswordHash != ""
+	st.CreatedAt = timeFromVal(createdAt)
+	return &st, nil
+}
+
+// DeleteShareToken 撤销分享：仅当 token 与 user_id 同时匹配才删除（防越权撤销他人分享）。
+// 未命中或不属于该用户均返回 ErrNotFound（不区分，避免泄露存在性）。
+// userID 为空时直接 ErrNotFound，防止误以空串匹配。
+func (s *Store) DeleteShareToken(ctx context.Context, token, userID string) error {
+	if token == "" || userID == "" {
+		return ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM share_tokens WHERE token = ? AND user_id = ?`, token, userID)
+	if err != nil {
+		return fmt.Errorf("delete share token: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ===== Device =====
 
 // CreateDevice 插入一行 device。ID/UserID 必填。CreatedAt 零值时置当前时间。

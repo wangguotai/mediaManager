@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,6 +49,7 @@ type Server struct {
 	mediaSvc   gen.MediaServiceServer
 	userDirs   *service.UserDirs // per-user 数据目录解析；直读文件的端点据此按 user_id 定位
 	cloudDir   string            // 网盘图片源根目录；为空表示未配置，stream 端点不回退查找
+	dataDir    string            // 数据根目录（绝对路径）；RN bundle / promotions 端点据此定位文件
 	startTime  time.Time
 	authSvc    *auth.AuthService // 为 nil 时认证中间件放行所有请求（仅开发/测试用）
 	store      *storage.Store    // 元数据库；为 nil 时 sync/device/usage/dedup 端点返回 503
@@ -109,6 +111,10 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 // SetCloudDir 注入网盘图片源根目录，启用 /api/media/stream 对网盘原图的回退查找。
 func (s *Server) SetCloudDir(dir string) { s.cloudDir = dir }
 
+// SetDataDir 注入数据根目录（绝对路径），启用 RN bundle 端点（/api/rn/*）与
+// 运营活动端点（/api/promotions）。应传入 main.go 中 cfg.ResolveDataDir() 解析后的绝对路径。
+func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
+
 // SetStore 注入元数据库，启用多设备同步相关端点：/api/sync/changes、
 // /api/sync/usage、/api/device/register、/api/device/list，以及 upload 的
 // (user_id,sha256) 秒传去重。未注入时这些端点返回 503。
@@ -146,6 +152,16 @@ func (s *Server) registerRoutes() {
 	// 视频信息：用 ffprobe 返回时长/分辨率，供前端展示与播放器初始化。
 	s.mux.HandleFunc("/api/media/video-info/", s.handleMediaVideoInfo)
 
+	// 回收站（PRD-v7 §1.1）：列表 / 恢复 / 彻底删除。全部需认证，user_id 由
+	// authMiddleware 注入 context，handler 用 userIDFromContext 取回并按用户隔离数据。
+	//   - GET  /api/media/trash   ：列出当前用户已软删（deleted=1）的媒体，分页。
+	//   - POST /api/media/restore ：批量复活（deleted=0），按 user_id 校验防越权。
+	//   - POST /api/media/purge   ：批量物理删除（DELETE row + 删磁盘文件），仅对
+	//     deleted=1 的记录操作（只能从回收站彻底清空）。
+	s.mux.HandleFunc("/api/media/trash", s.handleTrashList)
+	s.mux.HandleFunc("/api/media/restore", s.handleMediaRestore)
+	s.mux.HandleFunc("/api/media/purge", s.handleMediaPurge)
+
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
 	s.mux.HandleFunc("/api/sync/usage", s.handleSyncUsage)
@@ -154,8 +170,25 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/device/register", s.handleDeviceRegister)
 	s.mux.HandleFunc("/api/device/list", s.handleDeviceList)
 
+	// 分享链接（PRD-v7 §1.2）：
+	//   - POST /api/share/create ：需认证（在 handleShareCreate 内手动校验 JWT，
+	//     因 authMiddleware 按 /api/share/ 前缀整体豁免以放行公开的 GET）。
+	//   - /api/share/{token}         ：GET 公开查看、DELETE 需认证撤销（handler 内分流+校验）。
+	//   - /api/share/{token}/stream/{mediaId} ：GET 公开下载字节流。
+	// 路由用 /api/share/ 前缀匹配后缀段，在 handleShareAccess 内按 method+path 分流。
+	s.mux.HandleFunc("/api/share/create", s.handleShareCreate)
+	s.mux.HandleFunc("/api/share/", s.handleShareAccess)
+
 	// Stats: 缩略图缓存命中率等可观测性指标（JSON，兼容旧前端，保留）。
 	s.mux.HandleFunc("/api/stats", s.handleStats)
+
+	// React Native 动态 bundle 下发（PRD §3.2）：列出可用 bundle 与版本、下载 JS 文件。
+	// bundle 名取路径尾段，/api/rn/bundle/ 前缀匹配使 {name} 可任意。
+	s.mux.HandleFunc("/api/rn/manifest", s.handleRNManifest)
+	s.mux.HandleFunc("/api/rn/bundle/", s.handleRNBundle)
+
+	// 运营活动（PRD §3.3）：返回 promotions 列表，供客户端首页 banner/弹窗展示。
+	s.mux.HandleFunc("/api/promotions", s.handlePromotions)
 
 	// Metrics: Prometheus 文本格式指标暴露（PRD §2.6）。无认证（authMiddleware 豁免，
 	// 与 /healthz 一致），供 Prometheus 抓取。与 /api/stats 并存——前者面向采集系统，
@@ -215,6 +248,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// /metrics 与 /healthz 同为无认证端点，供 Prometheus 与健康探针抓取。
 		switch r.URL.Path {
 		case "/api/auth/login", "/api/auth/register", "/healthz", "/metrics":
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 分享链接（PRD-v7 §1.2）：/api/share/ 前缀整体豁免——GET 查看/流式为公开访问，
+		// 不要求认证。POST /api/share/create 与 DELETE /api/share/{token} 虽需认证，
+		// 但因 ServeMux 按 /api/share/ 前缀统一分流到 handleShareAccess/handleShareCreate，
+		// 中间件无法按方法区分，故整体豁免后由各 handler 内部手动校验 JWT
+		// （requireShareAuth 辅助解析 Authorization → user_id）。这样公开端点无需 token，
+		// 需认证端点在 handler 入口显式鉴权，二者解耦。
+		if strings.HasPrefix(r.URL.Path, "/api/share/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -337,6 +380,8 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("q"); v != "" {
 		searchQuery = v
 	}
+	// V7 §1.3：排序参数（date=按时间降序默认，size=按大小降序，name=按文件名升序）。
+	sortBy := r.URL.Query().Get("sort")
 
 	resp, err := s.mediaSvc.GetMediaList(r.Context(), &gen.GetMediaListRequest{
 		Page:        page,
@@ -349,6 +394,16 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// V7 §1.3：在 gateway 层按 sort 参数排序，避免改 proto + 重生成。
+	// GetMediaList 默认按 created_at 降序（service 层），其他排序在此后处理。
+	if sortBy != "" && sortBy != "date" && len(resp.MediaList) > 1 {
+		sorted := make([]*gen.MediaMetadata, len(resp.MediaList))
+		copy(sorted, resp.MediaList)
+		sortMediaList(sorted, sortBy)
+		// 重建 resp（protobuf 不可变 slice 需替换）。
+		resp.MediaList = sorted
+	}
+
 	// 如果 media service 支持收藏查询，给每条媒体补充 favorite 字段（按当前用户判定）。
 	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
 		uid := userIDFromContext(r.Context())
@@ -356,6 +411,22 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// sortMediaList 按 sortBy 对 media 列表排序（原地）。
+// sortBy: "date"（created_at 降序，默认）、"size"（size 降序）、"name"（filename 升序）。
+func sortMediaList(list []*gen.MediaMetadata, sortBy string) {
+	switch sortBy {
+	case "size":
+		sort.Slice(list, func(i, j int) bool {
+			return list[i].Size > list[j].Size // 大文件在前
+		})
+	case "name":
+		sort.Slice(list, func(i, j int) bool {
+			return list[i].Filename < list[j].Filename // 文件名 A-Z
+		})
+	// "date" 或其他：保持默认 created_at 降序，不额外排序。
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

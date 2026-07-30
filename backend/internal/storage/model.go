@@ -46,3 +46,21 @@ type Device struct {
 	Platform  string    `json:"platform"` // 如 "ios"、"android"、"web"
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// ShareToken 对应 share_tokens 表的一行（PRD-v7 §1.2 分享链接）。
+// 把一组 media 以 12 字符随机短链形式公开访问，可选过期与密码保护。
+//   - Token        : 12 字符随机短链，作为主键也是公开 URL 标识。
+//   - UserID       : 创建者，撤销时鉴权（仅创建者可 DELETE）。
+//   - MediaIDs     : JSON 数组字符串，如 ["id1","id2"]；存 TEXT 避免多对多表。
+//     调用方需自行 json.Unmarshal 还原为 []string。
+//   - ExpiresAt    : 过期时间；零值表示永不过期（落库为空串）。
+//   - PasswordHash : bcrypt 哈希；空串表示无密码保护。
+type ShareToken struct {
+	Token        string    `json:"token"`
+	UserID       string    `json:"user_id"`
+	MediaIDs     string    `json:"media_ids"`      // JSON 数组字符串
+	ExpiresAt    time.Time `json:"expires_at"`     // 零值 = 永不过期
+	PasswordHash string    `json:"-"`              // 不序列化，避免泄露
+	HasPassword  bool      `json:"has_password"`   // 派生字段：PasswordHash != ""（供公开响应）
+	CreatedAt    time.Time `json:"created_at"`
+}

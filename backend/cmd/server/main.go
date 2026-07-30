@@ -59,6 +59,22 @@ func main() {
 		log.Fatalf("Failed to create cloud-images directory: %v", err)
 	}
 
+	// rn-bundles（PRD §3.2）：存放动态下发的 React Native JS bundle。
+	// 每个子目录含 manifest.json + index.android.bundle。启动期放一份 activity-bundle
+	// 示例（仅首次创建，不覆盖既有文件），用于验证下载链路。
+	rnBundlesDir := filepath.Join(dataDir, "rn-bundles")
+	if err := os.MkdirAll(rnBundlesDir, 0755); err != nil {
+		log.Fatalf("Failed to create rn-bundles directory: %v", err)
+	}
+	if err := gateway.EnsureRNBundleSeed(dataDir); err != nil {
+		// 示例 bundle 写入失败不阻断启动——主功能不依赖该文件，仅影响 RN 热更新验证。
+		log.Printf("WARNING: failed to seed activity-bundle: %v", err)
+	}
+	// promotions.json（PRD §3.3）：运营活动列表。首次启动写一份 demo 数据（不覆盖既有）。
+	if err := gateway.EnsurePromotionsSeed(dataDir); err != nil {
+		log.Printf("WARNING: failed to seed promotions.json: %v", err)
+	}
+
 	// 打开 SQLite 元数据库（user/media/device 表 + 外键级联）。
 	dbPath, err := cfg.ResolveDBPath()
 	if err != nil {
@@ -127,6 +143,8 @@ func main() {
 	}, mediaService, userDirs, authSvc)
 	// 注入网盘图片源目录，使 /api/media/stream 能回退查找到网盘原图（data/cloud-images）。
 	restSrv.SetCloudDir(cloudImagesDir)
+	// 注入数据根目录，启用 RN bundle 端点（/api/rn/*）与运营活动端点（/api/promotions）。
+	restSrv.SetDataDir(dataDir)
 	// 注入元数据库，启用多设备同步端点（/api/sync/*、/api/device/*）与 upload 秒传去重。
 	restSrv.SetStore(store)
 
