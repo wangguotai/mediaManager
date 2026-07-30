@@ -46,6 +46,7 @@ import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import com.wgt.media.BackendImageLoader
+import com.wgt.feature.media.MediaService
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_delete
@@ -666,6 +667,41 @@ fun SettingsScreen(
                 Text(
                     BUILD_TIME,
                     style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            // V7：检查 RN 热更新
+            var updateStatus by remember { mutableStateOf("") }
+            var checkingUpdate by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .clickable {
+                        if (checkingUpdate) return@clickable
+                        checkingUpdate = true
+                        updateStatus = "检查中..."
+                        scope.launch {
+                            try {
+                                val manifest = MediaService.getRNManifest()
+                                if (manifest == null || manifest.bundles.isEmpty()) {
+                                    updateStatus = "无法获取更新信息"
+                                } else {
+                                    updateStatus = "最新版本: ${manifest.bundles[0].version}"
+                                }
+                            } catch (e: Exception) {
+                                updateStatus = "检查失败: ${e.message ?: "未知错误"}"
+                            }
+                            checkingUpdate = false
+                        }
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("检查 RN 更新", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (checkingUpdate) "检查中..." else updateStatus.ifEmpty { "点击检查" },
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
             }

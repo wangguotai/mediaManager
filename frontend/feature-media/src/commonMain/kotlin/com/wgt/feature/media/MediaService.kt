@@ -945,6 +945,43 @@ object MediaService {
     }
 
     /**
+     * V7：GET /api/rn/manifest → RN bundle 版本信息。
+     * 用于设置页"检查更新"功能。
+     */
+    suspend fun getRNManifest(): RNManifest? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/rn/manifest") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val bundles = obj["bundles"]?.jsonArray?.map { b ->
+                    val bo = b.jsonObject
+                    RNBundleInfo(
+                        name = bo["name"]?.jsonPrimitive?.content ?: "",
+                        version = bo["version"]?.jsonPrimitive?.content ?: "",
+                        description = bo["description"]?.jsonPrimitive?.content ?: ""
+                    )
+                } ?: emptyList()
+                RNManifest(bundles)
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getRNManifest FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    data class RNBundleInfo(
+        val name: String,
+        val version: String,
+        val description: String
+    )
+    data class RNManifest(
+        val bundles: List<RNBundleInfo>
+    )
+
+    /**
      * POST /api/device/register {device_name, platform} → {device_id}。
      *
      * 为当前登录用户登记一台设备，返回后端分配的 device_id（uuid）。同一用户可多设备，
