@@ -56,6 +56,32 @@ func (b *StoreBridge) GetUserByUsername(ctx context.Context, username string) (*
 	return toStoredUser(u), nil
 }
 
+// GetUserByID 按主键 id 查询，供 ChangePassword 在已知 token 解析出的 user.id 时
+// 取记录校验旧密码。错误翻译与 GetUserByUsername 一致（storage.ErrNotFound → ErrUserNotFound）。
+func (b *StoreBridge) GetUserByID(ctx context.Context, userID string) (*StoredUser, error) {
+	u, err := b.store.GetUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return toStoredUser(u), nil
+}
+
+// UpdatePassword 把指定 user 的密码哈希改写为 newHash（已由 auth 层 bcrypt），
+// 委托 storage.Store.UpdatePassword；storage.ErrNotFound → auth.ErrUserNotFound，
+// 使 ChangePassword 能把"未命中"统一归入 ErrInvalidCredentials。
+func (b *StoreBridge) UpdatePassword(ctx context.Context, userID, newPasswordHash string) error {
+	if err := b.store.UpdatePassword(ctx, userID, newPasswordHash); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrUserNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 // ListUsers 返回全部用户，供 first 模式判断“已有用户”。
 func (b *StoreBridge) ListUsers(ctx context.Context) ([]*StoredUser, error) {
 	users, err := b.store.ListUsers(ctx)

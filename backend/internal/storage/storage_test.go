@@ -208,3 +208,76 @@ func TestCascadeDelete(t *testing.T) {
 		t.Fatalf("device should be cascaded: %v", err)
 	}
 }
+
+// TestMarkDeletedForUserGuard 验证防横向越权：MarkDeletedForUser 按 (id,user_id) 双键校验，
+// 跨用户软删被拒(ErrNotFound)，本用户软删成功，且空 user_id 直接拒绝。
+func TestMarkDeletedForUserGuard(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := s.CreateUser(ctx, &User{ID: "u-owner", Username: "owner", PasswordHash: "h"}); err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	if err := s.CreateUser(ctx, &User{ID: "u-attacker", Username: "attacker", PasswordHash: "h"}); err != nil {
+		t.Fatalf("CreateUser attacker: %v", err)
+	}
+	// owner 的媒体。
+	if err := s.CreateMedia(ctx, &Media{ID: "m-own", UserID: "u-owner", Filename: "own.jpg", Type: "IMAGE"}); err != nil {
+		t.Fatalf("CreateMedia: %v", err)
+	}
+
+	// 攻击者(u-attacker)试图软删 owner 的 m-own → 必须被拒。
+	if err := s.MarkDeletedForUser(ctx, "u-attacker", "m-own"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user soft delete must be denied, got %v", err)
+	}
+	// owner 软删自己 → 仍可见(未被删)，应仍可通过 GetMedia 取到且 deleted=false。
+	got, _ := s.GetMedia(ctx, "m-own")
+	if got.Deleted {
+		t.Fatalf("owner media must not be soft-deleted by cross-user call: %+v", got)
+	}
+
+	// owner 自己软删 → 成功。
+	if err := s.MarkDeletedForUser(ctx, "u-owner", "m-own"); err != nil {
+		t.Fatalf("owner self soft delete: %v", err)
+	}
+	got, _ = s.GetMedia(ctx, "m-own")
+	if !got.Deleted {
+		t.Fatalf("owner media should be soft-deleted after self call: %+v", got)
+	}
+
+	// 不存在的 id → ErrNotFound。
+	if err := s.MarkDeletedForUser(ctx, "u-owner", "no-such"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("nonexistent id: want ErrNotFound, got %v", err)
+	}
+	// 空 user_id → ErrNotFound（防误以空串匹配）。
+	if err := s.MarkDeletedForUser(ctx, "", "m-own"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty user_id: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestUpdatePassword 验证按 id 更新 password_hash：命中生效，未命中 ErrNotFound，空 id 报错。
+func TestUpdatePassword(t *testing.T) {
+	s, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := s.CreateUser(ctx, &User{ID: "u-1", Username: "eve", PasswordHash: "old-hash"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.UpdatePassword(ctx, "u-1", "new-hash"); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+	got, _ := s.GetUser(ctx, "u-1")
+	if got.PasswordHash != "new-hash" {
+		t.Fatalf("password hash not updated: %q", got.PasswordHash)
+	}
+	// 未命中 id → ErrNotFound（防静默失败）。
+	if err := s.UpdatePassword(ctx, "u-missing", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing user: want ErrNotFound, got %v", err)
+	}
+	// 空 id → 报错（不应误更新）。
+	if err := s.UpdatePassword(ctx, "", "x"); err == nil {
+		t.Fatalf("empty id should error")
+	}
+}

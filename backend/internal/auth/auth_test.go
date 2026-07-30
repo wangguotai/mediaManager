@@ -50,6 +50,22 @@ func (m *memStore) GetUserByUsername(ctx context.Context, username string) (*Sto
 	return nil, ErrUserNotFound
 }
 
+func (m *memStore) GetUserByID(ctx context.Context, userID string) (*StoredUser, error) {
+	if u, ok := m.byID[userID]; ok {
+		return u, nil
+	}
+	return nil, ErrUserNotFound
+}
+
+func (m *memStore) UpdatePassword(ctx context.Context, userID, newHash string) error {
+	u, ok := m.byID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	u.PasswordHash = newHash
+	return nil
+}
+
 func (m *memStore) ListUsers(ctx context.Context) ([]*StoredUser, error) {
 	out := make([]*StoredUser, len(m.users))
 	copy(out, m.users)
@@ -79,7 +95,7 @@ func newTestAuth(t *testing.T, signup string) (*AuthService, *memStore) {
 // TestLoginSuccess 验证注册后能用同凭据登录，且返回 token 可被 ParseToken 解析回同一 user_id。
 func TestLoginSuccess(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	reg, err := a.Register(context.Background(), RegisterRequest{Username: "alice", Password: "pw1234"})
+	reg, err := a.Register(context.Background(), RegisterRequest{Username: "alice", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -92,7 +108,7 @@ func TestLoginSuccess(t *testing.T) {
 		t.Fatalf("ParseToken after register: uid=%q err=%v", uid, err)
 	}
 
-	login, err := a.Login(context.Background(), LoginRequest{Username: "alice", Password: "pw1234"})
+	login, err := a.Login(context.Background(), LoginRequest{Username: "alice", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -117,13 +133,13 @@ func TestLoginSuccess(t *testing.T) {
 // TestLoginInvalidCredentials 验证错误密码/不存在用户均返回 ErrInvalidCredentials（不泄露用户是否存在）。
 func TestLoginInvalidCredentials(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	if _, err := a.Register(context.Background(), RegisterRequest{Username: "bob", Password: "pw1234"}); err != nil {
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "bob", Password: "pw123456"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	cases := []LoginRequest{
 		{Username: "bob", Password: "wrong"},
-		{Username: "nobody", Password: "pw1234"},
-		{Username: "", Password: "pw1234"},
+		{Username: "nobody", Password: "pw123456"},
+		{Username: "", Password: "pw123456"},
 		{Username: "bob", Password: ""},
 	}
 	for _, c := range cases {
@@ -136,7 +152,7 @@ func TestLoginInvalidCredentials(t *testing.T) {
 // TestSignupOff 验证 off 模式下注册一律被拒。
 func TestSignupOff(t *testing.T) {
 	a, _ := newTestAuth(t, "off")
-	_, err := a.Register(context.Background(), RegisterRequest{Username: "x", Password: "pw1234"})
+	_, err := a.Register(context.Background(), RegisterRequest{Username: "x", Password: "pw123456"})
 	if !errors.Is(err, ErrSignupDisabled) {
 		t.Fatalf("off mode: want ErrSignupDisabled, got %v", err)
 	}
@@ -145,7 +161,7 @@ func TestSignupOff(t *testing.T) {
 // TestSignupFirst 验证 first 模式：首位注册者获 admin，第二位被拒。
 func TestSignupFirst(t *testing.T) {
 	a, _ := newTestAuth(t, "first")
-	first, err := a.Register(context.Background(), RegisterRequest{Username: "founder", Password: "pw1234"})
+	first, err := a.Register(context.Background(), RegisterRequest{Username: "founder", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
@@ -153,7 +169,7 @@ func TestSignupFirst(t *testing.T) {
 		t.Fatalf("first registrant should be admin, got %q", first.User.Role)
 	}
 	// 已有用户 → 注册关闭。
-	_, err = a.Register(context.Background(), RegisterRequest{Username: "second", Password: "pw1234"})
+	_, err = a.Register(context.Background(), RegisterRequest{Username: "second", Password: "pw123456"})
 	if !errors.Is(err, ErrSignupDisabled) {
 		t.Fatalf("second Register in first mode: want ErrSignupDisabled, got %v", err)
 	}
@@ -162,7 +178,7 @@ func TestSignupFirst(t *testing.T) {
 // TestSignupOpen 验证 open 模式下注册者均为普通 user。
 func TestSignupOpen(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	r, err := a.Register(context.Background(), RegisterRequest{Username: "u1", Password: "pw1234"})
+	r, err := a.Register(context.Background(), RegisterRequest{Username: "u1", Password: "pw123456"})
 	if err != nil || r.User.Role != "user" {
 		t.Fatalf("open mode: role=%q err=%v", r.User.Role, err)
 	}
@@ -171,16 +187,16 @@ func TestSignupOpen(t *testing.T) {
 // TestUsernameTaken 验证唯一约束冲突映射为 ErrUsernameTaken。
 func TestUsernameTaken(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	if _, err := a.Register(context.Background(), RegisterRequest{Username: "dup", Password: "pw1234"}); err != nil {
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "dup", Password: "pw123456"}); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	_, err := a.Register(context.Background(), RegisterRequest{Username: "dup", Password: "pw1234"})
+	_, err := a.Register(context.Background(), RegisterRequest{Username: "dup", Password: "pw123456"})
 	if !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("duplicate username: want ErrUsernameTaken, got %v", err)
 	}
 }
 
-// TestShortPassword 验证过短密码被拒（>=4）。
+// TestShortPassword 验证过短密码被拒（>= minPasswordLength=8）。
 func TestShortPassword(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
 	_, err := a.Register(context.Background(), RegisterRequest{Username: "short", Password: "abc"})
@@ -189,10 +205,68 @@ func TestShortPassword(t *testing.T) {
 	}
 }
 
+// TestPasswordMinLength8 验证 V5 安全基线——密码至少 8 位：7 位被拒，8 位通过。
+func TestPasswordMinLength8(t *testing.T) {
+	a, _ := newTestAuth(t, "open")
+	// 7 位应被拒。
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "seven", Password: "1234567"}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("7-char password should be rejected, got %v", err)
+	}
+	// 8 位应通过。
+	res, err := a.Register(context.Background(), RegisterRequest{Username: "eight", Password: "12345678"})
+	if err != nil {
+		t.Fatalf("8-char password should be accepted, got %v", err)
+	}
+	if res == nil || res.Token == "" {
+		t.Fatalf("expected successful registration for 8-char password")
+	}
+}
+
+// TestChangePassword 验证改密：旧密码正确时成功改密并可用新密码登录；旧密码错时拒绝。
+func TestChangePassword(t *testing.T) {
+	a, store := newTestAuth(t, "open")
+	reg, err := a.Register(context.Background(), RegisterRequest{Username: "carol", Password: "pw123456"})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	uid := reg.User.ID
+
+	// 旧密码错 → ErrInvalidCredentials。
+	if err := a.ChangePassword(context.Background(), uid, "WRONGOLD", "newpass12"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong old password: want ErrInvalidCredentials, got %v", err)
+	}
+	// 新密码过短 → ErrInvalidCredentials（即便旧密码正确也应拒绝写入弱口令）。
+	if err := a.ChangePassword(context.Background(), uid, "pw123456", "short"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("short new password: want ErrInvalidCredentials, got %v", err)
+	}
+	// 正常改密。
+	if err := a.ChangePassword(context.Background(), uid, "pw123456", "newpass12"); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+	// 旧密码应已失效。
+	if _, err := a.Login(context.Background(), LoginRequest{Username: "carol", Password: "pw123456"}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("login with old password after change: want ErrInvalidCredentials, got %v", err)
+	}
+	// 新密码可登录。
+	if _, err := a.Login(context.Background(), LoginRequest{Username: "carol", Password: "newpass12"}); err != nil {
+		t.Fatalf("login with new password: %v", err)
+	}
+	// 底层 hash 确实被改写（防"改密静默失败"）：新密码能登录即证明 hash 已更新。
+	_ = store
+}
+
+// TestChangePasswordUnknownUser 验证对不存在用户改密返回 ErrInvalidCredentials（不泄露存在性）。
+func TestChangePasswordUnknownUser(t *testing.T) {
+	a, _ := newTestAuth(t, "open")
+	if err := a.ChangePassword(context.Background(), "no-such-user", "whatever1", "newpass12"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("unknown user change: want ErrInvalidCredentials, got %v", err)
+	}
+}
+
 // TestParseTokenInvalid 验证伪造/篡改/错误密钥签发的 token 均被拒。
 func TestParseTokenInvalid(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	reg, err := a.Register(context.Background(), RegisterRequest{Username: "p", Password: "pw1234"})
+	reg, err := a.Register(context.Background(), RegisterRequest{Username: "p", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -224,7 +298,7 @@ func TestExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	reg, err := a.Register(context.Background(), RegisterRequest{Username: "e", Password: "pw1234"})
+	reg, err := a.Register(context.Background(), RegisterRequest{Username: "e", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -305,10 +379,10 @@ func TestBootstrapEmptyCreatesAdmin(t *testing.T) {
 // TestBootstrapNonEmptyReturnsNil 验证库非空时 BootstrapAdmin 返回 nil（已引导过，不重复）。
 func TestBootstrapNonEmptyReturnsNil(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	if _, err := a.Register(context.Background(), RegisterRequest{Username: "someone", Password: "pw1234"}); err != nil {
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "someone", Password: "pw123456"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	res, err := a.BootstrapAdmin(context.Background(), "admin", "pw1234")
+	res, err := a.BootstrapAdmin(context.Background(), "admin", "pw123456")
 	if err != nil {
 		t.Fatalf("BootstrapAdmin on non-empty: %v", err)
 	}

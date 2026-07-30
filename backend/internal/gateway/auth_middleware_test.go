@@ -39,6 +39,25 @@ func (f *fakeStore) GetUserByUsername(ctx context.Context, username string) (*au
 	}
 	return nil, auth.ErrUserNotFound
 }
+
+func (f *fakeStore) GetUserByID(ctx context.Context, userID string) (*auth.StoredUser, error) {
+	for _, u := range f.users {
+		if u.ID == userID {
+			return u, nil
+		}
+	}
+	return nil, auth.ErrUserNotFound
+}
+
+func (f *fakeStore) UpdatePassword(ctx context.Context, userID, newHash string) error {
+	for _, u := range f.users {
+		if u.ID == userID {
+			u.PasswordHash = newHash
+			return nil
+		}
+	}
+	return auth.ErrUserNotFound
+}
 func (f *fakeStore) ListUsers(ctx context.Context) ([]*auth.StoredUser, error) {
 	out := make([]*auth.StoredUser, len(f.users))
 	copy(out, f.users)
@@ -58,7 +77,7 @@ func newAuthedGateway(t *testing.T) (*Server, string, string) {
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
 	}
-	res, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "alice", Password: "pw1234"})
+	res, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "alice", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("seed register: %v", err)
 	}
@@ -180,7 +199,7 @@ func TestMiddlewareNilAuthSvcPassThrough(t *testing.T) {
 
 func TestLoginEndpointSuccess(t *testing.T) {
 	srv, _, _ := newAuthedGateway(t)
-	body := `{"username":"alice","password":"pw1234"}`
+	body := `{"username":"alice","password":"pw123456"}`
 	req := newReq(http.MethodPost, "/api/auth/login", "", body)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
@@ -229,7 +248,7 @@ func TestRegisterEndpointSignupDisabledReturns403(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := NewServer(":0", OpenClawConfig{}, nil, nil, authSvcOff)
-	body := `{"username":"n","password":"pw1234"}`
+	body := `{"username":"n","password":"pw123456"}`
 	req := newReq(http.MethodPost, "/api/auth/register", "", body)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
@@ -247,10 +266,10 @@ func TestRegisterEndpointDuplicateReturns409(t *testing.T) {
 	}
 	srv2 := NewServer(":0", OpenClawConfig{}, nil, nil, authSvc)
 	// 先注册一次。
-	req1 := newReq(http.MethodPost, "/api/auth/register", "", `{"username":"dup","password":"pw1234"}`)
+	req1 := newReq(http.MethodPost, "/api/auth/register", "", `{"username":"dup","password":"pw123456"}`)
 	srv2.mux.ServeHTTP(httptest.NewRecorder(), req1)
 	// 同名再注册。
-	req2 := newReq(http.MethodPost, "/api/auth/register", "", `{"username":"dup","password":"pw1234"}`)
+	req2 := newReq(http.MethodPost, "/api/auth/register", "", `{"username":"dup","password":"pw123456"}`)
 	rec := httptest.NewRecorder()
 	srv2.mux.ServeHTTP(rec, req2)
 	if rec.Code != http.StatusConflict {
@@ -265,5 +284,84 @@ func TestAuthMethodNotAllowed(t *testing.T) {
 	srv.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/auth/login: want 405, got %d", rec.Code)
+	}
+}
+
+// ----- /api/auth/change-password -----
+
+// serveAuthed 用 authMiddleware 包裹 mux，使带 token 的请求被解析注入 user_id，
+// 与真实 ListenAndServe 中间件链一致（mux 本身不含中间件）。
+func serveAuthed(srv *Server, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	srv.authMiddleware(srv.mux).ServeHTTP(rec, req)
+	return rec
+}
+
+// TestChangePasswordRequiresToken 验证改密端点不被豁免：无 token → 401。
+func TestChangePasswordRequiresToken(t *testing.T) {
+	srv, _, _ := newAuthedGateway(t)
+	req := newReq(http.MethodPost, "/api/auth/change-password", "",
+		`{"old_password":"pw123456","new_password":"newpass12"}`)
+	rec := serveAuthed(srv, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("change-password without token: want 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChangePasswordSuccess 验证旧密码正确可改密，新密码可登录、旧密码失效。
+func TestChangePasswordSuccess(t *testing.T) {
+	srv, token, _ := newAuthedGateway(t)
+	// alice 初始密码 "pw123456"。
+	body := `{"old_password":"pw123456","new_password":"newpass12"}`
+	rec := serveAuthed(srv, newReq(http.MethodPost, "/api/auth/change-password", token, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("change-password: want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	m := recJSON(t, rec)
+	if m["status"] != "success" {
+		t.Fatalf("change-password status: %+v", m)
+	}
+	// 新密码可登录。
+	loginRec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(loginRec, newReq(http.MethodPost, "/api/auth/login", "",
+		`{"username":"alice","password":"newpass12"}`))
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login with new password: want 200, got %d body=%s", loginRec.Code, loginRec.Body.String())
+	}
+	// 旧密码应失效。
+	oldRec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(oldRec, newReq(http.MethodPost, "/api/auth/login", "",
+		`{"username":"alice","password":"pw123456"}`))
+	if oldRec.Code != http.StatusBadRequest {
+		t.Fatalf("login with old password: want 400, got %d", oldRec.Code)
+	}
+}
+
+// TestChangePasswordWrongOldReturns400 验证旧密码错 → 400（不区分用户/密码错，防枚举）。
+func TestChangePasswordWrongOldReturns400(t *testing.T) {
+	srv, token, _ := newAuthedGateway(t)
+	body := `{"old_password":"WRONGPASS","new_password":"newpass12"}`
+	rec := serveAuthed(srv, newReq(http.MethodPost, "/api/auth/change-password", token, body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("wrong old password: want 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChangePasswordWeakNewReturns400 验证新密码不满足长度策略 → 400。
+func TestChangePasswordWeakNewReturns400(t *testing.T) {
+	srv, token, _ := newAuthedGateway(t)
+	body := `{"old_password":"pw123456","new_password":"short"}`
+	rec := serveAuthed(srv, newReq(http.MethodPost, "/api/auth/change-password", token, body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("weak new password: want 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChangePasswordFieldsRequired 验证字段缺失 → 400。
+func TestChangePasswordFieldsRequired(t *testing.T) {
+	srv, token, _ := newAuthedGateway(t)
+	rec := serveAuthed(srv, newReq(http.MethodPost, "/api/auth/change-password", token, `{"old_password":"pw123456"}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing new_password: want 400, got %d", rec.Code)
 	}
 }

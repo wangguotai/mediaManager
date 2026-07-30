@@ -46,7 +46,7 @@ func newSyncGateway(t *testing.T) (*Server, string, string, string) {
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
 	}
-	res, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "alice", Password: "pw1234"})
+	res, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "alice", Password: "pw123456"})
 	if err != nil {
 		t.Fatalf("seed register: %v", err)
 	}
@@ -298,7 +298,95 @@ func TestUploadPersistsClientIDTakenAt(t *testing.T) {
 	}
 }
 
-// ===== 测试辅助 =====
+// ----- 越权删除防护：跨用户删 media 不应标记墓碑（user_id 校验）-----
+
+// newTwoUserGateway 构造 open 模式网关并注册 alice 与 bob 两个用户，
+// 返回 alice/bob 各自的 token 与 alice 的 user_id。用于验证跨用户越权删除。
+func newTwoUserGateway(t *testing.T) (srv *Server, aliceToken, bobToken, aliceUID string) {
+	t.Helper()
+	dataRoot := t.TempDir()
+	usersRoot := filepath.Join(dataRoot, "users")
+	if err := os.MkdirAll(usersRoot, 0o755); err != nil {
+		t.Fatalf("mkdir users root: %v", err)
+	}
+	userDirs := service.NewUserDirs(usersRoot)
+	store, err := storage.Open(filepath.Join(dataRoot, "test.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var counter int
+	idGen := func() string {
+		counter++
+		return "u-" + strconv.Itoa(counter) // u-1, u-2 ...
+	}
+	authSvc, err := auth.New(
+		auth.NewStoreBridge(store), "two-user-secret", 3600, config.SignupOpen,
+		auth.WithIDGenerator(idGen),
+		auth.WithClock(func() time.Time { return time.Now().Add(time.Hour) }),
+	)
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	alice, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "alice", Password: "pw123456"})
+	if err != nil {
+		t.Fatalf("register alice: %v", err)
+	}
+	bob, err := authSvc.Register(context.Background(), auth.RegisterRequest{Username: "bob", Password: "pw123456"})
+	if err != nil {
+		t.Fatalf("register bob: %v", err)
+	}
+	svc := service.NewMediaService(userDirs, "")
+	srv = NewServer(":0", OpenClawConfig{}, svc, userDirs, authSvc)
+	srv.SetStore(store)
+	return srv, alice.Token, bob.Token, alice.User.ID
+}
+
+// TestDeleteCrossUserTombstoneBlocked 验证防横向越权：bob 无法软删 alice 的 media。
+// alice 上传一条媒体（写入 storage media 表，user_id=alice）；
+// bob 持自己 token 调删除端点传 alice 的 media_id——文件层因 uploads 按用户隔离无法被 bob 删，
+//storage 墓碑层 MarkDeletedForUser(user_id=bob) 必须拒绝；随后 alice 的 sync/changes
+// 不应出现该媒体的 deleted 墓碑（即 alice 的媒体未被软删）。
+func TestDeleteCrossUserTombstoneBlocked(t *testing.T) {
+	srv, aliceToken, bobToken, aliceUID := newTwoUserGateway(t)
+
+	// alice 上传一条媒体。
+	up := uploadAndCheck(t, srv, aliceToken, "secret.jpg", []byte("alice-private"), "success")
+
+	// bob 试图删除 alice 的 media_id。
+	delReq := authedReq(http.MethodPost, "/api/media/delete", bobToken,
+		[]byte(`{"media_ids":["`+up.mediaID+`"]}`))
+	delRec := httptest.NewRecorder()
+	authedHandler(srv).ServeHTTP(delRec, delReq)
+	// 删除端点对"非己有"媒体返回的 status 语义为 not_found/partial（文件未删），
+	// 不报 500 即可——重点是墓碑未被打。
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete endpoint should return 200, got %d body=%s", delRec.Code, delRec.Body.String())
+	}
+
+	// 直接查 storage：alice 的 media 行 deleted 必须仍为 0（墓碑未被 bob 打）。
+	media, err := srv.store.GetMedia(context.Background(), up.mediaID)
+	if err != nil {
+		t.Fatalf("GetMedia: %v", err)
+	}
+	if media.UserID != aliceUID {
+		t.Fatalf("media belongs to %q, want alice %q", media.UserID, aliceUID)
+	}
+	if media.Deleted {
+		t.Fatalf("cross-user tombstone must be blocked: media was soft-deleted by bob: %+v", media)
+	}
+
+	// alice 的 changes 不应含该媒体的墓碑条目。
+	_, m := doJSON(t, srv, authedReq(http.MethodGet, "/api/sync/changes", aliceToken, nil))
+	changes, _ := m["changes"].([]any)
+	for _, c := range changes {
+		item, _ := c.(map[string]any)
+		if item["id"] == up.mediaID && item["deleted"] == true {
+			t.Fatalf("alice's changes must not contain a tombstone for her own media (bob blocked): %+v", item)
+		}
+	}
+}
 
 type uploadResult struct {
 	mediaID string

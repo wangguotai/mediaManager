@@ -59,8 +59,14 @@ type UserStore interface {
 	CreateUser(ctx context.Context, u StoredUser) error
 	// GetUserByUsername 按用户名查询；未命中返回 ErrUserNotFound 包装错误。
 	GetUserByUsername(ctx context.Context, username string) (*StoredUser, error)
+	// GetUserByID 按用户主键 id 查询；未命中返回 ErrUserNotFound 包装错误。
+	// 供 ChangePassword 在已知 token 解析出的 user.id 时取记录校验旧密码。
+	GetUserByID(ctx context.Context, userID string) (*StoredUser, error)
 	// ListUsers 返回全部用户，用于 first 模式判断"是否已有用户"。
 	ListUsers(ctx context.Context) ([]*StoredUser, error)
+	// UpdatePassword 把指定 user 的密码哈希改写为新哈希（调用方负责 bcrypt 哈希）。
+	// 供 ChangePassword 调用；未命中返回 ErrUserNotFound 包装错误（由具体实现翻译）。
+	UpdatePassword(ctx context.Context, userID, newPasswordHash string) error
 }
 
 // StoredUser 是 UserStore 传递给 auth 的持久化用户记录，含密码哈希。
@@ -271,10 +277,13 @@ func (a *AuthService) resolveSignupRole(ctx context.Context) (string, error) {
 	}
 }
 
-// validatePassword 施加最小长度约束，避免弱口令。当前要求 >=4，足够演示且不阻塞测试。
+// minPasswordLength 是允许的最小密码长度。V5 安全基线要求至少 8 位，避免弱口令。
+const minPasswordLength = 8
+
+// validatePassword 施加最小长度约束，避免弱口令。要求 >= minPasswordLength(8)。
 // 返回 ErrInvalidCredentials 使 gateway 把弱口令映射为 400 而非 500（与 writeAuthError 注释承诺一致）。
 func (a *AuthService) validatePassword(pw string) error {
-	if len(pw) < 4 {
+	if len(pw) < minPasswordLength {
 		return ErrInvalidCredentials
 	}
 	return nil
@@ -317,6 +326,41 @@ func (a *AuthService) ParseToken(tokenStr string) (string, error) {
 
 // AllowSignup 返回当前注册模式，供 /healthz 或调试端点观测。
 func (a *AuthService) AllowSignup() string { return a.signup }
+
+// ChangePassword 校验旧密码后更新为新密码。供 POST /api/auth/change-password 调用，
+// userID 由 JWT 中间件解析注入（即只能改自己的密码，防横向越权）。
+//
+// 语义：
+//   - userID 为空、用户不存在、旧密码不匹配 → ErrInvalidCredentials（不区分，防枚举）。
+//   - newPassword 不满足长度策略(<8) → ErrInvalidCredentials。
+//   - 底层 UpdatePassword 未命中 → ErrInvalidCredentials（理论上不会，因前面已查到；防御）。
+//   - 成功后不签发新 token——旧 token 仍有效至过期；如需强制重登可后续引入 jti 版本号。
+func (a *AuthService) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+	if userID == "" {
+		return ErrInvalidCredentials
+	}
+	// 先校验新密码长度，避免即便旧密码正确也写入弱口令。
+	if err := a.validatePassword(newPassword); err != nil {
+		return err
+	}
+	u, err := a.store.GetUserByID(ctx, userID)
+	if err != nil {
+		// 用户不存在 → 归入 ErrInvalidCredentials，与"旧密码错"不可区分，防枚举。
+		return ErrInvalidCredentials
+	}
+	// 校验旧密码哈希。
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(oldPassword)); err != nil {
+		return ErrInvalidCredentials
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("auth: hash password on change: %w", err)
+	}
+	if err := a.store.UpdatePassword(ctx, userID, string(hash)); err != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
 
 // BootstrapResult 是 BootstrapAdmin 成功创建首个超管账号后返回的引导信息。
 // main.go 据此在启动日志中打印一次性凭据与 token，使运维首次即可登录。
