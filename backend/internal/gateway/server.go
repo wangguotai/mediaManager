@@ -1713,11 +1713,24 @@ func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
 		if len(items) > 1 {
 			totalDupes += len(items)
 			totalWasted += int64(len(items)-1) * items[0].Size
+			// V7：建议保留最新的一份（created_at 最大），其余建议删除
+			sorted := make([]metaItem, len(items))
+			copy(sorted, items)
+			sort.Slice(sorted, func(i, j int) bool {
+				return sorted[i].CreateAt > sorted[j].CreateAt
+			})
+			keepID := sorted[0].ID
+			deleteIDs := make([]string, 0, len(sorted)-1)
+			for _, m := range sorted[1:] {
+				deleteIDs = append(deleteIDs, m.ID)
+			}
 			dupes = append(dupes, map[string]any{
-				"sha256": sha,
-				"count":  len(items),
-				"size":   items[0].Size,
-				"media":  items,
+				"sha256":     sha,
+				"count":      len(items),
+				"size":       items[0].Size,
+				"media":      items,
+				"keep_id":    keepID,
+				"delete_ids": deleteIDs,
 			})
 		}
 	}
