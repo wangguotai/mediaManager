@@ -246,23 +246,29 @@ func (s *Server) ListenAndServe() error {
 					s.accessLogMiddleware(s.mux)))))
 }
 
-// startTrashPurger V7：后台定期清理回收站。
+// startTrashPurger V7：后台定期清理回收站 + 过期分享链接。
 // maxAge: 回收站最大保留时长；interval: 清理周期。
 func (s *Server) startTrashPurger(maxAge, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// 启动时先清理一次
+	s.runPurge(maxAge)
+	for range ticker.C {
+		s.runPurge(maxAge)
+	}
+}
+
+// runPurge 执行一轮清理（回收站 + 过期分享链接）。
+func (s *Server) runPurge(maxAge time.Duration) {
 	if n, err := s.store.PurgeExpiredTrash(context.Background(), maxAge); err != nil {
 		slog.Error("trash purge failed", "error", err)
 	} else if n > 0 {
-		slog.Info("trash purged on startup", "count", n)
+		slog.Info("trash purged", "count", n)
 	}
-	for range ticker.C {
-		if n, err := s.store.PurgeExpiredTrash(context.Background(), maxAge); err != nil {
-			slog.Error("trash purge failed", "error", err)
-		} else if n > 0 {
-			slog.Info("trash purged", "count", n)
-		}
+	if n, err := s.store.DeleteExpiredShareTokens(context.Background()); err != nil {
+		slog.Error("share token purge failed", "error", err)
+	} else if n > 0 {
+		slog.Info("expired share tokens purged", "count", n)
 	}
 }
 

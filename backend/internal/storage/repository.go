@@ -460,7 +460,18 @@ func (s *Store) DeleteShareToken(ctx context.Context, token, userID string) erro
 	return nil
 }
 
-// ===== AlbumShare =====（PRD-v7 §2.3 共享相册）
+// DeleteExpiredShareTokens V7：物理删除所有已过期的分享链接。
+// expires_at 非空且 < now 的行被删除。返回清理条数。
+func (s *Store) DeleteExpiredShareTokens(ctx context.Context) (int, error) {
+	now := time.Now().Format(time.RFC3339)
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM share_tokens WHERE expires_at != '' AND expires_at < ?`, now)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired share tokens: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
 
 // CreateAlbumShare 把一个相册共享给 sharedWithUserID。ownerUserID 为相册所有者
 // （发起共享的人）。若该 (album_id, shared_with_user_id) 已存在则幂等返回，
