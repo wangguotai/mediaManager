@@ -1,0 +1,37 @@
+# tasks-v5-prd.yaml
+
+tasks:
+  - id: v5-prd
+    product: claude
+    prompt: |
+      读 /Users/wgt/projects/media-manager/docs/PRD-v4.md、docs/V4-QA-REPORT.md、docs/V4-MVP-VERIFY.md。
+      基于V4已完成状态（认证+SQLite+同步+Docker+运营骨架+客户端auth/sync/file-mgmt+tombstone+dedup），写 V5 PRD 到 docs/PRD-v5.md。
+      
+      V5 聚焦：
+      1. 客户端体验打磨（对标百度网盘/小米相册的UX差距）
+      2. 运营服务端中继实际跑通
+      3. 性能和安全加固
+      4. 部署文档和用户手册
+      
+      务实聚焦。完成后 git add -A && git commit -m "docs: PRD-v5 — next sprint plan"
+    files: [docs/]
+    depends_on: []
+    timeout: 300s
+    max_retries: 2
+    verify_commands: []
+
+  - id: v5-tasks
+    product: claude
+    prompt: |
+      读 docs/PRD-v5.md，写 tasks.yaml 到 .agents/tasks-v5-sprint.yaml。
+      格式参考 /Users/wgt/ai/agent-dashboard/docs/setup-guide.md。
+      技术栈 verify:
+      - 后端: cd backend && go build ./...
+      - 运营: cd ops-server && go build ./...
+      - 前端: cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64
+      完成后 git add -A && git commit -m "docs: tasks-v5-sprint.yaml — V5 sprint DAG"
+    files: [.agents/]
+    depends_on: [v5-prd]
+    timeout: 300s
+    max_retries: 2
+    verify_commands: []

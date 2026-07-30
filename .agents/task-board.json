@@ -1,73 +1,39 @@
 {
-  "fix-ios-file-sec": {
+  "v5-prd": {
     "product": "claude",
-    "task": "在 frontend/ iOS SettingsStorage 改用文件方案存 secure data。\n1. getSecureString/putSecur",
-    "status": "merged",
-    "log": "/tmp/agent-fix-ios-file-sec.log",
-    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-ios-file-sec",
-    "branch": "agent/fix-ios-file-sec",
+    "task": "读 /Users/wgt/projects/media-manager/docs/PRD-v4.md、docs/V4-QA-REPORT.md、docs/V4-",
+    "status": "failed",
+    "log": "/tmp/agent-v5-prd.log",
+    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/v5-prd",
+    "branch": "agent/v5-prd",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 300,
-    "started_at": "2026-07-30T05:02:33.043Z",
-    "completed_at": "2026-07-30T05:07:14.892Z",
-    "exit_code": 0,
-    "commit": null,
-    "retries": 2,
-    "max_retries": 3,
-    "files": [
-      "frontend/"
-    ],
-    "depends_on": [],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:compileKotlinIosArm64"
-    ],
-    "clean_commands": [
-      "rm -rf build"
-    ],
-    "merge_strategy": "merge",
-    "shared_files": [],
-    "base_ref": "6d0433cf53c9c8b57d0f77627cf09bc00244969f",
-    "merge_started_at": "2026-07-30T05:12:32.888Z",
-    "merged_at": "2026-07-30T05:12:38.735Z",
-    "merged_ref": "041b2c33cfbb4e492a05f676238c0728cc6aefc8"
-  },
-  "fix-tombstone": {
-    "product": "claude",
-    "task": "在 backend/ 修复删除逻辑，实现软删除墓碑。\n当前 POST /api/media/delete 是物理删除文件+记录，PRD 要求软删除：\n1. 删除",
-    "status": "failed",
-    "log": "/tmp/agent-fix-tombstone.log",
-    "worktree": "/Users/wgt/projects/media-manager/.agents/worktrees/fix-tombstone",
-    "branch": "agent/fix-tombstone",
-    "workdir": "/Users/wgt/projects/media-manager",
-    "timeout": 400,
-    "started_at": "2026-07-30T05:05:52.841Z",
-    "completed_at": "2026-07-30T05:12:32.883Z",
+    "started_at": "2026-07-30T06:19:15.681Z",
+    "completed_at": "2026-07-30T06:24:15.735Z",
     "exit_code": 124,
     "commit": null,
-    "retries": 3,
-    "max_retries": 3,
+    "retries": 2,
+    "max_retries": 2,
     "files": [
-      "backend/"
+      "docs/"
     ],
     "depends_on": [],
-    "verify_commands": [
-      "cd /Users/wgt/projects/media-manager/backend && go build ./..."
-    ],
+    "verify_commands": [],
     "clean_commands": [
       "rm -rf build"
     ],
     "merge_strategy": "merge",
     "shared_files": [],
-    "base_ref": "6d0433cf53c9c8b57d0f77627cf09bc00244969f",
+    "base_ref": "f09eb3caa50b37b20c8e1d153079929db40c96c0",
     "failure": "max_retries_exceeded"
   },
-  "verify-tombstone": {
+  "v5-tasks": {
     "product": "claude",
-    "task": "验证墓碑修复。在 /Users/wgt/projects/media-manager/backend 工作。\n1. go run ./cmd/server &\n",
+    "task": "读 docs/PRD-v5.md，写 tasks.yaml 到 .agents/tasks-v5-sprint.yaml。\n格式参考 /Users/wgt/ai",
     "status": "skipped",
     "log": null,
     "worktree": null,
-    "branch": "agent/verify-tombstone",
+    "branch": "agent/v5-tasks",
     "workdir": "/Users/wgt/projects/media-manager",
     "timeout": 300,
     "started_at": null,
@@ -75,12 +41,12 @@
     "exit_code": null,
     "commit": null,
     "retries": 0,
-    "max_retries": 1,
+    "max_retries": 2,
     "files": [
-      "docs/"
+      ".agents/"
     ],
     "depends_on": [
-      "fix-tombstone"
+      "v5-prd"
     ],
     "verify_commands": [],
     "clean_commands": [

@@ -1,0 +1,23 @@
+# tasks-android-delete.yaml
+
+tasks:
+  - id: fix-android-del-v3
+    product: claude
+    prompt: |
+      在 frontend/ 修复 Android 10+ 本地图片删除。
+      1. 当前 PhotoGalleryService.android.kt 的 deleteMedia 用 ContentResolver.delete()
+      2. Android 10+ (API 29+) 需要 MediaStore.createDeleteRequest() 返回 PendingIntent
+      3. 方案：deleteMedia 返回 -1 表示需要系统确认。新增 expect/actual:
+         - expect fun requestMediaDeletion(mediaIds: List<String>, onResult: (Int) -> Unit)
+         - Android actual: API>=29 用 MediaStore.createDeleteRequest + Activity Context 启动
+         - Android actual: API<29 直接 ContentResolver.delete
+         - iOS actual: no-op return 0
+      4. ViewModel.deleteSelectedMedia 检测 deleteMedia 返回值，-1 时调 requestMediaDeletion
+      5. assembleDebug 必须通过
+      完成后 git add -A && git commit -m "fix-android-del-v3: Android 10+ recoverable deletion"
+    files: [frontend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
