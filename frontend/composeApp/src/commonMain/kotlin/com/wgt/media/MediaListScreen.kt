@@ -1033,7 +1033,39 @@ fun ImagePreviewDialog(
                     )
                 }
 
-                // ── 顶部信息栏：文件名 + 大小 + 日期 ──
+                // V7：左右导航箭头（非首张显示左箭头，非末张显示右箭头）
+                if (pagerState.currentPage > 0) {
+                    IconButton(
+                        onClick = { scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) } },
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 8.dp)
+                            .background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                    ) {
+                        Icon(
+                            painterResource(Res.drawable.ic_arrow_back),
+                            contentDescription = "上一张",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+                if (pagerState.currentPage < mediaList.lastIndex) {
+                    IconButton(
+                        onClick = { scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) } },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 8.dp)
+                            .background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                    ) {
+                        Icon(
+                            painterResource(Res.drawable.ic_arrow_forward),
+                            contentDescription = "下一张",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
                 PreviewInfoBar(
                     media = currentMedia,
                     currentIndex = currentIndex,
