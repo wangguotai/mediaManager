@@ -1081,6 +1081,24 @@ object MediaService {
     }
 
     /**
+     * V7：GET /api/healthz — 获取后端版本信息。
+     */
+    suspend fun getBackendInfo(): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/healthz") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["version"]?.jsonPrimitive?.contentOrNull
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getBackendInfo FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * POST /api/device/register {device_name, platform} → {device_id}。
      *
      * 为当前登录用户登记一台设备，返回后端分配的 device_id（uuid）。同一用户可多设备，

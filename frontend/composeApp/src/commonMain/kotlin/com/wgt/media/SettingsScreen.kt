@@ -670,6 +670,23 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
             }
+            // V7：后端版本（从 /api/healthz 获取）
+            var backendVersion by remember { mutableStateOf("加载中...") }
+            LaunchedEffect(Unit) {
+                backendVersion = MediaService.getBackendInfo() ?: "未知"
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("后端版本", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    backendVersion,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }
