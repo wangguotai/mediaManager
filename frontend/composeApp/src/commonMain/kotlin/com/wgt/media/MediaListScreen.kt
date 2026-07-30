@@ -136,6 +136,10 @@ fun MediaListScreen(
     // "加入相册"选择对话框：非空时弹出相册列表供用户选择目标相册。
     var addToAlbumMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
+    // V7 §1.2：分享链接结果对话框状态
+    var shareLinkResult by remember { mutableStateOf<ShareLinkResult?>(null) }
+    var shareLinkError by remember { mutableStateOf<String?>(null) }
+
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
     // 监听错误信息并显示 Snackbar
@@ -272,6 +276,23 @@ fun MediaListScreen(
         )
     }
 
+    // V7 §1.2：分享链接结果对话框——显示生成的 URL + 复制按钮
+    shareLinkResult?.let { result ->
+        ShareLinkDialog(
+            url = result.url,
+            expiresAt = result.expiresAt,
+            onDismiss = { shareLinkResult = null }
+        )
+    }
+
+    // V7 §1.2：分享链接错误提示
+    LaunchedEffect(shareLinkError) {
+        shareLinkError?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            shareLinkError = null
+        }
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -308,7 +329,20 @@ fun MediaListScreen(
                     isDeleting = viewModel.isDeleting,
                     isUploading = viewModel.isUploading,
                     showUploadButton = selectedTab == 0,
-                    showAddToAlbumButton = selectedTab != 0 // 后端源（已上传/网盘）才显示
+                    showAddToAlbumButton = selectedTab != 0, // 后端源（已上传/网盘）才显示
+                    showShareLinkButton = selectedTab != 0, // V7 §1.2：仅云端源显示分享链接按钮
+                    onCreateShareLink = {
+                        // V7 §1.2：生成分享链接，成功后弹对话框显示 URL
+                        shareLinkError = null
+                        viewModel.createShareLinkForSelected(
+                            onCreated = { url, expiresAt ->
+                                shareLinkResult = ShareLinkResult(url, expiresAt)
+                            },
+                            onError = { msg ->
+                                shareLinkError = msg
+                            }
+                        )
+                    }
                 )
             } else {
                 // 正常模式：底部导航栏（MIUI 风格）
@@ -2375,10 +2409,12 @@ fun SelectionBottomBar(
     onSelectAll: () -> Unit,
     onDeselectAll: () -> Unit,
     onAddToAlbum: () -> Unit = {},
+    onCreateShareLink: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
-    showAddToAlbumButton: Boolean = false
+    showAddToAlbumButton: Boolean = false,
+    showShareLinkButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -2420,6 +2456,16 @@ fun SelectionBottomBar(
                 painterResource(Res.drawable.ic_share),
                 contentDescription = "分享选中项"
             )
+        }
+
+        // 生成分享链接（V7 §1.2，仅云端源显示）
+        if (showShareLinkButton) {
+            IconButton(onClick = onCreateShareLink) {
+                Icon(
+                    painterResource(Res.drawable.ic_link),
+                    contentDescription = "生成分享链接"
+                )
+            }
         }
 
         if (showUploadButton) {
@@ -2840,4 +2886,70 @@ private fun MemoryCoverThumb(
             )
         }
     }
+}
+
+// ============================================================
+// V7 §1.2：分享链接结果对话框
+// ============================================================
+
+/** 分享链接结果数据。 */
+private data class ShareLinkResult(
+    val url: String,
+    val expiresAt: Long
+)
+
+/**
+ * 分享链接结果对话框：显示生成的 URL，支持复制到剪贴板。
+ *
+ * @param url 分享链接 URL
+ * @param expiresAt 过期时间戳（epoch ms）
+ * @param onDismiss 关闭回调
+ */
+@Composable
+private fun ShareLinkDialog(
+    url: String,
+    expiresAt: Long,
+    onDismiss: () -> Unit
+) {
+    var copied by remember { mutableStateOf(false) }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分享链接已生成") },
+        text = {
+            androidx.compose.foundation.layout.Column {
+                Text(
+                    "链接（$expiresAt 后过期）：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    url,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                if (copied) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "已复制到剪贴板",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(url))
+                copied = true
+            }) {
+                Text(if (copied) "已复制" else "复制链接")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
