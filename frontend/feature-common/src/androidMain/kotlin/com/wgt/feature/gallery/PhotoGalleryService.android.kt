@@ -1,22 +1,14 @@
 package com.wgt.feature.gallery
 
-import android.app.Activity
-import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import androidx.activity.ComponentActivity
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import com.wgt.platform.applicationContext
 import com.wgt.platform.AppContext
-import com.wgt.platform.getCurrentActivity
+import com.wgt.platform.applicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
 import media.MediaMetadata
 import media.MediaType
 import java.io.File
@@ -193,50 +185,36 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
     }
 
     /**
-     * 删除本地图片。Android 10+ scoped storage 下，非 owner 应用直接
-     * [ContentResolver.delete] 会抛 [RecoverableSecurityException]（API 29）或需通过
-     * [MediaStore.createDeleteRequest]（API 30+）发起可恢复删除请求，由用户在系统弹窗授权。
+     * 删除本地图片——只做可直接执行的 [ContentResolver.delete]，不做系统授权交互。
      *
-     * 策略按 API 分流：
-     * - API 30+：先收集所有目标 uri，对其中 [ContentResolver.delete] 立即成功的直接删掉；
-     *   剩余需授权的用 [MediaStore.createDeleteRequest] 一次性批量发起授权请求，用户同意后
-     *   由系统删除。授权通过即视为删除成功。
-     * - API 29：逐个 delete，捕获 [RecoverableSecurityException]，用其 userAction.intentSender
-     *   发起授权，授权后再 delete 重试。
-     * - API ≤28：scoped storage 之前，直接 delete 即可。
+     * Android 10+（API 29+）scoped storage 下，对非 owner 媒体直接 delete 会失败并需用户授权。
+     * 本方法不发起授权弹窗，而是把"需系统确认"这一情况通过返回值 -1 上报给调用方
+     * （见 [MediaViewModel] / [GalleryFeature.requestMediaDeletion]），由其决定是否走
+     * [MediaStore.createDeleteRequest] 的可恢复删除流程。
      *
-     * 授权交互通过命令式 ActivityResultLauncher（StartIntentSenderForResult）发起并 suspend 等待
-     * 结果，对 commonMain/ViewModel 透明。需当前 Activity 为 ComponentActivity（MainActivity 满足）。
+     * 语义：
+     * - API ≤28：scoped storage 之前，逐个 delete 即可直接删除，返回成功删除的数量。
+     * - API ≥29：不在此处直接删除任何项（避免部分删除导致后续 createDeleteRequest 对
+     *   已删项重复处理），统一返回 -1，交由 [requestMediaDeletion] 用系统弹窗批量授权删除。
+     *
+     * @return 成功删除的数量；若需要系统确认（API ≥29），返回 -1。
      */
     override suspend fun deleteMedia(mediaIds: List<String>): Int = withContext(Dispatchers.IO) {
         if (mediaIds.isEmpty()) return@withContext 0
-        var deleted = 0
-        // 解析所有有效 mediaId → uri（跳过非法 id）
         val uris = mediaListToUris(mediaIds)
         if (uris.isEmpty()) return@withContext 0
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // API 30+：先删可直接删的，剩余用 createDeleteRequest 批量授权。
-            val pending = mutableListOf<Uri>()
-            for (uri in uris) {
-                val immediate = tryDeleteUri(uri)
-                if (immediate) {
-                    deleted++
-                } else {
-                    pending.add(uri)
-                }
-            }
-            if (pending.isNotEmpty()) {
-                val granted = requestDeleteConsent(pending)
-                if (granted) deleted += pending.size
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // API 29+：需要 MediaStore.createDeleteRequest 走系统授权流程，不在本方法处理。
+            -1
         } else {
-            // API 29 及以下：逐个处理，API 29 非授权项靠 RecoverableSecurityException 拿 IntentSender。
+            // API ≤28：直接 delete 即可。
+            var deleted = 0
             for (uri in uris) {
-                deleted += deleteWithRecoverableConsent(uri)
+                if (tryDeleteUri(uri)) deleted++
             }
+            deleted
         }
-        deleted
     }
 
     /** 把 mediaId 列表转为 MediaStore content uri 列表，跳过无法解析为 Long 的 id。 */
@@ -256,58 +234,6 @@ internal class AndroidPhotoGalleryService(private val context: Context) : PhotoG
         }
     }
 
-    /**
-     * API 29 路径：尝试 delete；若抛 [RecoverableSecurityException]，取其 IntentSender
-     * 发起授权，用户同意后重试 delete。其它异常或用户拒绝返回 0。
-     *
-     * 注意：[RecoverableSecurityException] 仅 API 29+ 存在，此处用通用异常捕获 + instanceof
-     * 判断(而非直接 catch 该类型)，避免在 API <29 设备上因异常类不存在导致类加载问题。
-     */
-    private suspend fun deleteWithRecoverableConsent(uri: Uri): Int {
-        return try {
-            if (context.contentResolver.delete(uri, null, null) > 0) 1 else 0
-        } catch (e: Exception) {
-            // API 29(Q) 对非 owner 媒体抛 RecoverableSecurityException，含授权 IntentSender。
-            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && e is RecoverableSecurityException) {
-                val intentSender = e.userAction.actionIntent.intentSender
-                if (requestIntentSender(intentSender) && tryDeleteUri(uri)) 1 else 0
-            } else {
-                0
-            }
-        }
-    }
-
-    /**
-     * API 30+ 路径：用 [MediaStore.createDeleteRequest] 对一组 uri 生成批量删除授权请求，
-     * 启动系统弹窗，suspend 等待用户结果。返回是否授权成功。
-     */
-    private suspend fun requestDeleteConsent(uris: List<Uri>): Boolean {
-        val intentSender = MediaStore.createDeleteRequest(context.contentResolver, uris).intentSender
-        return requestIntentSender(intentSender)
-    }
-
-    /**
-     * 命令式注册 StartIntentSenderForResult launcher，启动 [intentSender] 并 suspend 等待结果。
-     * 复用 PermissionService 的 ActivityResultRegistry 模式，无需 UI 持有 launcher。
-     * 当前 Activity 必须是 ComponentActivity；无可用 Activity 时返回 false。
-     */
-    private suspend fun requestIntentSender(intentSender: android.content.IntentSender): Boolean {
-        return suspendCancellableCoroutine { continuation ->
-            val activity = AppContext.getCurrentActivity()
-            if (activity == null || activity !is ComponentActivity) {
-                continuation.resume(false)
-                return@suspendCancellableCoroutine
-            }
-            val launcher = activity.activityResultRegistry.register(
-                "delete_consent_${System.currentTimeMillis()}",
-                ActivityResultContracts.StartIntentSenderForResult()
-            ) { result ->
-                continuation.resume(result.resultCode == Activity.RESULT_OK)
-            }
-            continuation.invokeOnCancellation { launcher.unregister() }
-            launcher.launch(IntentSenderRequest.Builder(intentSender).build())
-        }
-    }
 
     /**
      * 从 JPEG 数据中反向搜索并定位嵌入 MP4 的真实起点。
