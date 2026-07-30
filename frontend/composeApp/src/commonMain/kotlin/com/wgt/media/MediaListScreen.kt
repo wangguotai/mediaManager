@@ -206,6 +206,10 @@ fun MediaListScreen(
                         previewIndex = null
                         viewModel.deleteSingleMedia(media.id)
                     },
+                    onFavoriteToggle = { media ->
+                        viewModel.toggleFavorite(media.id)
+                    },
+                    isFavorite = { media -> viewModel.isFavorite(media.id) },
                     onSlideshow = {
                         previewIndex = null
                         slideshowActive = true
@@ -797,6 +801,8 @@ fun ImagePreviewDialog(
     onEdit: (MediaMetadata) -> Unit = {},
     onShare: (MediaMetadata) -> Unit = {},
     onDelete: (MediaMetadata) -> Unit = {},
+    onFavoriteToggle: (MediaMetadata) -> Unit = {},
+    isFavorite: (MediaMetadata) -> Boolean = { false },
     onSlideshow: () -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
@@ -1041,6 +1047,12 @@ fun ImagePreviewDialog(
                                 iconRes = Res.drawable.ic_share,
                                 label = "分享",
                                 onClick = { onShare(currentMedia) }
+                            )
+                            PreviewActionButton(
+                                iconRes = if (isFavorite(currentMedia)) Res.drawable.ic_star_filled
+                                          else Res.drawable.ic_star_outline,
+                                label = if (isFavorite(currentMedia)) "已收藏" else "收藏",
+                                onClick = { onFavoriteToggle(currentMedia) }
                             )
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_delete,
