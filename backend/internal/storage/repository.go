@@ -133,6 +133,23 @@ func (s *Store) DeleteUser(ctx context.Context, id string) error {
 	return nil
 }
 
+// UpdatePassword 把指定 user 的 password_hash 改为新哈希。供 /api/auth/change-password
+// 调用。按 id 精确匹配；未命中返回 ErrNotFound。newHash 应为调用方已 bcrypt 过的哈希，
+// 此处不再重复哈希（保留哈希策略于 auth 层统一管理）。
+func (s *Store) UpdatePassword(ctx context.Context, id, newHash string) error {
+	if id == "" {
+		return fmt.Errorf("user id is required")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE "user" SET password_hash = ? WHERE id = ?`, newHash, id)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ===== Media =====
 
 // CreateMedia 插入一行 media。ID/UserID/Filename/Type 必填。
@@ -212,10 +229,33 @@ WHERE id = ?`,
 // MarkDeleted 软删除一行 media（deleted=1），刷新 updated_at。未命中返回 ErrNotFound。
 // 软删除保留数据，与现有 DeleteMedia（物理删文件）解耦：SQL 软删 + 磁盘文件清理
 // 可由后续任务分别处理。
+//
+// 注意：本方法不校验归属——任何调用方只要持 id 即可软删。V5 安全基线要求防
+// 横向越权，删除端点路径应改用 MarkDeletedForUser（按 user_id 校验）。本方法
+// 保留供后端内部/测试/清理路径使用。
 func (s *Store) MarkDeleted(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE "media" SET deleted = 1, updated_at = ? WHERE id = ?`, timeToVal(time.Now()), id)
 	if err != nil {
 		return fmt.Errorf("mark media deleted: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkDeletedForUser 软删除一行 media，且仅当其 user_id 等于 userID 时才生效。
+// 用途：删除端点防横向越权——同一 media_id 即使被攻击者猜到，因 user_id 不匹配
+// 会被 WHERE 过滤，RowsAffected=0，返回 ErrNotFound，使调用方能据此判定为"非己有
+// 或不存在"并拒绝。未命中、ID 不存在、归属不符均返回 ErrNotFound（不区分，避免泄露）。
+// userID 为空时直接 ErrNotFound，防止误以空串匹配。
+func (s *Store) MarkDeletedForUser(ctx context.Context, userID, id string) error {
+	if userID == "" || id == "" {
+		return ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE "media" SET deleted = 1, updated_at = ? WHERE id = ? AND user_id = ?`, timeToVal(time.Now()), id, userID)
+	if err != nil {
+		return fmt.Errorf("mark media deleted for user: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound

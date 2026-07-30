@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -83,9 +85,10 @@ func (s *Server) SetCloudDir(dir string) { s.cloudDir = dir }
 func (s *Server) SetStore(store *storage.Store) { s.store = store }
 
 func (s *Server) registerRoutes() {
-	// Auth: 登录/注册。这两个端点本身无需认证（中间件按路径前缀豁免）。
+	// Auth: 登录/注册本身无需认证（中间件按路径前缀豁免）；改密端点需认证（带 token）。
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("/api/auth/register", s.handleAuthRegister)
+	s.mux.HandleFunc("/api/auth/change-password", s.handleAuthChangePassword)
 
 	// OpenClaw bridge
 	s.mux.HandleFunc("/api/openclaw/command", s.handleOpenClawCommand)
@@ -145,7 +148,8 @@ func userIDFromContext(ctx context.Context) string {
 }
 
 // authMiddleware 解析 Bearer token，校验后将 user_id 注入请求 context。
-// 豁免路径：/api/auth/*（登录/注册本身）与 /healthz（健康检查）。其余路径无有效 token 返回 401。
+// 豁免路径：/api/auth/login、/api/auth/register（获取 token 本身）与 /healthz（健康检查）。
+// 其余路径（含 /api/auth/change-password）无有效 token 返回 401。
 // s.authSvc 为 nil 时（未配置认证）直接放行，便于无认证的开发/测试场景。
 //
 // user_id 通过 service.WithUserID 注入，使用 service 包的 context key —— 这样
@@ -159,7 +163,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// 豁免登录/注册与健康检查：这些端点本身就是获取 token 或探活用的。
-		if strings.HasPrefix(r.URL.Path, "/api/auth/") || r.URL.Path == "/healthz" {
+		// 注意：仅豁免 login 与 register 两条；change-password 必须带 token（走认证），
+		// 故不再用宽泛的 /api/auth/ 前缀豁免，避免新增的改密端点被误放行。
+		switch r.URL.Path {
+		case "/api/auth/login", "/api/auth/register", "/healthz":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -190,19 +197,67 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// corsMiddleware adds permissive CORS headers for future web frontend support.
-// Preflight OPTIONS requests are short-circuited with 204.
+// corsMiddleware 收紧 CORS：只对 localhost（任意端口）与内网私网网段的 Origin 放行，
+// 回显该具体 Origin（不再用 "*")。不匹配的来源不写 Access-Control-Allow-Origin，
+// 使浏览器拒绝跨域读响应——避免此前 "*" 暴露 API 给任意站点。
+//
+// 判定依据 Origin 而非 Referer：Origin 在所有跨域请求（含预检）中由浏览器设定，
+// 是 CORS 放行的权威来源。私网网段覆盖 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16。
+// Preflight OPTIONS 短路 204，但同样只对受信 Origin 写入允许头。
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+		if origin != "" && isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			// 受信 Origin 才允许携带凭据（如未来需要 cookie Authorization）。
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isAllowedOrigin 判断 Origin 是否为允许的本地/内网来源。
+// 仅接受 http(s) + localhost（任意端口）+ 私网 IP 网段；其余一律拒绝。
+func isAllowedOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	// localhost / 127.0.0.1 / ::1 全部放行（端口已在 u.Host 中，这里只看主机名）。
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	return isPrivateIPv4(host)
+}
+
+// isPrivateIPv4 判断 host（可能含端口）是否为 RFC1918 私网地址。
+// 解析失败（含域名、IPv6）一律返回 false——本服务仅对私网/本机放行跨域。
+func isPrivateIPv4(host string) bool {
+	// 去掉端口（IPv4 形态 host 中若有冒号必为端口分隔）。
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+	// 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 三段私网。
+	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		if _, network, err := net.ParseCIDR(cidr); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ============ Media REST endpoints ============
@@ -489,10 +544,15 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// 软删除墓碑：在 SQLite 标记 deleted=1，使 /api/sync/changes 能返回墓碑
-	if s.store != nil {
+	// 软删除墓碑：在 SQLite 标记 deleted=1，使 /api/sync/changes 能返回墓碑。
+	// V5 安全基线——防横向越权：墓碑标记必须按 user_id 校验归属，仅当该 media 属于
+	// 当前请求用户才置 deleted=1。此前 MarkDeleted(mid) 仅按 id 匹配，攻击者只要猜中
+	// media_id 即可把他人媒体软删。MarkDeletedForUser 用 (id, user_id) 双键过滤，归属
+	// 不符则 RowsAffected=0（视为未命中，不写墓碑）。best-effort：未命中不阻断文件删除结果。
+	uid := userIDFromContext(r.Context())
+	if s.store != nil && uid != "" {
 		for _, mid := range req.MediaIds {
-			_ = s.store.MarkDeleted(r.Context(), mid)
+			_ = s.store.MarkDeletedForUser(r.Context(), uid, mid)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

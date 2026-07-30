@@ -14,9 +14,11 @@ import (
 //
 // /api/auth/login   POST  {username,password} -> {token,expires_at,user}
 // /api/auth/register POST {username,password} -> {token,expires_at,user} （受 allow_signup 控制）
+// /api/auth/change-password POST {old_password,new_password} -> {status:"success"}（需 Bearer token，只能改自己）
 //
-// 这两个端点经 authMiddleware 按路径前缀豁免，本身无需 token。
-// handler 通过 s.authSvc 调用认证逻辑，并把 auth 包的哨兵错误映射为合适的 HTTP 状态码。
+// login/register 经 authMiddleware 明确豁免（无需 token）；change-password 必须带 token，
+// user_id 由中间件从 JWT 解析注入。handler 通过 s.authSvc 调用认证逻辑，并把 auth 包的
+// 哨兵错误映射为合适的 HTTP 状态码。
 
 // loginRequest 是登录/注册请求体。
 type loginRequest struct {
@@ -54,6 +56,48 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// changePasswordRequest 是改密请求体。old_password 用于复核身份，new_password 须满足长度策略。
+type changePasswordRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+// handleAuthChangePassword 处理 POST /api/auth/change-password。
+// 必须带有效 token（中间件已校验并注入 user_id），用户只能改自己的密码。
+// 成功返回 200 {status:"success"}；旧密码错/新密码弱/用户不存在统一 400（防枚举，不区分）。
+func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if s.authSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "auth is not configured"})
+		return
+	}
+	// user_id 由 authMiddleware 从 JWT 注入；未带 token 的请求已被中间件 401 拦截，
+	// 到这里 uid 必非空。为稳妥仍兜底判空（兼容 authSvc=nil 的纯测试 server）。
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	var req changePasswordRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.OldPassword == "" || req.NewPassword == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "old_password and new_password are required"})
+		return
+	}
+
+	if err := s.authSvc.ChangePassword(r.Context(), uid, req.OldPassword, req.NewPassword); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
 }
 
 // handleAuthRegister 处理 POST /api/auth/register。

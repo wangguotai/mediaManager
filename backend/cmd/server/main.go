@@ -155,17 +155,19 @@ func bootstrapAdmin(cfg *config.Config, authSvc *auth.AuthService) {
 		// 已有用户，无需引导。
 		return
 	}
-	// 多行醒目输出，便于 `docker logs` 抓取。token 仅此一次明文出现。
+	// 多行醒目输出，便于 `docker logs` 抓取。
+	// 安全策略：日志不打印明文密码——首次登录用 token（下行）即可，
+	// 密码仅供程序内部签发，不落日志。token 也仅此一次明文出现。
 	log.Printf("========================================================")
 	log.Printf(" INITIAL ADMIN ACCOUNT CREATED (first run, empty user DB)")
 	log.Printf("--------------------------------------------------------")
 	log.Printf("  username: %s", res.Username)
-	log.Printf("  password: %s", res.Password)
 	log.Printf("  token   : %s", res.Token)
 	log.Printf("  expires : %s", res.ExpiresAt.Format(time.RFC3339))
+	log.Printf("  note    : password is NOT logged — use the token above to")
+	log.Printf("            login, then CHANGE it via POST /api/auth/change-password")
 	log.Printf("--------------------------------------------------------")
-	log.Printf(" Login via POST /api/auth/login with these credentials,")
-	log.Printf(" then CHANGE the password immediately. allow_signup=%s", cfg.AllowSignup)
+	log.Printf(" allow_signup=%s", cfg.AllowSignup)
 	log.Printf("========================================================")
 }
 
