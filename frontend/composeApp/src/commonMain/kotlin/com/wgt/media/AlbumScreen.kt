@@ -473,8 +473,8 @@ private fun AlbumDetailPage(
 
     // V7：进入相册详情时预加载云端媒体列表（用于添加照片对话框）
     LaunchedEffect(albumId) {
-        if (viewModel.cloudMedia.isEmpty()) {
-            viewModel.loadCloudChanges()
+        if (viewModel.cloudMedia.isEmpty() && viewModel.mediaList.isEmpty()) {
+            viewModel.loadCloudMediaList()
         }
     }
 
@@ -775,7 +775,7 @@ private fun AddMediaToAlbumDialog(
     onDismiss: () -> Unit,
     onAdded: () -> Unit
 ) {
-    val cloudMedia = viewModel.cloudMedia
+    val cloudMedia = viewModel.cloudMedia.ifEmpty { viewModel.mediaList }
     val available = cloudMedia.filter { it.id !in existingMediaIds }
     val selected = remember { mutableStateListOf<String>() }
 
