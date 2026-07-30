@@ -105,17 +105,16 @@ const styles = StyleSheet.create({
 });
 
 // ─── 主组件 ───
-function MediaManagerApp() {
+function MediaManagerApp(props) {
   const [promotions, setPromotions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({count: 0, size: '0 MB'});
 
-  useEffect(() => {
-    // 拉取运营活动列表（V7 §3.3）
-    // 后端地址由 Compose 层注入的全局变量 nativeBackendUrl 提供（默认局域网）
-    const baseUrl = global.nativeBackendUrl || 'http://192.168.31.251:8080';
-    const token = global.nativeAuthToken || '';
+  // V7 §3.3：从 initialProps 获取后端地址 + token（Android 侧 Bundle 注入）
+  const baseUrl = props?.backendUrl || global.nativeBackendUrl || 'http://192.168.31.251:8080';
+  const token = props?.authToken || global.nativeAuthToken || '';
 
+  useEffect(() => {
     // 并行拉取 promotions + healthz（媒体统计）
     Promise.all([
       fetch(`${baseUrl}/api/promotions`, {

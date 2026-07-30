@@ -14,6 +14,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.facebook.react.interfaces.fabric.ReactSurface
 import com.facebook.react.runtime.ReactHostImpl
 import com.facebook.react.runtime.ReactSurfaceImpl
+import com.wgt.feature.media.MediaService
+import com.wgt.feature.media.getAuthToken
 import com.wgt.platform.AppContext
 import com.wgt.platform.applicationContext
 import com.wgt.rn_module.RNContainerManager
@@ -71,8 +73,13 @@ actual fun PlatformRnView(
         // 启动 JS 运行时（幂等——已启动则跳过）
         host.start()
 
-        // 创建 Fabric Surface
-        val surface = host.createSurface(app, componentName, Bundle.EMPTY)
+        // 创建 Fabric Surface，传入初始 props（后端地址 + token）
+        val initialProps = Bundle().apply {
+            putString("backendUrl", MediaService.rnBackendBaseUrl())
+            // token 从 SettingsStorage 读取（已有 jwtToken 持久化）
+            putString("authToken", getAuthToken())
+        }
+        val surface = host.createSurface(app, componentName, initialProps)
         surfaceState = surface
 
         // 启动 Surface 渲染（start() 内部会自动 attach 到 host）

@@ -41,6 +41,9 @@ private var backendUrl: String = DEFAULT_BACKEND_URL
 @Volatile
 private var authToken: String = ""
 
+/** V7 §3.3：返回当前 auth token（供 RN 模块注入 initialProps）。 */
+fun getAuthToken(): String = authToken
+
 /**
  * 401 响应回调 —— 由 composeApp 注册（接到 [com.wgt.media.AuthState.clearSession]，
  * 进而触发 App 路由守卫回登录页）。仅记录指针，由 [MediaService.setUnauthorizedHandler] 设置。
