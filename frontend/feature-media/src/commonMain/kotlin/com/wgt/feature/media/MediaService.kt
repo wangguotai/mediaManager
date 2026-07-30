@@ -1148,6 +1148,41 @@ object MediaService {
         }
     }
 
+    /**
+     * V7：GET /api/device/list — 返回当前用户名下所有设备。
+     */
+    suspend fun listDevices(): List<DeviceInfo>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/device/list") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val arr = obj["devices"]?.jsonArray ?: return emptyList()
+                arr.mapNotNull { item ->
+                    val o = item.jsonObject
+                    DeviceInfo(
+                        deviceId = o["device_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        deviceName = o["device_name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        platform = o["platform"]?.jsonPrimitive?.contentOrNull ?: "",
+                        createdAtMs = o["created_at_ms"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "listDevices FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V7：设备信息 */
+    data class DeviceInfo(
+        val deviceId: String,
+        val deviceName: String,
+        val platform: String,
+        val createdAtMs: Long
+    )
+
     // ---- 解析 ----
 
     /**

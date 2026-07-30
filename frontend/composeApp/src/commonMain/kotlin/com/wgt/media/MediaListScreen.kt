@@ -809,6 +809,76 @@ private fun MyTabContent(
             }
         }
 
+        // V7：设备列表卡片
+        var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
+        LaunchedEffect(Unit) { devices = MediaService.listDevices() }
+        devices?.let { deviceList ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "我的设备",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (deviceList.isEmpty()) {
+                        Text(
+                            "暂无已注册设备",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        deviceList.forEach { device ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        when (device.platform.lowercase()) {
+                                            "android" -> "📱"
+                                            "ios" -> "🍏"
+                                            else -> "💻"
+                                        },
+                                        fontSize = 20.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            device.deviceName.ifEmpty { "未命名设备" },
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            device.platform.ifEmpty { "unknown" },
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    if (device.createdAtMs > 0) {
+                                        formatPreviewDate(device.createdAtMs)
+                                    } else "",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
