@@ -1,0 +1,62 @@
+# tasks-tombstone-fix.yaml
+
+tasks:
+  - id: fix-tombstone
+    product: claude
+    prompt: |
+      在 backend/ 修复删除逻辑，实现软删除墓碑。
+      当前 POST /api/media/delete 是物理删除文件+记录，PRD 要求软删除：
+      1. 删除时不在 media 表删除行，而是设 deleted=true, updated_at=now()
+      2. 文件可以从磁盘删除（省空间），但 media 表保留行作为墓碑
+      3. GET /api/sync/changes 返回的 changes 中，已删除项 deleted=true
+      4. GET /api/media/list 不返回 deleted=true 的项
+      5. GET /api/media/thumbnail/ 和 stream/ 对 deleted 项返回 404
+      6. 读 backend/internal/service/media_service.go 的 deleteMedia 方法
+      7. 读 backend/internal/db/store.go 了解 SQLite 操作
+      
+      验证: go build ./... 通过
+      完成后 git add -A && git commit -m "fix-tombstone: soft delete with tombstone markers"
+    files: [backend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/backend && go build ./..."
+
+  - id: fix-ios-file-sec
+    product: claude
+    prompt: |
+      在 frontend/ iOS SettingsStorage 改用文件方案存 secure data。
+      1. getSecureString/putSecureString/removeSecureString 写到 Documents/mm_secure.json
+      2. 文件格式: {"key1":"val1","key2":"val2"} JSON
+      3. 用 NSFileManager 获取 Documents 目录, NSData read/write
+      4. getString/putString 继续用 NSUserDefaults
+      5. compileKotlinIosArm64 必须通过
+      完成后 git add -A && git commit -m "fix-ios-file-sec: file-based secure storage"
+    files: [frontend/]
+    depends_on: []
+    timeout: 300s
+    max_retries: 3
+    verify_commands:
+      - "cd /Users/wgt/projects/media-manager/frontend && sh gradlew :composeApp:compileKotlinIosArm64"
+
+  - id: verify-tombstone
+    product: claude
+    prompt: |
+      验证墓碑修复。在 /Users/wgt/projects/media-manager/backend 工作。
+      1. go run ./cmd/server &
+      2. sleep 4
+      3. curl POST /api/auth/login 登录 (admin/密码从日志获取)
+      4. echo test > /tmp/t.jpg && curl POST /api/media/upload 上传
+      5. curl GET /api/sync/changes?since=0 记录 cursor
+      6. curl POST /api/media/delete 删除
+      7. curl GET /api/sync/changes?since={cursor} 确认 deleted=true 墓碑
+      8. curl GET /api/media/list 确认列表不含已删除项
+      9. kill server
+      把结果写到 docs/tombstone-verify.md
+      完成后 git add -A && git commit -m "verify-tombstone: soft delete verified"
+    files: [docs/]
+    depends_on: [fix-tombstone]
+    timeout: 300s
+    max_retries: 1
+    verify_commands: []

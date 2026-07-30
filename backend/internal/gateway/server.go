@@ -489,6 +489,12 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// 软删除墓碑：在 SQLite 标记 deleted=1，使 /api/sync/changes 能返回墓碑
+	if s.store != nil {
+		for _, mid := range req.MediaIds {
+			_ = s.store.MarkDeleted(r.Context(), mid)
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
