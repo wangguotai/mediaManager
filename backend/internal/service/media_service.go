@@ -593,6 +593,14 @@ func (s *MediaService) SetAlbumCover(uid, albumID, mediaID string) error {
 	return s.albumStore.SetAlbumCover(uid, albumID, mediaID)
 }
 
+// BatchAddToAlbum V7：批量添加多个媒体到相册。
+func (s *MediaService) BatchAddToAlbum(uid, albumID string, mediaIDs []string) (int, error) {
+	if s.albumStore == nil {
+		return 0, fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.BatchAddToAlbum(uid, albumID, mediaIDs)
+}
+
 // ListAlbums 返回 user_id 名下所有相册列表。
 func (s *MediaService) ListAlbums(uid string) []*Album {
 	if s.albumStore == nil {

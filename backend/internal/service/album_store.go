@@ -172,6 +172,36 @@ func (as *AlbumStore) AddToAlbum(uid, albumID, mediaID string) error {
 	return pa.save()
 }
 
+// BatchAddToAlbum V7：批量添加多个媒体到相册。已存在的跳过（幂等）。
+func (as *AlbumStore) BatchAddToAlbum(uid, albumID string, mediaIDs []string) (int, error) {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return 0, fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return 0, fmt.Errorf("album not found: %s", albumID)
+	}
+	existing := make(map[string]bool, len(album.MediaIDs))
+	for _, id := range album.MediaIDs {
+		existing[id] = true
+	}
+	added := 0
+	for _, id := range mediaIDs {
+		if !existing[id] {
+			album.MediaIDs = append(album.MediaIDs, id)
+			existing[id] = true
+			added++
+		}
+	}
+	if added > 0 {
+		return added, pa.save()
+	}
+	return 0, nil
+}
+
 // RemoveFromAlbum 将 mediaId 从 uid 名下指定相册中移除。
 func (as *AlbumStore) RemoveFromAlbum(uid, albumID, mediaID string) error {
 	pa := as.forUser(uid)
