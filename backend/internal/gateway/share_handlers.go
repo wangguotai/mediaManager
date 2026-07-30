@@ -178,6 +178,50 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleShareList V7：GET /api/share/list — 返回当前用户创建的所有分享链接。
+func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	// /api/share/ 前缀整体豁免 authMiddleware，此处手动鉴权
+	uid := s.requireShareAuth(w, r)
+	if uid == "" {
+		return // requireShareAuth 已写入 401
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tokens, err := s.store.ListShareTokensByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	items := make([]map[string]any, 0, len(tokens))
+	for _, st := range tokens {
+		var expiresStr string
+		if st.ExpiresAt.IsZero() {
+			expiresStr = "永久"
+		} else {
+			expiresStr = st.ExpiresAt.Format(time.RFC3339)
+		}
+		hasPassword := st.PasswordHash != ""
+		items = append(items, map[string]any{
+			"token":        st.Token,
+			"url":          "/share/" + st.Token,
+			"media_ids":    st.MediaIDs,
+			"expires_at":   expiresStr,
+			"has_password": hasPassword,
+			"created_at":   st.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"shares": items,
+		"total":  len(items),
+	})
+}
+
 // handleShareAccess 是 /api/share/ 前缀的统一入口，按 method + path 分流：
 //   - GET /api/share/{token}              → handleShareView（公开查看元数据）
 //   - GET /api/share/{token}/stream/{id}  → handleShareStream（公开下载字节流）

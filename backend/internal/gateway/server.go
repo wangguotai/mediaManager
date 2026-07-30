@@ -209,6 +209,8 @@ func (s *Server) registerRoutes() {
 	//   - /api/share/{token}/stream/{mediaId} ：GET 公开下载字节流。
 	// 路由用 /api/share/ 前缀匹配后缀段，在 handleShareAccess 内按 method+path 分流。
 	s.mux.HandleFunc("/api/share/create", s.handleShareCreate)
+	// V7：列出当前用户的分享链接
+	s.mux.HandleFunc("/api/share/list", s.handleShareList)
 	s.mux.HandleFunc("/api/share/", s.handleShareAccess)
 
 	// Stats: 缩略图缓存命中率等可观测性指标（JSON，兼容旧前端，保留）。

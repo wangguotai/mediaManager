@@ -473,6 +473,29 @@ func (s *Store) DeleteExpiredShareTokens(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+// ListShareTokensByUser V7：返回当前用户创建的所有分享链接，按创建时间倒序。
+func (s *Store) ListShareTokensByUser(ctx context.Context, userID string) ([]*ShareToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT token, user_id, media_ids, expires_at, password_hash, created_at
+		 FROM share_tokens WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list share tokens: %w", err)
+	}
+	defer rows.Close()
+	var result []*ShareToken
+	for rows.Next() {
+		var st ShareToken
+		var expiresAt, createdAt string
+		if err := rows.Scan(&st.Token, &st.UserID, &st.MediaIDs, &expiresAt, &st.PasswordHash, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan share token: %w", err)
+		}
+		st.ExpiresAt = timeFromVal(expiresAt)
+		st.HasPassword = st.PasswordHash != ""
+		result = append(result, &st)
+	}
+	return result, nil
+}
+
 // CreateAlbumShare 把一个相册共享给 sharedWithUserID。ownerUserID 为相册所有者
 // （发起共享的人）。若该 (album_id, shared_with_user_id) 已存在则幂等返回，
 // 不报错也不更新 shared_at（语义：重复邀请是 no-op）。
