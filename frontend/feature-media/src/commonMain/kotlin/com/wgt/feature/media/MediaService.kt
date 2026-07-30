@@ -618,6 +618,26 @@ object MediaService {
     }
 
     /**
+     * V7：POST /api/media/album/remove — 将媒体从相册中移除。
+     */
+    suspend fun removeMediaFromAlbum(albumId: String, mediaId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/remove") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_id", mediaId)
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "removeMediaFromAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * 删除相册。
      *
      * DELETE /api/media/album/{id}
