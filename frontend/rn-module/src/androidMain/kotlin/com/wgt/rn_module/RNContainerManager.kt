@@ -106,13 +106,14 @@ class RNContainerManager private constructor(private val application: Applicatio
         android.util.Log.d("RNContainerManager", "创建 ReactHost: hostId=${config.hostId}, bundleName=${config.bundleAssetName}, useDevSupport=${config.useDeveloperSupport}")
         
         // V7 §3.2：热更新——优先用 override 路径（从后端下载的 cache bundle），无则从 assets 复制
+        // 最小 10KB 阈值：后端占位 bundle 只有 205 字节，不应当作真正的 bundle 使用
         val bundleFilePath = config.bundleOverridePath?.let { path ->
             val f = java.io.File(path)
-            if (f.exists() && f.length() > 0) {
+            if (f.exists() && f.length() > 10240) {
                 android.util.Log.d("RNContainerManager", "使用热更新 bundle: $path (${f.length()} bytes)")
                 path
             } else {
-                android.util.Log.w("RNContainerManager", "override path 不存在, 回退 assets: $path")
+                android.util.Log.w("RNContainerManager", "override bundle 太小或不存在 (${f.length()} bytes), 回退 assets")
                 copyBundleFromAssets(config.bundleAssetName)
             }
         } ?: copyBundleFromAssets(config.bundleAssetName)
