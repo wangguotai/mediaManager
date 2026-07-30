@@ -109,6 +109,7 @@ function MediaManagerApp(props) {
   const [promotions, setPromotions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({count: 0, size: '0 MB'});
+  const [storageStats, setStorageStats] = useState(null);
 
   // V7 §3.3：从 initialProps 获取后端地址 + token（Android 侧 Bundle 注入）
   const baseUrl = props?.backendUrl || global.nativeBackendUrl || 'http://192.168.31.251:8080';
@@ -121,8 +122,11 @@ function MediaManagerApp(props) {
         headers: token ? {Authorization: 'Bearer ' + token} : {},
       }).then(r => r.json()).catch(() => []),
       fetch(`${baseUrl}/healthz`).then(r => r.json()).catch(() => ({})),
+      fetch(`${baseUrl}/api/media/storage-stats`, {
+        headers: token ? {Authorization: 'Bearer ' + token} : {},
+      }).then(r => r.json()).catch(() => null),
     ])
-      .then(([promoData, healthData]) => {
+      .then(([promoData, healthData, storageData]) => {
         setPromotions(Array.isArray(promoData) ? promoData : []);
         setStats({
           count: healthData.media_count || 0,
@@ -130,6 +134,13 @@ function MediaManagerApp(props) {
             ? `${(parseFloat(healthData.disk.used_gb)).toFixed(1)} GB`
             : '0 MB',
         });
+        if (storageData && storageData.by_type) {
+          setStorageStats({
+            image_count: storageData.by_type.image?.count || 0,
+            video_count: storageData.by_type.video?.count || 0,
+            total_mb: storageData.total_mb || 0,
+          });
+        }
         setLoading(false);
       })
       .catch(() => {
@@ -203,6 +214,27 @@ function MediaManagerApp(props) {
             <Text style={styles.cardText}>
               目前没有运营活动。请稍后再来查看。
             </Text>
+          </View>
+        )}
+
+        {/* 存储概览（从后端 /api/media/storage-stats 拉取） */}
+        {storageStats && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>云端存储概览</Text>
+            <View style={{flexDirection: 'row', justifyContent: 'space-around', marginTop: 8}}>
+              <View style={{alignItems: 'center'}}>
+                <Text style={styles.statValue}>{storageStats.image_count || 0}</Text>
+                <Text style={styles.statLabel}>图片</Text>
+              </View>
+              <View style={{alignItems: 'center'}}>
+                <Text style={styles.statValue}>{storageStats.video_count || 0}</Text>
+                <Text style={styles.statLabel}>视频</Text>
+              </View>
+              <View style={{alignItems: 'center'}}>
+                <Text style={styles.statValue}>{storageStats.total_mb ? (storageStats.total_mb).toFixed(1) : '0'} MB</Text>
+                <Text style={styles.statLabel}>总计</Text>
+              </View>
+            </View>
           </View>
         )}
 
