@@ -137,6 +137,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/duplicates", s.handleMediaDuplicates)
 	// V7：媒体库综合摘要端点
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
+	// V7：重命名媒体文件
+	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -1809,6 +1811,60 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 		"earliest_ts":  earliest,
 		"latest_ts":    latest,
 		"user_id":      uid,
+	})
+}
+
+// handleMediaRename 处理 POST /api/media/rename，
+// 修改媒体文件的 filename 字段（不改变实际存储路径）。
+func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.MediaID == "" || req.Filename == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id and filename required"})
+		return
+	}
+
+	// 获取媒体验证归属
+	media, err := s.store.GetMedia(r.Context(), req.MediaID)
+	if err != nil || media == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+		return
+	}
+	if media.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not owner"})
+		return
+	}
+
+	// 更新 filename
+	media.Filename = req.Filename
+	if err := s.store.UpdateMedia(r.Context(), media); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"media_id": req.MediaID,
+		"filename": req.Filename,
 	})
 }
 
