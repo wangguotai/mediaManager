@@ -474,7 +474,7 @@ private fun AlbumDetailPage(
     // V7：进入相册详情时预加载云端媒体列表（用于添加照片对话框）
     LaunchedEffect(albumId) {
         if (viewModel.cloudMedia.isEmpty()) {
-            viewModel.loadCloudMediaList()
+            viewModel.loadCloudChanges()
         }
     }
 
