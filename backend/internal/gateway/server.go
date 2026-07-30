@@ -133,6 +133,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/list", s.handleMediaList)
 	// V7：按类型分组的存储统计端点
 	s.mux.HandleFunc("/api/media/storage-stats", s.handleMediaStorageStats)
+	// V7：重复文件检测端点（基于 SHA256 分组）
+	s.mux.HandleFunc("/api/media/duplicates", s.handleMediaDuplicates)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -1650,6 +1652,82 @@ func (s *Server) handleMediaStorageStats(w http.ResponseWriter, r *http.Request)
 		"total_count":  totalCount,
 		"total_bytes":  totalBytes,
 		"total_mb":     float64(totalBytes) / (1024 * 1024),
+		"user_id":      uid,
+	})
+}
+
+// handleMediaDuplicates 处理 GET /api/media/duplicates，
+// 返回按 SHA256 分组的重复媒体列表（每组包含所有重复文件）。
+// 直接从 storage 层查询（proto MediaMetadata 无 SHA256 字段）。
+func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 直接从 DB 获取全部媒体（含 SHA256），避免 proto 层无 SHA256 的问题
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 SHA256 分组
+	type metaItem struct {
+		ID       string `json:"id"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		Sha256   string `json:"sha256"`
+		Type     string `json:"type"`
+		CreateAt int64  `json:"created_at"`
+	}
+	groups := make(map[string][]metaItem)
+	for _, m := range mediaList {
+		if m.SHA256 == "" || m.Deleted {
+			continue
+		}
+		groups[m.SHA256] = append(groups[m.SHA256], metaItem{
+			ID:       m.ID,
+			Filename: m.Filename,
+			Size:     m.Size,
+			Sha256:   m.SHA256,
+			Type:     m.Type,
+			CreateAt: m.CreatedAt.Unix(),
+		})
+	}
+
+	// 只保留 count > 1 的组
+	dupes := make([]map[string]any, 0, len(groups))
+	totalDupes := 0
+	totalWasted := int64(0)
+	for sha, items := range groups {
+		if len(items) > 1 {
+			totalDupes += len(items)
+			totalWasted += int64(len(items)-1) * items[0].Size
+			dupes = append(dupes, map[string]any{
+				"sha256": sha,
+				"count":  len(items),
+				"size":   items[0].Size,
+				"media":  items,
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"groups":       dupes,
+		"group_count":  len(dupes),
+		"total_dupes":  totalDupes,
+		"wasted_bytes": totalWasted,
+		"wasted_mb":    float64(totalWasted) / (1024 * 1024),
 		"user_id":      uid,
 	})
 }
