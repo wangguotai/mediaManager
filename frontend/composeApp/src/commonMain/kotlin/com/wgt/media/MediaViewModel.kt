@@ -1830,4 +1830,27 @@ class MediaViewModel {
             duplicates = MediaService.getDuplicates()
         }
     }
+
+    /**
+     * V7：一键删除重复文件（保留每组最新的一份）。
+     * 收集所有 delete_ids，调 deleteMedia 批量删除，然后刷新。
+     */
+    fun deleteDuplicates(onComplete: () -> Unit = {}) {
+        val dup = duplicates ?: run { onComplete(); return }
+        val toDelete = dup.groups.flatMap { it.media.drop(1).map { m -> m.id } }
+        if (toDelete.isEmpty()) { onComplete(); return }
+        viewModelScope.launch {
+            var deleted = 0
+            for (id in toDelete) {
+                try {
+                    MediaService.deleteMedia(listOf(id))
+                    cloudMedia = cloudMedia.filterNot { it.id == id }
+                    deleted++
+                } catch (e: Exception) { /* 继续删除其他 */ }
+            }
+            errorMessage = "已删除 $deleted/${toDelete.size} 个重复文件"
+            duplicates = MediaService.getDuplicates()  // 刷新
+            onComplete()
+        }
+    }
 }

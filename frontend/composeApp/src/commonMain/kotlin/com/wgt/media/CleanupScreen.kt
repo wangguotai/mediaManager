@@ -137,6 +137,17 @@ fun CleanupScreen(
                                 if (dup.groups.size > 3) {
                                     Text("  ...等 ${dup.groups.size} 组", style = MaterialTheme.typography.bodySmall)
                                 }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                var deletingDupes by remember { mutableStateOf(false) }
+                                TextButton(
+                                    enabled = !deletingDupes,
+                                    onClick = {
+                                        deletingDupes = true
+                                        viewModel.deleteDuplicates { deletingDupes = false }
+                                    }
+                                ) {
+                                    Text(if (deletingDupes) "删除中..." else "一键删除重复（保留最新）")
+                                }
                             }
                         }
                     }
