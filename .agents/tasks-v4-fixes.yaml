@@ -1,0 +1,99 @@
+# tasks-v4-fixes.yaml — V4 已知限制修复 + MVP 验收
+
+tasks:
+  # ── Layer 0: 后端补全 + iOS 修复 ──
+
+  - id: fix-upload-dedup
+    product: claude
+    prompt: |
+      在 backend/ 的 upload API 补全 sha256 去重逻辑。
+      1. POST /api/media/upload 接收 sha256, client_id, taken_at 参数（已有可能只是前端没传）
+      2. 服务端按 (user_id, sha256) 查库，已存在则直接返回已有 media_id 不落盘（秒传）
+      3. 前端 SyncManager.uploadLocal 调用时传 sha256 参数
+      4. 读 backend/internal/gateway/server.go 和 backend/internal/service/media_service.go 了解现有 upload 实现
+      5. 读 frontend/composeApp/src/commonMain/kotlin/com/wgt/media/SyncManager.kt 了解前端调用
+      完成后 git add -A && git commit -m "fix-upload-dedup: server-side sha256 dedup + frontend pass sha256"
+    files: [backend/, frontend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd backend && go build ./..."
+      - "cd frontend && sh gradlew :composeApp:assembleDebug :composeApp:compileKotlinIosArm64"
+
+  - id: fix-ios-keychain
+    product: claude
+    prompt: |
+      在 frontend/ 修复 iOS SettingsStorage 的 Keychain interop 问题。
+      1. 当前 SettingsStorage.ios.kt 用 NSUserDefaults 存 token（临时方案）
+      2. 用 Kotlin/Native 正确的 Keychain API 重写 getSecureString/putSecureString/removeSecureString
+      3. Keychain 用 SecItemAdd/SecItemCopyMatching/SecItemDelete，需要正确的类型转换
+      4. 可能需要用 memScoped + alloc<CFTypeRefVar>() 处理返回值
+      5. getString/putString 继续用 NSUserDefaults（非敏感数据）
+      6. 参考 Kotlin/Native interop 文档和 platform.Security 包
+      完成后 git add -A && git commit -m "fix-ios-keychain: proper Keychain API for secure storage"
+    files: [frontend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:compileKotlinIosArm64"
+
+  - id: fix-android-delete
+    product: claude
+    prompt: |
+      在 frontend/ 修复 Android 10+ 本地图片删除问题。
+      1. 当前 PhotoGalleryService.android.kt 的 deleteMedia 用 ContentResolver.delete()
+      2. Android 10+ (API 29+) 对非自有媒体需要 recoverable deletion: MediaStore.createDeleteRequest()
+      3. 判断 API level: >= 29 用 createDeleteRequest 返回 PendingIntent，< 29 用 ContentResolver.delete()
+      4. createDeleteRequest 需要 Activity context 来 launch PendingIntent
+      5. 读 frontend/feature-common/src/androidMain/kotlin/com/wgt/feature/gallery/PhotoGalleryService.android.kt
+      6. 可能需要新增 expect/actual 来处理 UI 层的 PendingIntent 启动
+      完成后 git add -A && git commit -m "fix-android-delete: Android 10+ recoverable deletion"
+    files: [frontend/]
+    depends_on: []
+    timeout: 400s
+    max_retries: 3
+    verify_commands:
+      - "cd frontend && sh gradlew :composeApp:assembleDebug"
+
+  - id: ops-docker
+    product: claude
+    prompt: |
+      在 ops-server/ 添加 Docker 部署支持。
+      1. Dockerfile: Go 多阶段构建
+      2. docker-compose.yml: 服务 + 持久化卷 + 健康检查 + 端口 8090
+      3. config.example.yaml 或环境变量 OPS_* 配置
+      4. 确保 go build ./... 通过
+      完成后 git add -A && git commit -m "ops-docker: one-click deploy for ops-server"
+    files: [ops-server/]
+    depends_on: []
+    timeout: 300s
+    max_retries: 3
+    verify_commands:
+      - "cd ops-server && go build ./..."
+
+  # ── Layer 1: MVP 端到端验证 ──
+
+  - id: mvp-verify
+    product: claude
+    prompt: |
+      端到端验证 V4 MVP 主线（docs/PRD-v4.md §7），输出报告到 docs/V4-MVP-VERIFY.md。
+      
+      验证步骤:
+      1. cd backend && go run ./cmd/server （记录超管账号）
+      2. curl POST /api/auth/login 获取 token
+      3. curl POST /api/media/upload 上传一张测试图片（带 sha256）
+      4. curl GET /api/sync/changes?since=0 确认能看到上传的图片
+      5. curl POST /api/media/delete 删除该图片
+      6. curl GET /api/sync/changes?since={上次cursor} 确认看到墓碑（deleted=true）
+      7. curl GET /healthz 确认健康
+      8. curl GET /api/sync/usage 确认用量统计
+      
+      每步记录请求/响应。如果某步失败，记录错误并继续下一步。
+      完成后 git add -A && git commit -m "mvp-verify: V4 end-to-end verification report"
+    files: [docs/]
+    depends_on: [fix-upload-dedup, ops-docker]
+    timeout: 400s
+    max_retries: 1
+    verify_commands: []
