@@ -158,6 +158,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/albums", s.handleAlbumList)
 	s.mux.HandleFunc("/api/media/album/add", s.handleAlbumAdd)
 	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
+	// V7：设置相册封面
+	s.mux.HandleFunc("/api/media/album/cover", s.handleAlbumCover)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
 	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
@@ -1311,6 +1313,7 @@ type albumStoreProvider interface {
 	CreateAlbum(uid, name string) (*service.Album, error)
 	AddToAlbum(uid, albumID, mediaID string) error
 	RemoveFromAlbum(uid, albumID, mediaID string) error
+	SetAlbumCover(uid, albumID, mediaID string) error
 	ListAlbums(uid string) []*service.Album
 	GetAlbum(uid, albumID string) *service.Album
 	DeleteAlbum(uid, albumID string) error
@@ -1443,6 +1446,37 @@ func (s *Server) handleAlbumRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "media_id": req.MediaID})
+}
+
+// handleAlbumCover V7：POST /api/media/album/cover — 设置相册封面。
+func (s *Server) handleAlbumCover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album is not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+		MediaID string `json:"media_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || req.MediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_id required"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if err := provider.SetAlbumCover(uid, req.AlbumID, req.MediaID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "cover_media_id": req.MediaID})
 }
 
 // handleAlbumResource 处理 /api/media/album/{id} 路径下的请求。

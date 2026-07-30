@@ -15,10 +15,11 @@ import (
 // Album 描述一个相册：名称、包含的媒体 ID 列表及创建时间。所有字段与改造前一致，
 // 隔离由 AlbumStore 按 user_id 分桶实现，Album 本身不变。
 type Album struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	MediaIDs  []string `json:"media_ids"`
-	CreatedAt int64    `json:"created_at"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	MediaIDs     []string `json:"media_ids"`
+	CreatedAt    int64    `json:"created_at"`
+	CoverMediaID string   `json:"cover_media_id,omitempty"` // V7：相册封面 media_id
 }
 
 // AlbumStore 按 user_id 维度隔离持久化相册列表。
@@ -190,6 +191,22 @@ func (as *AlbumStore) RemoveFromAlbum(uid, albumID, mediaID string) error {
 		}
 	}
 	return nil // 不存在，幂等
+}
+
+// SetAlbumCover V7：设置相册封面 media_id。
+func (as *AlbumStore) SetAlbumCover(uid, albumID, mediaID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return fmt.Errorf("album not found: %s", albumID)
+	}
+	album.CoverMediaID = mediaID
+	return pa.save()
 }
 
 // ListAlbums 返回 uid 名下所有相册，按创建时间倒序。

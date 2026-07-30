@@ -585,6 +585,14 @@ func (s *MediaService) RemoveFromAlbum(uid, albumID, mediaID string) error {
 	return s.albumStore.RemoveFromAlbum(uid, albumID, mediaID)
 }
 
+// SetAlbumCover V7：设置相册封面 media_id。
+func (s *MediaService) SetAlbumCover(uid, albumID, mediaID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.SetAlbumCover(uid, albumID, mediaID)
+}
+
 // ListAlbums 返回 user_id 名下所有相册列表。
 func (s *MediaService) ListAlbums(uid string) []*Album {
 	if s.albumStore == nil {
