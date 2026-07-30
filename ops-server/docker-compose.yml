@@ -1,0 +1,71 @@
+# ops-server 一键部署。
+#
+# 用法：
+#   cd ops-server && docker compose up -d --build
+#   docker compose logs -f ops-server
+#   docker compose down          # 卷保留
+#   docker compose down -v       # 连同数据卷一并删除（谨慎）
+#
+# 配置全走环境变量 MM_OPS_*（见 .env.example / internal/config/config.go）。
+# 复制 .env.example 为 .env 并按需填写，或直接在下方 environment 覆盖。
+#
+# 端口：
+#   8090  → REST/admin + /healthz（HTTP）
+#   18790 → TCP 中继（relay）
+
+services:
+  ops-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: media-manager/ops-server:latest
+    container_name: ops-server
+    restart: unless-stopped
+
+    # 暴露 HTTP 与中继端口。relay 仅在内网/可信网络使用，按需对外映射。
+    ports:
+      - "8090:8090"     # HTTP: REST/admin + /healthz
+      - "18790:18790"   # TCP relay
+
+    # 运行时配置。env_file 优先级低于下方 environment，便于在此覆盖个别项。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 默认值已在 Dockerfile 设定；此处显式声明便于一眼看清。
+      MM_OPS_HTTP_ADDR: ":8090"
+      MM_OPS_RELAY_ADDR: ":18790"
+      MM_OPS_DATA_DIR: "/data"
+
+      # —— 以下为示例占位，去掉注释并填值后启用 ——
+      # JWT 密钥：生产必填，留空则进程级随机（重启失效，所有已发 token 作废）。
+      # MM_OPS_JWT_SECRET: "change-me-to-a-long-random-string"
+      # 首次启动创建首位 admin（格式 user:pass）。已存在则跳过。
+      # MM_OPS_BOOTSTRAP_ADMIN: "admin:admin123"
+      # 注册模式：first=首位即admin(默认) / off=关闭注册。
+      # MM_OPS_SIGNUP_MODE: "first"
+
+    # 数据持久化：命名卷挂载到 /data，存放 SQLite 库与会话状态。
+    volumes:
+      - ops-data:/data
+
+    # 健康检查驱动 compose 的 service 状态（与 Dockerfile HEALTHCHECK 对齐）。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # 容器内非 root 运行（Dockerfile 创建的 ops 用户）。
+    user: "ops"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ops-data:
+    name: ops-server-data
