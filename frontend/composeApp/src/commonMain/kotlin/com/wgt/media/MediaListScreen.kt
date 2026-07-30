@@ -139,6 +139,7 @@ fun MediaListScreen(
     // V7 §1.2：分享链接结果对话框状态
     var shareLinkResult by remember { mutableStateOf<ShareLinkResult?>(null) }
     var shareLinkError by remember { mutableStateOf<String?>(null) }
+    var showShareLinkConfig by remember { mutableStateOf(false) }
 
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
@@ -293,6 +294,26 @@ fun MediaListScreen(
         }
     }
 
+    // V7 §1.2：分享链接配置对话框（密码可选 + 有效期选择）
+    if (showShareLinkConfig) {
+        ShareLinkConfigDialog(
+            onDismiss = { showShareLinkConfig = false },
+            onCreate = { password, hours ->
+                showShareLinkConfig = false
+                viewModel.createShareLinkForSelected(
+                    expiresInHours = hours,
+                    password = password?.takeIf { it.isNotBlank() },
+                    onCreated = { url, expiresAt ->
+                        shareLinkResult = ShareLinkResult(url, expiresAt)
+                    },
+                    onError = { msg ->
+                        shareLinkError = msg
+                    }
+                )
+            }
+        )
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -332,16 +353,9 @@ fun MediaListScreen(
                     showAddToAlbumButton = selectedTab != 0, // 后端源（已上传/网盘）才显示
                     showShareLinkButton = selectedTab != 0, // V7 §1.2：仅云端源显示分享链接按钮
                     onCreateShareLink = {
-                        // V7 §1.2：生成分享链接，成功后弹对话框显示 URL
+                        // V7 §1.2：打开配置对话框（密码可选 + 有效期选择）
                         shareLinkError = null
-                        viewModel.createShareLinkForSelected(
-                            onCreated = { url, expiresAt ->
-                                shareLinkResult = ShareLinkResult(url, expiresAt)
-                            },
-                            onError = { msg ->
-                                shareLinkError = msg
-                            }
-                        )
+                        showShareLinkConfig = true
                     }
                 )
             } else {
@@ -2950,6 +2964,70 @@ private fun ShareLinkDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+/**
+ * 分享链接配置对话框（V7 §1.2）。
+ *
+ * 允许用户在生成分享链接前选择：
+ * - 有效期（1小时 / 24小时 / 7天 / 30天）
+ * - 密码保护（可选）
+ *
+ * @param onDismiss 取消
+ * @param onCreate 确认创建，password 可空，hours 有效期
+ */
+@Composable
+private fun ShareLinkConfigDialog(
+    onDismiss: () -> Unit,
+    onCreate: (password: String?, hours: Int) -> Unit
+) {
+    var password by remember { mutableStateOf("") }
+    var selectedHours by remember { mutableStateOf(24) }
+
+    val expiryOptions = listOf(1 to "1 小时", 24 to "24 小时", 168 to "7 天", 720 to "30 天")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("生成分享链接") },
+        text = {
+            androidx.compose.foundation.layout.Column {
+                Text("有效期", style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                expiryOptions.forEach { (hours, label) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = selectedHours == hours,
+                            onClick = { selectedHours = hours }
+                        )
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text("密码保护（可选）", style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.height(4.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    placeholder = { Text("留空则无密码") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreate(password, selectedHours) }) {
+                Text("创建链接")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
         }
     )
 }

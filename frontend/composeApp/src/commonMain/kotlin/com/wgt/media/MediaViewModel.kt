@@ -1136,6 +1136,7 @@ class MediaViewModel {
      */
     fun createShareLinkForSelected(
         expiresInHours: Int = 24,
+        password: String? = null,
         onCreated: (url: String, expiresAt: Long) -> Unit = { _, _ -> },
         onError: (msg: String) -> Unit = {}
     ) {
@@ -1150,7 +1151,7 @@ class MediaViewModel {
         }
         viewModelScope.launch {
             try {
-                val link = MediaService.createShareLink(ids, expiresInHours)
+                val link = MediaService.createShareLink(ids, expiresInHours, password)
                 if (link != null) {
                     onCreated(link.url, link.expiresAt)
                 } else {
