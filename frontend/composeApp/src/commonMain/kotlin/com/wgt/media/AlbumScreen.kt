@@ -862,8 +862,14 @@ private fun AddMediaToAlbumDialog(
             TextButton(
                 enabled = selected.isNotEmpty(),
                 onClick = {
-                    selected.forEach { viewModel.addMediaToAlbum(albumId, it) }
-                    onAdded()
+                    // V7：改用批量端点（一次请求完成）
+                    val ids = selected.toList()
+                    viewModel.batchAddMediaToAlbum(albumId, ids) { added ->
+                        if (added != null) {
+                            onAdded()
+                        }
+                    }
+                    selected.clear()
                 }
             ) {
                 Text("添加 ${selected.size} 张")

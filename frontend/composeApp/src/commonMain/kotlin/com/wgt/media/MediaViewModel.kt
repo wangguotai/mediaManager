@@ -1862,6 +1862,18 @@ class MediaViewModel {
         }
     }
 
+    // ---- V7：批量添加媒体到相册 ----
+
+    fun batchAddMediaToAlbum(albumId: String, mediaIds: List<String>, onComplete: (Int?) -> Unit = {}) {
+        viewModelScope.launch {
+            val added = MediaService.batchAddMediaToAlbum(albumId, mediaIds)
+            if (added != null) {
+                loadAlbumDetail(albumId)
+            }
+            onComplete(added)
+        }
+    }
+
     // ---- V7：设置相册封面 ----
 
     fun setAlbumCover(albumId: String, mediaId: String, onComplete: (Boolean) -> Unit = {}) {
