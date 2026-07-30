@@ -44,8 +44,11 @@ import androidx.compose.ui.unit.sp
 import com.wgt.platform.logger.logger
 import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
+import com.wgt.media.BackendImageLoader
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_close
+import mediamanager.composeapp.generated.resources.ic_delete
 import mediamanager.composeapp.generated.resources.ic_check_circle
 import mediamanager.composeapp.generated.resources.ic_cloud
 import mediamanager.composeapp.generated.resources.ic_cloud_upload
@@ -679,11 +682,30 @@ fun SettingsScreen(
                     maxLines = 1
                 )
             }
+            // V7：清除缩略图缓存
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .padding(vertical = 4.dp)
+                    .clickable {
+                        BackendImageLoader.clearCaches()
+                        scope.launch { snackbarHostState.showSnackbar("缓存已清除") }
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("清除缩略图缓存", style = MaterialTheme.typography.bodyLarge)
+                Icon(
+                    painterResource(Res.drawable.ic_delete),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- 4. OpenClaw 桥梁 ----
             SectionTitle("OpenClaw", iconRes = Res.drawable.ic_openclaw)
             Row(
                 modifier = Modifier
