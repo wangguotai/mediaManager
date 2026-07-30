@@ -1819,4 +1819,15 @@ class MediaViewModel {
             onComplete()
         }
     }
+
+    // ---- V7：后端重复文件检测 ----
+
+    var duplicates by mutableStateOf<MediaService.DuplicateResult?>(null)
+        private set
+
+    fun loadDuplicates() {
+        viewModelScope.launch {
+            duplicates = MediaService.getDuplicates()
+        }
+    }
 }

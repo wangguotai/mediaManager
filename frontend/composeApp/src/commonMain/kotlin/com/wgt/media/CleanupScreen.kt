@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +55,7 @@ fun CleanupScreen(
     LaunchedEffect(Unit) {
         suggestions.value = viewModel.analyzeCleanupSuggestions()
         loaded = true
+        viewModel.loadDuplicates()  // V7：后端 SHA256 精确重复检测
     }
 
     Scaffold(
@@ -129,6 +131,44 @@ fun CleanupScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 4.dp)
                             )
+                        }
+                    }
+                }
+
+                // V7：后端 SHA256 精确重复检测
+                viewModel.duplicates?.let { dup ->
+                    if (dup.groupCount > 0) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Text("⚠ SHA256 精确重复检测", style = MaterialTheme.typography.titleMedium)
+                                    Spacer(modifier = Modifier.padding(4.dp))
+                                    Text("${dup.groupCount} 组重复 · ${dup.totalDupes} 个文件", style = MaterialTheme.typography.bodyMedium)
+                                    val mbStr = dup.wastedMB.let { 
+                                        val i = it.toInt()
+                                        val frac = ((it - i) * 100).toInt()
+                                        "$i.${frac.toString().padStart(2, '0')}"
+                                    }
+                                    Text(
+                                        "可回收 ${mbStr} MB",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                    dup.groups.take(3).forEach { g ->
+                                        Text(
+                                            "  · ${g.media.firstOrNull()?.filename ?: "?"} ×${g.count}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(top = 2.dp)
+                                        )
+                                    }
+                                    if (dup.groups.size > 3) {
+                                        Text("  ...等 ${dup.groups.size} 组", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
