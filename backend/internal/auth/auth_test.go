@@ -205,20 +205,28 @@ func TestShortPassword(t *testing.T) {
 	}
 }
 
-// TestPasswordMinLength8 验证 V5 安全基线——密码至少 8 位：7 位被拒，8 位通过。
+// TestPasswordMinLength8 验证密码长度与复杂度策略：过短或纯字母/纯数字被拒，合规通过。
 func TestPasswordMinLength8(t *testing.T) {
 	a, _ := newTestAuth(t, "open")
-	// 7 位应被拒。
-	if _, err := a.Register(context.Background(), RegisterRequest{Username: "seven", Password: "1234567"}); !errors.Is(err, ErrInvalidCredentials) {
+	// 7 位过短 → ErrPasswordTooWeak。
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "seven", Password: "1234567"}); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("7-char password should be rejected, got %v", err)
 	}
-	// 8 位应通过。
+	// 8 位纯数字（无字母）→ ErrPasswordTooWeak（复杂度不满足）。
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "digitsonly", Password: "12345678"}); !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("digits-only 8-char password should be rejected, got %v", err)
+	}
+	// 8 位纯字母（无数字）→ ErrPasswordTooWeak（复杂度不满足）。
+	if _, err := a.Register(context.Background(), RegisterRequest{Username: "lettersonly", Password: "abcdefgh"}); !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("letters-only 8-char password should be rejected, got %v", err)
+	}
+	// 8 位字母+数字 → 通过。
 	res, err := a.Register(context.Background(), RegisterRequest{Username: "eight", Password: "ab123456"})
 	if err != nil {
-		t.Fatalf("8-char password should be accepted, got %v", err)
+		t.Fatalf("8-char alphanumeric password should be accepted, got %v", err)
 	}
 	if res == nil || res.Token == "" {
-		t.Fatalf("expected successful registration for 8-char password")
+		t.Fatalf("expected successful registration for 8-char alphanumeric password")
 	}
 }
 
@@ -235,9 +243,17 @@ func TestChangePassword(t *testing.T) {
 	if err := a.ChangePassword(context.Background(), uid, "WRONGOLD", "newpass12"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong old password: want ErrInvalidCredentials, got %v", err)
 	}
-	// 新密码过短 → ErrInvalidCredentials（即便旧密码正确也应拒绝写入弱口令）。
-	if err := a.ChangePassword(context.Background(), uid, "pw123456", "short"); !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("short new password: want ErrInvalidCredentials, got %v", err)
+	// 新密码过短/过弱 → ErrPasswordTooWeak（即便旧密码正确也应拒绝写入弱口令）。
+	if err := a.ChangePassword(context.Background(), uid, "pw123456", "short"); !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("short new password: want ErrPasswordTooWeak, got %v", err)
+	}
+	// 新密码缺数字（纯字母）→ ErrPasswordTooWeak。
+	if err := a.ChangePassword(context.Background(), uid, "pw123456", "onlyletters"); !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("letters-only new password: want ErrPasswordTooWeak, got %v", err)
+	}
+	// 新密码缺字母（纯数字）→ ErrPasswordTooWeak。
+	if err := a.ChangePassword(context.Background(), uid, "pw123456", "1234567890"); !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("digits-only new password: want ErrPasswordTooWeak, got %v", err)
 	}
 	// 正常改密。
 	if err := a.ChangePassword(context.Background(), uid, "pw123456", "newpass12"); err != nil {
@@ -413,11 +429,11 @@ func TestBootstrapDefaultsUsernamePassword(t *testing.T) {
 	}
 }
 
-// TestBootstrapShortExplicitPasswordRejected 验证显式传入过短密码被拒（一次性随机密码不受影响）。
+// TestBootstrapShortExplicitPasswordRejected 验证显式传入过弱密码被拒（一次性随机密码不受影响）。
 func TestBootstrapShortExplicitPasswordRejected(t *testing.T) {
 	a, _ := newTestAuth(t, "off")
 	_, err := a.BootstrapAdmin(context.Background(), "admin", "ab")
-	if !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("short explicit password: want ErrInvalidCredentials, got %v", err)
+	if !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("short explicit password: want ErrPasswordTooWeak, got %v", err)
 	}
 }

@@ -41,6 +41,8 @@ var (
 	ErrUsernameTaken = errors.New("username already taken")
 	// ErrInvalidToken JWT 缺失/格式错误/签名不符/已过期。
 	ErrInvalidToken = errors.New("invalid or expired token")
+	// ErrPasswordTooWeak 密码不满足复杂度策略（长度不足或缺少字母/数字）。
+	ErrPasswordTooWeak = errors.New("password too weak: must contain letters and digits")
 )
 
 // User 是认证层使用的用户视图，仅含 JWT 签发与响应所需字段，
@@ -282,12 +284,14 @@ const minPasswordLength = 8
 
 // validatePassword 施加密码策略：最小长度 + 复杂度（至少含字母和数字）。
 // V6 §2.7（QA P1-4）：在 V5 长度 8 基础上加复杂度要求，拒绝纯字母或纯数字弱口令。
-// 返回 ErrInvalidCredentials 使 gateway 把弱口令映射为 400 而非 500。
+// 校验失败返回 ErrPasswordTooWeak（含长度不足或缺字母/数字两类情形），
+// gateway 据此映射为 400 而非 500。
 func (a *AuthService) validatePassword(pw string) error {
 	if len(pw) < minPasswordLength {
-		return ErrInvalidCredentials
+		return ErrPasswordTooWeak
 	}
-	// 复杂度：至少一个字母 + 至少一个数字。用 strings 检查，不引 regexp 减少依赖。
+	// 复杂度：至少一个字母 [a-zA-Z] + 至少一个数字 [0-9]。
+	// 用标准库 strings 检查，不引 regexp，依赖最小。
 	hasLetter := false
 	hasDigit := false
 	for _, r := range pw {
@@ -299,7 +303,7 @@ func (a *AuthService) validatePassword(pw string) error {
 		}
 	}
 	if !hasLetter || !hasDigit {
-		return ErrInvalidCredentials
+		return ErrPasswordTooWeak
 	}
 	return nil
 }
@@ -347,7 +351,7 @@ func (a *AuthService) AllowSignup() string { return a.signup }
 //
 // 语义：
 //   - userID 为空、用户不存在、旧密码不匹配 → ErrInvalidCredentials（不区分，防枚举）。
-//   - newPassword 不满足长度策略(<8) → ErrInvalidCredentials。
+//   - newPassword 不满足复杂度策略(长度<8或缺字母/数字) → ErrPasswordTooWeak。
 //   - 底层 UpdatePassword 未命中 → ErrInvalidCredentials（理论上不会，因前面已查到；防御）。
 //   - 成功后不签发新 token——旧 token 仍有效至过期；如需强制重登可后续引入 jti 版本号。
 func (a *AuthService) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
@@ -422,7 +426,7 @@ func (a *AuthService) BootstrapAdmin(ctx context.Context, username, password str
 		generated = true
 	}
 	if err := a.validatePassword(password); err != nil {
-		// 一次性随机密码不会触发；仅防御调用方传入过短的显式密码。
+		// 一次性随机密码不会触发；仅防御调用方传入过弱（过短或缺字母/数字）的显式密码。
 		return nil, err
 	}
 

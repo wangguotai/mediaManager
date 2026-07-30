@@ -146,12 +146,13 @@ func (s *Server) handleAuthRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeAuthError 把 auth 包的哨兵错误映射为 HTTP 状态码：
-//   - ErrInvalidCredentials / ErrUsernameTaken（弱口令）→ 400
+//   - ErrInvalidCredentials / ErrPasswordTooWeak → 400（凭据或口令强度不合规）
+//   - ErrUsernameTaken → 409（用户名已占用）
 //   - ErrSignupDisabled → 403（注册被策略关闭，语义清晰）
 //   - 其余 → 500
 func writeAuthError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, auth.ErrInvalidCredentials):
+	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrPasswordTooWeak):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 	case errors.Is(err, auth.ErrUsernameTaken):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
