@@ -253,7 +253,8 @@ fun SettingsScreen(
     viewModel: MediaViewModel,
     onBack: () -> Unit,
     onNavigateToTrash: () -> Unit = {},
-    onNavigateToRnActivity: () -> Unit = {}
+    onNavigateToRnActivity: () -> Unit = {},
+    onNavigateToCleanup: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -604,6 +605,18 @@ fun SettingsScreen(
                 Text("活动中心", style = MaterialTheme.typography.bodyLarge)
                 TextButton(onClick = onNavigateToRnActivity) {
                     Text("打开 React Native 模块")
+                }
+            }
+
+            // ---- 存储清理入口（V7 §2.4）----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("存储清理", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = onNavigateToCleanup) {
+                    Text("查看清理建议")
                 }
             }
 

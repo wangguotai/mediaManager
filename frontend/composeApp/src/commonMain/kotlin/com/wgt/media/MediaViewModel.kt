@@ -1678,4 +1678,97 @@ class MediaViewModel {
     fun dismissAddToAlbumDialog() {
         pendingAddToAlbumMediaId = null
     }
+
+    // ============================================================
+    // V7 §2.4：存储清理建议
+    // ============================================================
+
+    /** 清理建议类型。 */
+    enum class CleanupCategory { DUPLICATE, LARGE_FILE, OLD_PHOTO }
+
+    /** 单条清理建议。 */
+    data class CleanupSuggestion(
+        val category: CleanupCategory,
+        val media: MediaMetadata,
+        val reason: String
+    )
+
+    /**
+     * 分析 [cloudMedia] 生成清理建议：
+     * - 疑似重复：filename + size 相同（不同 id）
+     * - 大文件：size > 10MB 的 Top 10
+     * - 老照片：created_at > 365 天前
+     *
+     * @return 按类别分组的建议列表
+     */
+    fun analyzeCleanupSuggestions(): List<CleanupSuggestion> {
+        val media = cloudMedia
+        if (media.isEmpty()) return emptyList()
+
+        val suggestions = mutableListOf<CleanupSuggestion>()
+
+        // 1. 疑似重复：filename + size 相同
+        val grouped = media.groupBy { "${it.filename}_${it.size}" }
+        grouped.filter { it.key != "_0" && it.value.size > 1 }.forEach { (_, group) ->
+            // 保留第一个，其余标记为重复
+            group.drop(1).forEach { m ->
+                suggestions.add(CleanupSuggestion(CleanupCategory.DUPLICATE, m, "与 ${group.size} 个文件同名同大小"))
+            }
+        }
+
+        // 2. 大文件 Top 10（> 10MB）
+        val tenMB = 10L * 1024 * 1024
+        media.filter { it.size > tenMB }
+            .sortedByDescending { it.size }
+            .take(10)
+            .forEach { m ->
+                suggestions.add(CleanupSuggestion(CleanupCategory.LARGE_FILE, m, "大文件 ${formatFileSize(m.size)}"))
+            }
+
+        // 3. 老照片（> 365 天前）
+        val oneYearAgoMs = Clock.System.now().toEpochMilliseconds() - 365L * 24 * 60 * 60 * 1000
+        media.filter { it.created_at > 0 && it.created_at < oneYearAgoMs }
+            .forEach { m ->
+                suggestions.add(CleanupSuggestion(CleanupCategory.OLD_PHOTO, m, "超过一年未访问"))
+            }
+
+        return suggestions
+    }
+
+    /** 格式化文件大小（commonMain 无 String.format，手动实现）。 */
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return "${kb.toInt()} KB"
+        val mb = kb / 1024.0
+        if (mb < 1024) return "${mb.toInt()} MB"
+        val gb = mb / 1024.0
+        return "${gb.toInt()} GB"
+    }
+
+    /**
+     * 批量删除清理建议中选中的媒体（调 deleteMedia）。
+     * @param ids 要删除的 media id 列表
+     * @param onComplete 删除完成回调
+     */
+    fun deleteCleanupItems(ids: List<String>, onComplete: () -> Unit = {}) {
+        if (ids.isEmpty()) {
+            onComplete()
+            return
+        }
+        viewModelScope.launch {
+            var deleted = 0
+            for (id in ids) {
+                try {
+                    MediaService.deleteMedia(listOf(id))
+                    cloudMedia = cloudMedia.filterNot { it.id == id }
+                    deleted++
+                } catch (e: Exception) {
+                    // 继续删除其他项
+                }
+            }
+            errorMessage = "已删除 $deleted/${ids.size} 项"
+            onComplete()
+        }
+    }
 }
