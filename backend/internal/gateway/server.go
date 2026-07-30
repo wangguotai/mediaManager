@@ -408,6 +408,20 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// V7：日期范围筛选（date_from / date_to，Unix 时间戳秒）。
+	// 在 gateway 层后处理过滤，避免改 proto + service 层。
+	var dateFrom, dateTo int64
+	if v := r.URL.Query().Get("date_from"); v != "" {
+		if n, _ := parseIntSafe(v); n > 0 {
+			dateFrom = int64(n)
+		}
+	}
+	if v := r.URL.Query().Get("date_to"); v != "" {
+		if n, _ := parseIntSafe(v); n > 0 {
+			dateTo = int64(n)
+		}
+	}
+
 	resp, err := s.mediaSvc.GetMediaList(r.Context(), &gen.GetMediaListRequest{
 		Page:        page,
 		PageSize:    pageSize,
@@ -419,14 +433,20 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// V7：文件大小范围筛选（gateway 层后处理，避免改 proto）。
-	if minSize > 0 || maxSize > 0 {
+	// V7：文件大小+日期范围筛选（gateway 层后处理，避免改 proto）。
+	if minSize > 0 || maxSize > 0 || dateFrom > 0 || dateTo > 0 {
 		filtered := make([]*gen.MediaMetadata, 0, len(resp.MediaList))
 		for _, m := range resp.MediaList {
 			if minSize > 0 && m.Size < minSize {
 				continue
 			}
 			if maxSize > 0 && m.Size > maxSize {
+				continue
+			}
+			if dateFrom > 0 && m.CreatedAt < dateFrom {
+				continue
+			}
+			if dateTo > 0 && m.CreatedAt > dateTo {
 				continue
 			}
 			filtered = append(filtered, m)
