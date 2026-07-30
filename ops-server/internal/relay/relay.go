@@ -84,11 +84,12 @@ type pairSlots struct {
 	sessionID string // 会话 ID（首端进入时分配）
 	startedAt time.Time
 
-	mu      sync.Mutex
-	a       *relayConn
-	b       *relayConn
-	paired  bool
-	closed  bool
+	mu        sync.Mutex
+	a         *relayConn
+	b         *relayConn
+	paired    bool
+	closed    bool
+	finishErr error // relay 期间首个方向的错误（io.Copy 非 EOF），用于区分结束原因
 }
 
 // relayConn 一端中继连接的运行态。
@@ -219,9 +220,10 @@ func (s *Service) handleConn(conn net.Conn) {
 	if isFirst {
 		// 第一端：先落一条进行中的 session，回 ack 等对端。
 		writeJSON(conn, map[string]any{"status": "waiting", "pair_key": frame.PairKey, "session_id": slot.sessionID})
-		// 阻塞等待配对或关闭。
+		// 阻塞等待配对或关闭。超时/对端缺席/服务关闭分别映射不同结束原因（PRD §3.3）。
 		if err := slot.waitPaired(s.closed); err != nil {
-			s.endSession(slot, rc, "pair timeout / peer absent")
+			reason := classifyWaitError(err)
+			s.endSession(slot, rc, reason)
 			return
 		}
 	} else {
@@ -233,6 +235,20 @@ func (s *Service) handleConn(conn net.Conn) {
 	slot.relay(rc)
 	reason := slot.finishReason(rc)
 	s.endSession(slot, rc, reason)
+}
+
+// classifyWaitError 把 waitPaired 返回的错误映射为结束原因字符串（PRD §3.3）。
+//   - errWaitTimeout → "timeout"（首端等待对端超时，对端未到达）
+//   - errPeerAbsent  → "peer_absent"（对端提前关闭）
+//   - service closed  → "service_closed"
+func classifyWaitError(err error) string {
+	if errors.Is(err, errWaitTimeout) {
+		return "timeout"
+	}
+	if errors.Is(err, errPeerAbsent) {
+		return "peer_absent"
+	}
+	return "service_closed"
 }
 
 // enterPair 把当前连接挂入对应 pairKey 的槽位。返回槽位、是否为第一端、错误。
@@ -293,25 +309,44 @@ func (s *Service) enterPair(pairKey string, srv *Server, rc *relayConn) (*pairSl
 	return slot, false, nil
 }
 
-// waitPaired 阻塞等待对端到达或服务关闭。超时由上层未实现（骨架阻塞至对端或关闭）。
+// waitPaired 阻塞等待对端到达或服务关闭。默认 30s 超时（对端未到即 peer_absent）。
+// 超时由 waitPairTimeout 控制（PRD §3.3：首端等待加超时默认 30s）。
 func (p *pairSlots) waitPaired(svcClosed <-chan struct{}) error {
 	// 轮询配对态；配对由第二端 markPaired 触发。
 	t := time.NewTicker(50 * time.Millisecond)
 	defer t.Stop()
+	deadline := time.NewTimer(waitPairTimeout)
+	defer deadline.Stop()
 	for {
 		p.mu.Lock()
 		paired := p.paired
+		closed := p.closed
 		p.mu.Unlock()
 		if paired {
 			return nil
 		}
+		if closed {
+			return errPeerAbsent
+		}
 		select {
 		case <-svcClosed:
 			return errors.New("service closed")
+		case <-deadline.C:
+			// 首端等待超时：对端未到达，按 peer_absent 结束。
+			return errWaitTimeout
 		case <-t.C:
 		}
 	}
 }
+
+// waitPairTimeout 是首端等待对端配对的默认超时（PRD §3.3：30s）。
+const waitPairTimeout = 30 * time.Second
+
+// errWaitTimeout 首端等待对端超时。
+var errWaitTimeout = errors.New("pair wait timeout: peer absent")
+
+// errPeerAbsent 配对槽已被对端关闭标记（对端提前退出）。
+var errPeerAbsent = errors.New("peer absent")
 
 // markPaired 由第二端调用，置 paired=true 唤醒第一端。
 func (p *pairSlots) markPaired() {
@@ -321,11 +356,18 @@ func (p *pairSlots) markPaired() {
 }
 
 // relay 在本端与对端之间双向 copy 字节，直到任一方向结束。
+// 首个非 EOF 的 copy 错误记入 finishErr，供 finishReason 区分正常结束与异常断开。
 func (p *pairSlots) relay(rc *relayConn) {
 	p.mu.Lock()
 	other := p.peer(rc)
 	p.mu.Unlock()
 	if other == nil {
+		// 配对后对端已不在（异常），记为 peer_absent。
+		p.mu.Lock()
+		if p.finishErr == nil {
+			p.finishErr = errPeerAbsent
+		}
+		p.mu.Unlock()
 		return
 	}
 	// 双向 copy：本端读→对端写，对端读→本端写。
@@ -333,18 +375,32 @@ func (p *pairSlots) relay(rc *relayConn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(other.conn, rc.conn)
+		n, err := io.Copy(other.conn, rc.conn)
 		atomic.AddInt64(&rc.bytes, n)
+		p.recordFinishErr(err)
 		// 任一方向完成即半关闭对端写，促使对端 io.Copy 退出。
 		_ = other.conn.(closeWriter).CloseWrite()
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(rc.conn, other.conn)
+		n, err := io.Copy(rc.conn, other.conn)
 		atomic.AddInt64(&other.bytes, n)
+		p.recordFinishErr(err)
 		_ = rc.conn.(closeWriter).CloseWrite()
 	}()
 	wg.Wait()
+}
+
+// recordFinishErr 记录首个非 nil、非 EOF 的 io.Copy 错误（仅第一个生效）。
+func (p *pairSlots) recordFinishErr(err error) {
+	if err == nil || errors.Is(err, io.EOF) {
+		return
+	}
+	p.mu.Lock()
+	if p.finishErr == nil {
+		p.finishErr = err
+	}
+	p.mu.Unlock()
 }
 
 // peer 返回对端连接（需持 p.mu）。
@@ -355,9 +411,21 @@ func (p *pairSlots) peer(rc *relayConn) *relayConn {
 	return p.a
 }
 
-// finishReason 汇总关闭原因（骨架统一 "closed"）。
+// finishReason 汇总关闭原因，区分 normal / peer_error / peer_absent。
+//   - finishErr 为 nil：两端均正常 EOF → "normal"。
+//   - finishErr 为 errPeerAbsent：对端在转发前已离开 → "peer_absent"。
+//   - 其余（网络中断/连接重置等）：→ "peer_error"。
 func (p *pairSlots) finishReason(rc *relayConn) string {
-	return "closed"
+	p.mu.Lock()
+	err := p.finishErr
+	p.mu.Unlock()
+	if err == nil {
+		return "normal"
+	}
+	if errors.Is(err, errPeerAbsent) {
+		return "peer_absent"
+	}
+	return "peer_error"
 }
 
 // endSession 结束会话：累加两端字节，落账 finalize。

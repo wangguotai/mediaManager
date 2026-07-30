@@ -1,15 +1,17 @@
 // Command ops-server 是运营服务端的可执行入口。
 //
-// 它把 internal/ 下各组件（auth/storage/discovery/relay）组装为一个进程：
-//   - HTTP(:18789)：挂载 /admin/* 前端 + JSON API；未来可扩展发现 query/信令 WS。
+// 它把 internal/ 下各组件组装为一个进程：
+//   - HTTP(:8090)：挂载 /admin/* 前端 + JSON API，以及 /op/* 运营中继 API
+//     （受管服务端注册、设备发现、信令 WS /op/ws、/op/server/ws）。
 //   - TCP(:18790)：TURN 式中继，接受配对连接并记账。
 //
 // 启动时若无运营账号且提供了 MM_OPS_BOOTSTRAP_ADMIN=user:pass，则创建首位 admin，
 // 使登录可用（signup=first 模式下首位即 admin）。这是"独立管理员账号"的最小接入路径。
 //
 // 设计取舍：
-//   - 不导入 ws/signaling 的 WS 升级实现（需引第三方 WS 库），故本命令暂不暴露 WS 端点；
-//     但 admin 数据看板与中继记账已完整可用。WS 实时信令留待后续工作项接入。
+//   - 三个孤儿包 discovery/signaling/ws 在此接线：discovery 注入 store 维护设备在线态；
+//     signaling 维护候选地址内存表（V5 不实测穿透，候选仅记录）；ws.Hub 经 cors 放宽的
+//     coder/websocket 升级承载实时信令转发。
 //   - 信号处理：收到 SIGINT/SIGTERM 优雅停 relay 与 HTTP。
 package main
 
@@ -29,8 +31,12 @@ import (
 	"media-manager/ops-server/internal/admin"
 	"media-manager/ops-server/internal/auth"
 	"media-manager/ops-server/internal/config"
+	"media-manager/ops-server/internal/discovery"
+	"media-manager/ops-server/internal/opapi"
 	"media-manager/ops-server/internal/relay"
+	"media-manager/ops-server/internal/signaling"
 	"media-manager/ops-server/internal/storage"
+	"media-manager/ops-server/internal/ws"
 )
 
 func main() {
@@ -79,6 +85,48 @@ func run() error {
 		return fmt.Errorf("init relay: %w", err)
 	}
 
+	// 设备发现服务：维护 (server_id, device_id) 在线表与心跳。
+	discSvc, err := discovery.New(store)
+	if err != nil {
+		return fmt.Errorf("init discovery: %w", err)
+	}
+
+	// 信令服务：内存候选地址表，配对介绍（V5 不实测穿透，候选仅记录）。
+	signaler := signaling.New(time.Now)
+
+	// WS Hub：客户端/受管服务端长连注册表与信令转发。
+	hub := ws.NewHub(
+		func(peerID, serverID, deviceID string, role ws.Role) {
+			// 连接上线：server 角色触达即刷新 last_seen；client 角色置设备 online。
+			if role == ws.RoleServer {
+				_ = store.TouchServerLastSeen(context.Background(), serverID, time.Now())
+			} else if deviceID != "" {
+				_ = discSvc.SetOffline(context.Background(), serverID, deviceID) // 先清再置，确保 online=true
+				_ = discSvc.Heartbeat(context.Background(), serverID, deviceID)
+			}
+		},
+		func(peerID, serverID, deviceID string, role ws.Role) {
+			// 连接下线：client 角色置设备 offline；server 角色置名下设备全部离线。
+			if role == ws.RoleServer {
+				_ = discSvc.MarkServerOffline(context.Background(), serverID)
+			} else if deviceID != "" {
+				_ = discSvc.SetOffline(context.Background(), serverID, deviceID)
+			}
+		},
+		nil, // onSignal 由 opapi 在 serveWS 内就地处理候选/介绍，Hub 仅做裸转发。
+	)
+
+	// /op/* API（受管服务端注册 + 设备发现 + 信令 WS）。
+	opH, err := opapi.New(opapi.Deps{
+		Auther:    auther,
+		Discovery: discSvc,
+		Signaler:  signaler,
+		Hub:       hub,
+	})
+	if err != nil {
+		return fmt.Errorf("init opapi: %w", err)
+	}
+
 	// admin 前端 + API。
 	adminH, err := admin.New(admin.Deps{Auther: auther, Store: store})
 	if err != nil {
@@ -87,6 +135,8 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/admin/", adminH.Handler())
+	// /op/* 运营中继 API（register / device / ws）。
+	mux.Handle("/op/", http.StripPrefix("/op", opH.Routes()))
 	// 健康检查，供编排系统探测（与 backend /healthz 命名对齐）。
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

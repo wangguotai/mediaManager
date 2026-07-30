@@ -18,17 +18,16 @@ import (
 	"time"
 
 	"media-manager/ops-server/internal/auth"
+	"media-manager/ops-server/internal/discovery"
 	"media-manager/ops-server/internal/relay"
 )
 
-// 与领域层类型对齐的桥接策略：本包暴露的 StoredOpAccount / Server / RelaySession
-// 定义为指向 auth / relay 对应类型的 type alias，使 *Store 的方法签名直接满足
-// auth.OpAccountStore 与 relay.RelayStore 接口，避免在 main 层手写 adapter。
-// 依赖方向为 storage → auth、storage → relay（relay → auth），单向无环。
-//
-// OpAccount / Device 仍为本包独立视图类型（auth/relay 未提供等价物或字段集不同）。
+// 与领域层类型对齐的桥接策略：本包暴露的 StoredOpAccount / Server / RelaySession / Device
+// 定义为指向 auth / relay / discovery 对应类型的 type alias，使 *Store 的方法签名直接满足
+// auth.OpAccountStore、relay.RelayStore 与 discovery.DeviceStore 接口，避免在 main 层手写 adapter。
+// 依赖方向为 storage → discovery → auth、storage → relay（relay → auth），单向无环。
 
-// OpAccount 运营账号视图（不含密码哈希，供响应层使用）。
+// OpAccount 运营账号视图（不含密码哈希，供响应层使用）。本包独立类型（auth 未提供等价物）。
 type OpAccount struct {
 	ID        string    `json:"id"`
 	Username  string    `json:"username"`
@@ -43,14 +42,9 @@ type StoredOpAccount = auth.StoredOpAccount
 // alias 到 auth.Server，使 CreateServer/GetServerBy* 满足 auth.OpAccountStore。
 type Server = auth.Server
 
-// Device 设备在线登记记录。Online/LastSeen 由设备心跳或 WS 连接态驱动。
-type Device struct {
-	ServerID string    `json:"server_id"`
-	DeviceID string    `json:"device_id"`
-	Online   bool      `json:"online"`
-	LastSeen time.Time `json:"last_seen"`
-	Meta     string    `json:"meta"` // 透传的设备元信息（平台/名称等原始 JSON 字符串），可空
-}
+// Device 设备在线登记记录。alias 到 discovery.Device，
+// 使 UpsertDevice/GetDevice/ListDevices* 满足 discovery.DeviceStore。
+type Device = discovery.Device
 
 // RelaySession TCP 中继流量记账记录。alias 到 relay.RelaySession，
 // 使 CreateRelaySession/FinalizeRelaySession 满足 relay.RelayStore。
