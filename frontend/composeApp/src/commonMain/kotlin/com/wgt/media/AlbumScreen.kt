@@ -469,6 +469,7 @@ private fun AlbumDetailPage(
     val isLoading = viewModel.isAlbumDetailLoading
     var previewIndex by remember { mutableStateOf<Int?>(null) }
     var showAddMediaDialog by remember { mutableStateOf(false) }
+    var removeTarget by remember { mutableStateOf<String?>(null) } // V7：长按移除目标 media id
 
     // 图片预览
     previewIndex?.let { index ->
@@ -590,13 +591,35 @@ private fun AlbumDetailPage(
                             }
                         },
                         onMediaLongClick = { media ->
-                            previewIndex = mediaList.indexOf(media)
+                            removeTarget = media.id
                         },
                         useBackendLoader = true,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
             }
+        }
+
+        // V7：长按照片 → 从相册移除确认对话框
+        removeTarget?.let { mediaId ->
+            AlertDialog(
+                onDismissRequest = { removeTarget = null },
+                title = { Text("从相册移除") },
+                text = { Text("确定将此照片从 \"$albumName\" 相册中移除？照片本身不会被删除。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.removeFromAlbum(albumId, mediaId) { success ->
+                            if (success) {
+                                viewModel.loadAlbumDetail(albumId)
+                            }
+                        }
+                        removeTarget = null
+                    }) { Text("移除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { removeTarget = null }) { Text("取消") }
+                }
+            )
         }
 
         // V7：添加照片到相册对话框
