@@ -252,7 +252,8 @@ object SettingsState {
 fun SettingsScreen(
     viewModel: MediaViewModel,
     onBack: () -> Unit,
-    onNavigateToTrash: () -> Unit = {}
+    onNavigateToTrash: () -> Unit = {},
+    onNavigateToRnActivity: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -587,6 +588,22 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(modeLabel(mode), style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ---- RN 活动中心入口（V7 §3.1）----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("活动中心", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = onNavigateToRnActivity) {
+                    Text("打开 React Native 模块")
                 }
             }
 

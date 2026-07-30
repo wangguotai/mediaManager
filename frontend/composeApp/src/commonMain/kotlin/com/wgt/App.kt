@@ -26,6 +26,7 @@ import com.wgt.media.MemoryDetailScreen
 import com.wgt.media.RegisterScreen
 import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
+import com.wgt.media.RnActivityScreen
 import com.wgt.media.TrashScreen
 import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
@@ -158,7 +159,8 @@ fun App() {
                         Screen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
                             onBack = { screen = Screen.MEDIA },
-                            onNavigateToTrash = { screen = Screen.TRASH }
+                            onNavigateToTrash = { screen = Screen.TRASH },
+                            onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY }
                         )
                         Screen.ALBUM -> AlbumScreen(
                             viewModel = viewModel,
@@ -171,6 +173,9 @@ fun App() {
                         Screen.TRASH -> TrashScreen(
                             onBack = { screen = Screen.SETTINGS }
                         )
+                        Screen.RN_ACTIVITY -> RnActivityScreen(
+                            onBack = { screen = Screen.SETTINGS }
+                        )
                     }
                 }
             }
@@ -179,7 +184,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }

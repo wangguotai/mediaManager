@@ -6,6 +6,7 @@ import android.os.Bundle
 import com.wgt.app.architecture.lifecycle.AndroidAppLifecycle
 import com.wgt.platform.AppContext
 import com.wgt.platform.setCurrentActivity
+import com.wgt.rn_module.RNModuleInit
 
 /**
  * 媒体管理器应用类
@@ -62,6 +63,14 @@ class MediaApplication : Application() {
 
         // 初始化应用生命周期（触发AppLaunched）
         AndroidAppLifecycle.initialize()
+
+        // V7 §3.1：初始化 React Native 运行时（SoLoader + Bridgeless FeatureFlags）
+        // 幂等——多次调用安全。RN 后续按需通过 RNContainerManager 加载 JS bundle。
+        runCatching {
+            RNModuleInit.initialize(this)
+        }.onFailure { err ->
+            android.util.Log.w("MediaApplication", "RNModuleInit failed: ${err.message}")
+        }
 
 
         // 可以在这里初始化其他全局组件

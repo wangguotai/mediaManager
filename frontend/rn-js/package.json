@@ -1,0 +1,16 @@
+{
+  "name": "media-manager-rn",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "bundle": "npx react-native bundle --platform android --dev false --entry-file index.js --bundle-output ../composeApp/src/androidMain/assets/index.android.bundle --assets-dest ../composeApp/src/androidMain/assets"
+  },
+  "dependencies": {
+    "@react-native-community/cli": "^20.2.0",
+    "@react-native/metro-config": "^0.86.2",
+    "metro": "^0.87.0",
+    "metro-bundler": "^0.22.1",
+    "react": "19.0.0",
+    "react-native": "0.84.1"
+  }
+}

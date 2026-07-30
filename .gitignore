@@ -174,3 +174,4 @@ temp/
 .agents/worktrees/
 .agents/state/
 .agents/*.lock
+frontend/rn-js/node_modules/

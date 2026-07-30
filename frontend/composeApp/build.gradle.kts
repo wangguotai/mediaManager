@@ -37,6 +37,34 @@ kotlin {
             // EncryptedSharedPreferences：安全存储 JWT token（见 SettingsStorage.android.kt）
             implementation(libs.androidx.security.crypto)
 //            implementation(project(":rn-plugin:rn-android"))
+
+            // ================================================================
+            // RN 运行时依赖（V7 §3.1）——与 rn-module/build.gradle.kts 对齐版本
+            // composeApp 需直接声明这些依赖，RnContainer.android.kt 才能引用
+            // ReactHost / ReactRootView / Surface 等 RN API。
+            // ================================================================
+            // RN SDK AAR（经 settings.gradle.kts flatDir 仓库引用）
+            // 与 rn-module 同款写法：flatDir 仓库按 name 匹配 rn-sdk-debug.aar
+            implementation("rn-sdk-debug:rn-sdk-debug:@aar")
+            implementation("com.facebook.fbjni:fbjni:0.7.0")
+            implementation("com.facebook.soloader:soloader:0.12.1")
+            implementation("com.facebook.yoga:proguard-annotations:1.19.0")
+            implementation("com.facebook.fresco:fresco:3.6.0")
+            implementation("com.facebook.fresco:middleware:3.6.0")
+            implementation("com.facebook.fresco:imagepipeline-okhttp3:3.6.0")
+            implementation("com.facebook.fresco:ui-common:3.6.0")
+            implementation("com.squareup.okhttp3:okhttp:4.9.2")
+            implementation("com.squareup.okhttp3:okhttp-urlconnection:4.9.2")
+            implementation("com.squareup.okio:okio:2.9.0")
+            implementation("javax.inject:javax.inject:1")
+            implementation("com.google.code.findbugs:jsr305:3.0.2")
+            implementation("com.facebook.infer.annotation:infer-annotation:0.18.0")
+            implementation("androidx.appcompat:appcompat:1.7.0")
+            implementation("androidx.appcompat:appcompat-resources:1.7.0")
+            implementation("androidx.autofill:autofill:1.1.0")
+            implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+            implementation("androidx.tracing:tracing:1.1.0")
+            implementation("com.google.android.material:material:1.11.0")
         }
         commonMain.dependencies {
             implementation(projects.shared)
