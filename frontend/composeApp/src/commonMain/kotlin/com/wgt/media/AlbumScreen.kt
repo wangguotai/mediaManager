@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -43,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -450,6 +453,7 @@ private fun AlbumDetailPage(
     val mediaList = viewModel.albumDetailMedia
     val isLoading = viewModel.isAlbumDetailLoading
     var previewIndex by remember { mutableStateOf<Int?>(null) }
+    var showAddMediaDialog by remember { mutableStateOf(false) }
 
     // 图片预览
     previewIndex?.let { index ->
@@ -518,6 +522,15 @@ private fun AlbumDetailPage(
                     }
                 }
             )
+        },
+        // V7：相册详情页 FAB — 添加照片
+        floatingActionButton = {
+            FloatingActionButton(onClick = { showAddMediaDialog = true }) {
+                Icon(
+                    painterResource(Res.drawable.ic_file_upload),
+                    contentDescription = "添加照片"
+                )
+            }
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
@@ -567,10 +580,22 @@ private fun AlbumDetailPage(
                 }
             }
         }
+
+        // V7：添加照片到相册对话框
+        if (showAddMediaDialog) {
+            AddMediaToAlbumDialog(
+                viewModel = viewModel,
+                albumId = albumId,
+                existingMediaIds = mediaList.map { it.id }.toSet(),
+                onDismiss = { showAddMediaDialog = false },
+                onAdded = {
+                    showAddMediaDialog = false
+                    viewModel.loadAlbumDetail(albumId)
+                }
+            )
+        }
     }
 }
-
-// ---- 新建相册对话框 ----
 
 /**
  * 新建相册对话框：输入相册名称，确认后创建。
@@ -680,4 +705,105 @@ private fun FullScreenLoadingAlbum() {
             )
         }
     }
+}
+
+/**
+ * V7：添加照片到相册对话框
+ *
+ * 列出云端媒体（排除已在相册中的），多选后批量调 addMediaToAlbum。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun AddMediaToAlbumDialog(
+    viewModel: MediaViewModel,
+    albumId: String,
+    existingMediaIds: Set<String>,
+    onDismiss: () -> Unit,
+    onAdded: () -> Unit
+) {
+    val cloudMedia = viewModel.cloudMedia
+    val available = cloudMedia.filter { it.id !in existingMediaIds }
+    val selected = remember { mutableStateListOf<String>() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加照片到相册") },
+        text = {
+            Column {
+                if (available.isEmpty()) {
+                    Text("没有可添加的照片（所有云端媒体已在此相册中）")
+                } else {
+                    Text("可选 ${available.size} 张照片", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 100.dp),
+                        modifier = Modifier.heightIn(max = 400.dp)
+                    ) {
+                        items(available, key = { it.id }) { media ->
+                            val isSelected = media.id in selected
+                            Box(
+                                modifier = Modifier
+                                    .aspectRatio(1f)
+                                    .padding(2.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (isSelected) selected.remove(media.id)
+                                            else selected.add(media.id)
+                                        }
+                                    )
+                            ) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        painterResource(Res.drawable.ic_photo),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(32.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (isSelected) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(4.dp)
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            "✓",
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = selected.isNotEmpty(),
+                onClick = {
+                    selected.forEach { viewModel.addMediaToAlbum(albumId, it) }
+                    onAdded()
+                }
+            ) {
+                Text("添加 ${selected.size} 张")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
