@@ -1522,6 +1522,7 @@ func enrichMediaList(resp *gen.GetMediaListResponse, fav favoriteProvider, uid s
 		"total_count": resp.TotalCount,
 		"page":        resp.Page,
 		"page_size":   resp.PageSize,
+		"has_more":    resp.Page*resp.PageSize < resp.TotalCount,
 	}
 }
 
