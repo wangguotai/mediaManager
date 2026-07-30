@@ -135,6 +135,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-stats", s.handleMediaStorageStats)
 	// V7：重复文件检测端点（基于 SHA256 分组）
 	s.mux.HandleFunc("/api/media/duplicates", s.handleMediaDuplicates)
+	// V7：媒体库综合摘要端点
+	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -1741,6 +1743,71 @@ func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
 		"total_dupes":  totalDupes,
 		"wasted_bytes": totalWasted,
 		"wasted_mb":    float64(totalWasted) / (1024 * 1024),
+		"user_id":      uid,
+	})
+}
+
+// handleMediaSummary 处理 GET /api/media/summary，
+// 返回用户媒体库综合摘要（总数/大小/时间范围/收藏数/相册数）。
+func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	var totalCount int
+	var totalBytes int64
+	var earliest, latest int64
+	imageCount, videoCount, liveCount := 0, 0, 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+		ts := m.CreatedAt.Unix()
+		if earliest == 0 || ts < earliest {
+			earliest = ts
+		}
+		if ts > latest {
+			latest = ts
+		}
+		switch m.Type {
+		case "VIDEO":
+			videoCount++
+		case "LIVE_PHOTO":
+			liveCount++
+		default:
+			imageCount++
+		}
+	}
+
+	// 收藏数和相册数通过 service 层获取（store 层无对应方法）
+	// 这里只返回媒体统计，收藏/相册数前端 separately 获取
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_count":  totalCount,
+		"total_bytes":  totalBytes,
+		"total_mb":     float64(totalBytes) / (1024 * 1024),
+		"image_count":  imageCount,
+		"video_count":  videoCount,
+		"live_count":   liveCount,
+		"earliest_ts":  earliest,
+		"latest_ts":    latest,
 		"user_id":      uid,
 	})
 }
