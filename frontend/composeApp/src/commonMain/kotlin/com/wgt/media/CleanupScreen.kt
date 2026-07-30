@@ -3,8 +3,10 @@ package com.wgt.media
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -103,6 +105,42 @@ fun CleanupScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)
                 )
+                // V7：即使本地分析无结果，也显示后端精确重复检测
+                viewModel.duplicates?.let { dup ->
+                    if (dup.groupCount > 0) {
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("⚠ SHA256 精确重复检测", style = MaterialTheme.typography.titleMedium)
+                                Spacer(modifier = Modifier.padding(4.dp))
+                                Text("${dup.groupCount} 组重复 · ${dup.totalDupes} 个文件", style = MaterialTheme.typography.bodyMedium)
+                                val mbStr = dup.wastedMB.let {
+                                    val i = it.toInt()
+                                    val frac = ((it - i) * 100).toInt()
+                                    "$i.${frac.toString().padStart(2, '0')}"
+                                }
+                                Text(
+                                    "可回收 ${mbStr} MB",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                dup.groups.take(3).forEach { g ->
+                                    Text(
+                                        "  · ${g.media.firstOrNull()?.filename ?: "?"} ×${g.count}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                                if (dup.groups.size > 3) {
+                                    Text("  ...等 ${dup.groups.size} 组", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } else {
             // 按类别分组
