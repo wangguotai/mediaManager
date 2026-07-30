@@ -327,6 +327,10 @@ class MediaViewModel {
     var albumList by mutableStateOf<List<MediaService.Album>>(emptyList())
         private set
 
+    /** V7 §2.3：被共享给当前用户的相册列表。 */
+    var sharedAlbumList by mutableStateOf<List<MediaService.Album>>(emptyList())
+        private set
+
     /** 相册列表加载中。 */
     var isAlbumLoading by mutableStateOf(false)
         private set
@@ -1566,6 +1570,49 @@ class MediaViewModel {
                 errorMessage = "加载相册列表失败: ${e.message}"
             } finally {
                 isAlbumLoading = false
+            }
+        }
+    }
+
+    // ============================================================
+    // V7 §2.3：共享相册
+    // ============================================================
+
+    /** 加载被共享给当前用户的相册列表。 */
+    fun loadSharedAlbums() {
+        viewModelScope.launch {
+            try {
+                sharedAlbumList = MediaService.getSharedAlbums()
+            } catch (e: Exception) {
+                // 静默失败——共享相册是辅助功能
+            }
+        }
+    }
+
+    /**
+     * 邀请用户共享相册。
+     * @param albumId 相册 ID
+     * @param username 被邀请用户名
+     * @param onSuccess 成功回调
+     * @param onError 失败回调
+     */
+    fun shareAlbum(
+        albumId: String,
+        username: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val ok = MediaService.shareAlbum(albumId, username)
+                if (ok) {
+                    errorMessage = "已共享给 $username"
+                    onSuccess()
+                } else {
+                    onError("共享失败")
+                }
+            } catch (e: Exception) {
+                onError("共享失败: ${e.message}")
             }
         }
     }
