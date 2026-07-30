@@ -483,7 +483,10 @@ private fun AlbumDetailPage(
                 onDelete = { media ->
                     previewIndex = null
                     viewModel.deleteSingleMedia(media.id)
-                }
+                },
+                onShare = {},
+                onFavoriteToggle = { media -> viewModel.toggleFavorite(media.id) },
+                isFavorite = { media -> viewModel.isFavorite(media.id) }
             )
         } else {
             previewIndex = null
