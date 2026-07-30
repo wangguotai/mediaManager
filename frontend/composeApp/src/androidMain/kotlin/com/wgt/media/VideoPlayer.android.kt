@@ -1,8 +1,10 @@
 package com.wgt.media
 
+import android.media.PlaybackParams
 import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,6 +57,8 @@ private const val TAG = "VideoPlayer"
  * 可边下边播、可 seekTo 拖拽。
  *
  * 生命周期：在 [DisposableEffect] 中停止释放，避免离开播放器后音频继续。
+ *
+ * V7：倍速控制 — 通过 MediaPlayer.playbackParams.setSpeed() 实现 0.5x/1x/1.5x/2x。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -75,6 +79,12 @@ internal actual fun VideoPlayer(
     var positionMs by remember { mutableFloatStateOf(0f) }
     // 用户拖拽进度条时暂时停止回写，避免手俱与播放进度互相抢占。
     var seeking by remember { mutableStateOf(false) }
+    // V7：倍速播放（1.0x → 1.5x → 2.0x → 0.5x 循环切换）
+    val speedOptions = listOf(1.0f, 1.5f, 2.0f, 0.5f)
+    val speedLabels = listOf("1.0x", "1.5x", "2.0x", "0.5x")
+    var speedIndex by remember { mutableStateOf(0) }
+    // 存储 MediaPlayer 引用，用于运行时切倍速
+    var mediaPlayerRef by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
 
     // 挂监听 + 设置视频源。key 含 videoUrl：本地 Live Photo 的 file:// URL 异步就绪时
     // 重新 setVideoURI，避免首次用尚未就绪的占位源初始化后无法切换到真实文件。
@@ -82,6 +92,13 @@ internal actual fun VideoPlayer(
         videoView.setOnPreparedListener { mp ->
             isPrepared = true
             if (durationMs <= 0f) durationMs = mp.duration.toFloat().coerceAtLeast(0f)
+            // V7：应用当前倍速
+            try {
+                mp.playbackParams = mp.playbackParams.setSpeed(speedOptions[speedIndex])
+            } catch (e: Exception) {
+                logger.error(TAG, "setSpeed on prepared failed: ${e.message}")
+            }
+            mediaPlayerRef = mp
             // 自动起播
             videoView.start()
             isPlaying = true
@@ -95,6 +112,19 @@ internal actual fun VideoPlayer(
             true // 已处理，避免弹原生错误框
         }
         videoView.setVideoURI(Uri.parse(videoUrl ?: backendStreamUrl(media.id)))
+    }
+
+    // V7：倍速切换 — 立即应用到 MediaPlayer
+    LaunchedEffect(speedIndex) {
+        if (isPrepared) {
+            try {
+                mediaPlayerRef?.let { mp ->
+                    mp.playbackParams = mp.playbackParams.setSpeed(speedOptions[speedIndex])
+                }
+            } catch (e: Exception) {
+                logger.error(TAG, "setSpeed on change failed: ${e.message}")
+            }
+        }
     }
 
     // 进度轮询：每 200ms 取当前位置更新进度条，拖拽中暂停回写。
@@ -163,7 +193,7 @@ internal actual fun VideoPlayer(
             )
         }
 
-        // 底部控件：播放/暂停 + 进度条 + 时长
+        // 底部控件：播放/暂停 + 进度条 + 时长 + 倍速
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -213,6 +243,24 @@ internal actual fun VideoPlayer(
                     color = Color.White.copy(alpha = 0.7f),
                     fontSize = 12.sp
                 )
+                Spacer(modifier = Modifier.width(8.dp))
+                // V7：倍速切换按钮
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable {
+                            speedIndex = (speedIndex + 1) % speedOptions.size
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        speedLabels[speedIndex],
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
