@@ -373,6 +373,26 @@ object MediaService {
     }
 
     /**
+     * V7：POST /api/media/rename — 重命名媒体文件。
+     */
+    suspend fun renameMedia(mediaId: String, filename: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/rename") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("media_id", JsonPrimitive(mediaId))
+                    put("filename", JsonPrimitive(filename))
+                })
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "renameMedia FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * 上传媒体
      *
      * 协议：POST /api/media/upload，body = 文件原始字节流（raw bytes），
