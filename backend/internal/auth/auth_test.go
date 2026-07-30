@@ -213,7 +213,7 @@ func TestPasswordMinLength8(t *testing.T) {
 		t.Fatalf("7-char password should be rejected, got %v", err)
 	}
 	// 8 位应通过。
-	res, err := a.Register(context.Background(), RegisterRequest{Username: "eight", Password: "12345678"})
+	res, err := a.Register(context.Background(), RegisterRequest{Username: "eight", Password: "ab123456"})
 	if err != nil {
 		t.Fatalf("8-char password should be accepted, got %v", err)
 	}

@@ -280,10 +280,25 @@ func (a *AuthService) resolveSignupRole(ctx context.Context) (string, error) {
 // minPasswordLength 是允许的最小密码长度。V5 安全基线要求至少 8 位，避免弱口令。
 const minPasswordLength = 8
 
-// validatePassword 施加最小长度约束，避免弱口令。要求 >= minPasswordLength(8)。
-// 返回 ErrInvalidCredentials 使 gateway 把弱口令映射为 400 而非 500（与 writeAuthError 注释承诺一致）。
+// validatePassword 施加密码策略：最小长度 + 复杂度（至少含字母和数字）。
+// V6 §2.7（QA P1-4）：在 V5 长度 8 基础上加复杂度要求，拒绝纯字母或纯数字弱口令。
+// 返回 ErrInvalidCredentials 使 gateway 把弱口令映射为 400 而非 500。
 func (a *AuthService) validatePassword(pw string) error {
 	if len(pw) < minPasswordLength {
+		return ErrInvalidCredentials
+	}
+	// 复杂度：至少一个字母 + 至少一个数字。用 strings 检查，不引 regexp 减少依赖。
+	hasLetter := false
+	hasDigit := false
+	for _, r := range pw {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
 		return ErrInvalidCredentials
 	}
 	return nil
