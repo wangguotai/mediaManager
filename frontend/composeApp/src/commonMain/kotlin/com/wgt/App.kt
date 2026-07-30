@@ -22,6 +22,7 @@ import com.wgt.media.FileManagementScreen
 import com.wgt.media.LoginScreen
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
+import com.wgt.media.MemoryDetailScreen
 import com.wgt.media.RegisterScreen
 import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
@@ -99,6 +100,10 @@ fun App() {
 
     var showSplash by remember { mutableStateOf(true) }
     var screen by remember { mutableStateOf(Screen.MEDIA) }
+    // 回忆详情页选中的年/月：从「已上传」Tab 月份卡片点击时填充，
+    // 进入 Screen.MEMORY_DETAIL 后由 MemoryDetailScreen 读取渲染整月图片。
+    var memoryYear by remember { mutableStateOf(0) }
+    var memoryMonth by remember { mutableStateOf(0) }
     // 登录页内的二级视图：登录 ↔ 注册切替。未登录时展示此视图。
     var authView by remember { mutableStateOf(AuthView.LOGIN) }
 
@@ -135,7 +140,19 @@ fun App() {
                             viewModel = viewModel,
                             onNavigateToSettings = { screen = Screen.SETTINGS },
                             onNavigateToAlbums = { screen = Screen.ALBUM },
-                            onNavigateToFileManagement = { screen = Screen.FILE_MANAGEMENT }
+                            onNavigateToFileManagement = { screen = Screen.FILE_MANAGEMENT },
+                            onNavigateToMemory = { year, month ->
+                                // 记录选中月份并跳转回忆详情页。
+                                memoryYear = year
+                                memoryMonth = month
+                                screen = Screen.MEMORY_DETAIL
+                            }
+                        )
+                        Screen.MEMORY_DETAIL -> MemoryDetailScreen(
+                            viewModel = viewModel,
+                            year = memoryYear,
+                            month = memoryMonth,
+                            onBack = { screen = Screen.MEDIA }
                         )
                         Screen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
@@ -157,7 +174,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, SETTINGS, ALBUM, FILE_MANAGEMENT }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }

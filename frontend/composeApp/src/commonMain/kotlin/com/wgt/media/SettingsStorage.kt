@@ -100,6 +100,15 @@ object SettingsKeys {
      * 默认 "false"（不强制充电，WiFi 下即可备份；用户可按需开启省电）。
      */
     const val BACKUP_CHARGING_ONLY = "backup_charging_only"
+
+    /**
+     * 上次备份完成时间（epoch 毫秒字符串，PRD-v7 §1.5）。
+     *
+     * [MediaViewModel.checkAndBackupNewLocalMedia] 成功完成一轮后经
+     * [SettingsState.saveLastBackupTime] 落盘，设置页读取并格式化展示。
+     * 空串/0L 表示从未备份过。
+     */
+    const val LAST_BACKUP_TIME = "last_backup_time"
 }
 
 /**

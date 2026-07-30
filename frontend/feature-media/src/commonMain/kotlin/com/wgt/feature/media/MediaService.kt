@@ -898,4 +898,37 @@ object MediaService {
             else -> emptyList()
         }
     }
+
+    // ---- V7 §3.2 RN bundle 下载辅助 ----
+
+    /**
+     * 公开后端基址（V7 §3.2），供 RnBundleDownloader 拼接 URL。
+     */
+    fun rnBackendBaseUrl(): String = backendBaseUrl()
+
+    /**
+     * 通用 GET 请求返回原始 JSON 字符串（V7 §3.2），供 RN manifest 等非媒体端点使用。
+     * 失败返回 null。
+     */
+    suspend fun getRawJson(url: String): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get(url)
+            if (response.status == HttpStatusCode.OK) response.body() else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * 通用 GET 请求返回原始字节（V7 §3.2），供 RN bundle 下载使用。
+     * 失败返回 null。
+     */
+    suspend fun getRawBytes(url: String): ByteArray? {
+        return try {
+            val response: HttpResponse = jsonClient.get(url)
+            if (response.status == HttpStatusCode.OK) response.body() else null
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

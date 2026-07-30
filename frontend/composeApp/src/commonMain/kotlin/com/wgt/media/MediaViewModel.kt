@@ -29,6 +29,14 @@ private const val TAG = "MediaViewModel"
 private const val MILLIS_PER_DAY = 86_400_000L
 
 /**
+ * 时光相册每个月回忆卡片取前 N 张作为封面预览（PRD-v7 §1.4）。
+ *
+ * 4 张拼成 2×2 缩略图网格作为卡片封面，既给用户足够的"这个月发生了什么"的视觉印象，
+ * 又控制单卡内存（4 个缩略图 ≈ 256KB）与横滚区域整体开销。不足 4 张取实际数量。
+ */
+private const val MEMORY_COVER_COUNT = 4
+
+/**
  * 自动备份轮询间隔（毫秒）。
  *
  * 自动备份非实时事件驱动，以固定周期扫描图库差集。30s 在"及时性"与"电量/后端压力"间
@@ -46,6 +54,27 @@ private const val AUTO_BACKUP_INTERVAL_MS = 30_000L
 data class DateGroup(
     val title: String,
     val items: List<MediaMetadata>
+)
+
+/**
+ * 时光相册的月份回忆卡片模型（PRD-v7 §1.4）。
+ *
+ * 由 [MediaViewModel.groupMediaByMonth] 基于云端媒体 [MediaViewModel.cloudMedia] 按
+ * `created_at` 的年月聚合而成：
+ * - [year]/[month]：月份标识，供详情页过滤同月媒体；
+ * - [title]：人类可读标题，如「2026年7月」；
+ * - [coverItems]：该月媒体前 4 张作为封面预览（不足 4 张取实际数量）；
+ * - [totalCount]：该月媒体总张数，卡片角标展示。
+ *
+ * 与按日分组的 [DateGroup] 区分：DateGroup 按「天」聚合用于网格标题，
+ * MemoryMonth 按「月」聚合用于「回忆」横滚卡片入口。
+ */
+data class MemoryMonth(
+    val year: Int,
+    val month: Int,
+    val title: String,
+    val coverItems: List<MediaMetadata>,
+    val totalCount: Int
 )
 
 /**
@@ -516,6 +545,8 @@ class MediaViewModel {
         autoBackupJob?.cancel()
         autoBackupJob = null
         uploadQueue.clear()
+        // PRD-v7 §1.5：停止备份时取消进度通知，避免残留"备份中"通知。
+        cancelBackupNotification()
         logger.info(TAG, "auto backup stopped")
     }
 
@@ -579,6 +610,10 @@ class MediaViewModel {
      * [UploadQueue] 入队（杀进程即丢）。新增 id 无论上传成败都加入快照，避免下轮重复处理。
      *
      * 仅处理图片与 Live Photo（视频体积大、备份策略另议）；纯视频跳过。
+     *
+     * PRD-v7 §1.5 备份进度通知：开始/每张/暂停/完成各阶段经 [BackupStatusNotifier]
+     * 顶层函数更新通知（Android 端 NotificationManager 进度条，iOS 空实现）。
+     * 完成后调 [SettingsState.saveLastBackupTime] 落盘"上次备份时间"供设置页展示。
      */
     private suspend fun checkAndBackupNewLocalMedia() {
         if (!galleryFeature.hasPermission()) return
@@ -586,6 +621,8 @@ class MediaViewModel {
         // 不清空待备份项——下一轮轮询时条件满足即续传。
         if (!shouldBackupByPolicy()) {
             logger.info(TAG, "backup skipped by policy (wifiOnly=${SettingsState.backupWifiOnly} chargingOnly=${SettingsState.backupChargingOnly})")
+            // PRD-v7 §1.5：策略不满足时通知"备份已暂停"，指明原因（非WiFi/非充电）。
+            notifyBackupPaused(policyPauseReason())
             return
         }
         val current: List<MediaMetadata>
@@ -597,6 +634,10 @@ class MediaViewModel {
         }
         val newOnes = current.filter { it.id !in knownLocalIds }
         if (newOnes.isEmpty()) return
+        val total = newOnes.size
+        // PRD-v7 §1.5：开始备份前发布初始进度通知（0/total）。
+        notifyBackupProgress(0, total)
+        var completed = 0
         for (m in newOnes) {
             // 无论后续上传成败，先记入快照，避免下轮重复处理同一项。
             knownLocalIds.add(m.id)
@@ -604,13 +645,17 @@ class MediaViewModel {
             // 后端已流式落盘支持大文件（v5-perf），视频走同一 uploadLocal 通路，
             // 经 sha256 秒传去重，重复视频不重复落盘。
             try {
-                val bytes = galleryFeature.getMediaData(m.id) ?: continue
+                val bytes = galleryFeature.getMediaData(m.id) ?: run {
+                    // 取字节失败：finally 统一推进进度，此处仅 continue 跳过上传。
+                    continue
+                }
                 val hash = computeSha256(bytes)
                 // 本端去重命中（本设备或他设备已传过）：登记并跳过，连 uploadLocal 往返都省。
                 // uploadLocal 内部也会再判一次 Sha256Dedup.shared，这里提前短路纯为省一次函数调用，
                 // 两者读同一持久化集合，结果一致。
                 if (dedup.contains(hash)) {
                     dedup.markUploaded(hash)
+                    // 跳过上传：finally 统一推进进度。
                     continue
                 }
                 // 经 SyncManager 上传：带 sha256/client_id/taken_at，失败由其入 OfflineQueueStore。
@@ -637,8 +682,26 @@ class MediaViewModel {
                 // 失败：SyncManager.uploadLocal 已入 OfflineQueueStore，下一轮 replayOfflineUploads 重放。
             } catch (e: Exception) {
                 logger.error(TAG, "backup upload failed id=${m.id}: ${e.message}")
+            } finally {
+                // PRD-v7 §1.5：每处理完一项（上传成功/去重跳过/失败/取字节失败）推进进度通知。
+                // 放 finally 确保所有分支只推进一次，与 continue 配合不重复计数。
+                completed++
+                notifyBackupProgress(completed, total)
             }
         }
+        // PRD-v7 §1.5：全部完成 → "备份完成"通知（内部 1s 后自动取消）+ 落盘上次备份时间。
+        notifyBackupComplete()
+        SettingsState.saveLastBackupTime(Clock.System.now().toEpochMilliseconds())
+    }
+
+    /**
+     * 生成备份暂停原因文案（PRD-v7 §1.5）。优先 WiFi（更常见的策略项）。
+     * 仅在 [shouldBackupByPolicy] 返回 false 时调用。
+     */
+    private fun policyPauseReason(): String = when {
+        SettingsState.backupWifiOnly && !isOnWifi() -> "非WiFi"
+        SettingsState.backupChargingOnly && !isCharging() -> "非充电"
+        else -> "条件不满足"
     }
 
     /**
@@ -1248,6 +1311,95 @@ class MediaViewModel {
      */
     val groupedMediaList: List<DateGroup>
         get() = groupMediaByDate(mediaList)
+
+    /**
+     * 时光相册月份回忆卡片列表（PRD-v7 §1.4，计算属性）。
+     *
+     * 基于 [cloudMedia]（已上传/云端增量同步累积视图）按 `created_at` 的**年月**分组，
+     * 每月取前 4 张作为封面预览，整体按年月**倒序**（最近月份在最前），供「已上传」Tab
+     * 顶部的 [MemoryCardRow] 横滚卡片渲染，点击进入 [MemoryDetailScreen] 查看整月图片。
+     *
+     * 与 [groupedMediaList] 区别：
+     * - 数据源固定为 [cloudMedia]（回忆是云端已上传内容的月份聚合），不随 Tab 切换而变；
+     * - 粒度为「月」而非「日」，对应"2026年7月"级别的回忆卡片标题。
+     *
+     * `cloudMedia` 为空时返回空列表，UI 隐藏回忆卡片区域。
+     *
+     * 注意：`created_at` 为 epoch **毫秒**。月份分解复用 [civilFromDays]/[epochDaysFromMillis]
+     * 既有算法（与 [groupMediaByDate] 同一时区口径），保证"2026年7月"标签与本地日历一致。
+     */
+    val memoryMonths: List<MemoryMonth>
+        get() = groupMediaByMonth(cloudMedia)
+
+    /**
+     * 把云端媒体按 `created_at` 的年月分组，生成 [MemoryMonth] 列表。
+     *
+     * - 月份标识由 epoch 毫秒经 [epochDaysFromMillis] → [civilFromDays] 拆出年/月（与
+     *   [groupMediaByDate] 同一时区 [systemTimeZoneOffsetMillis]，保证本地日历一致）；
+     * - 每月取前 [MEMORY_COVER_COUNT]（4）张作为封面；不足按实际数量；
+     * - 组按年月倒序（最近月份在最前），呼应时间线浏览直觉；
+     * - 标题格式「YYYY年M月」（月份不补零，如「2026年7月」而非「07月」，更符合中文习惯）。
+     */
+    private fun groupMediaByMonth(list: List<MediaMetadata>): List<MemoryMonth> {
+        if (list.isEmpty()) return emptyList()
+
+        val tzOffsetMillis = systemTimeZoneOffsetMillis()
+
+        // 按年月分组，保持组内原顺序；用 LinkedHashMap 按首次出现顺序保留月份次序。
+        val byMonth = LinkedHashMap<Pair<Int, Int>, MutableList<MediaMetadata>>()
+        for (m in list) {
+            val days = epochDaysFromMillis(m.created_at, tzOffsetMillis)
+            val (y, month, _) = civilFromDays(days)
+            byMonth.getOrPut(y to month) { mutableListOf() }.add(m)
+        }
+
+        return byMonth.entries
+            // 按年月倒序：最近月份在先。用 "YYYY-MM" 字符串做排序键（字典序与年月序一致），
+            // 规避 KMP common 下 Pair 的 Comparable 实现不被 sortedByDescending 识别、
+            // 以及 Int 解构 * 运算被误解析到 BigDecimal.times 扩展的两类类型推断歧义。
+            .sortedByDescending { "${it.key.first}-${it.key.second}" }
+            .map { (ym, items) ->
+                val (y, m) = ym
+                MemoryMonth(
+                    year = y,
+                    month = m,
+                    title = "${y}年${m}月",
+                    coverItems = items.take(MEMORY_COVER_COUNT),
+                    totalCount = items.size
+                )
+            }
+    }
+
+    /**
+     * 取指定年份+月份的云端媒体列表，供 [MemoryDetailScreen] 渲染整月回忆。
+     *
+     * 月份匹配口径与 [groupMediaByMonth] 一致（基于本地时区拆出的年月），
+     * 保证点击「2026年7月」卡片后详情页看到的正是该月全部图片。
+     *
+     * @param year 年份（如 2026）
+     * @param month 月份（1-12）
+     * @return 该月云端媒体列表（保持 cloudMedia 原序）；无匹配返回空列表
+     */
+    fun getMediaByMonth(year: Int, month: Int): List<MediaMetadata> {
+        if (cloudMedia.isEmpty()) return emptyList()
+        val tzOffsetMillis = systemTimeZoneOffsetMillis()
+        return cloudMedia.filter {
+            val days = epochDaysFromMillis(it.created_at, tzOffsetMillis)
+            val (y, m, _) = civilFromDays(days)
+            y == year && m == month
+        }
+    }
+
+    /**
+     * 取指定年份+月份、按日分组的云端媒体分组列表，供 [MemoryDetailScreen] 用
+     * [DateGroupedGrid] 渲染（保留「今天/昨天/YYYY年MM月DD日」的日内分组体验）。
+     *
+     * 先用 [getMediaByMonth] 过滤当月图片，再经既有 [groupMediaByDate] 按日聚合，
+     * 复用与主网格一致的标题生成与倒序排序，避免详情页另造一套分组逻辑。
+     */
+    fun getGroupedMediaByMonth(year: Int, month: Int): List<DateGroup> {
+        return groupMediaByDate(getMediaByMonth(year, month))
+    }
 
     /**
      * 把媒体列表按 created_at 的日期分组并生成标题。

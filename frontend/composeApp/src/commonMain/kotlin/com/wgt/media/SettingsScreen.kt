@@ -119,6 +119,15 @@ object SettingsState {
     var backupChargingOnly by mutableStateOf(loadBackupChargingOnly())
         private set
 
+    /**
+     * 上次备份完成时间（epoch 毫秒，PRD-v7 §1.5）。
+     *
+     * [MediaViewModel.checkAndBackupNewLocalMedia] 完成一轮后经 [saveLastBackupTime] 落盘；
+     * 0L 表示从未备份。设置页读取并格式化展示 "上次备份时间"。
+     */
+    var lastBackupTime by mutableStateOf(loadLastBackupTime())
+        private set
+
     private fun loadThemeMode(): ThemeMode {
         val raw = storage.getString(SettingsKeys.THEME_MODE, ThemeMode.SYSTEM.name)
         return runCatching { ThemeMode.valueOf(raw.uppercase()) }.getOrDefault(ThemeMode.SYSTEM)
@@ -140,6 +149,10 @@ object SettingsState {
 
     private fun loadBackupChargingOnly(): Boolean =
         storage.getString(SettingsKeys.BACKUP_CHARGING_ONLY, "false").equals("true", ignoreCase = true)
+
+    /** 读取上次备份时间（ms）。无效/空串视为 0（从未备份）。 */
+    private fun loadLastBackupTime(): Long =
+        storage.getString(SettingsKeys.LAST_BACKUP_TIME, "0").toLongOrNull() ?: 0L
 
     /**
      * 持久化新的后端地址并更新内存状态。仅做存取，不做可达性校验——
@@ -204,6 +217,17 @@ object SettingsState {
         backupChargingOnly = enabled
         storage.putString(SettingsKeys.BACKUP_CHARGING_ONLY, if (enabled) "true" else "false")
         logger.info(TAG, "backup charging-only: $enabled")
+    }
+
+    /**
+     * 持久化上次备份完成时间（PRD-v7 §1.5）。
+     *
+     * @param timeMs epoch 毫秒（[kotlin.time.Clock.System.now].toEpochMilliseconds()）
+     */
+    fun saveLastBackupTime(timeMs: Long) {
+        lastBackupTime = timeMs
+        storage.putString(SettingsKeys.LAST_BACKUP_TIME, timeMs.toString())
+        logger.info(TAG, "last backup time saved: $timeMs")
     }
 
     /** 后端地址默认值——与 MediaService 既有的 10.0.2.2:8080 模拟器回环地址一致。 */
@@ -492,8 +516,9 @@ fun SettingsScreen(
                     )
                 }
             }
-            // 云端用量 + 待传队列：登录态展示，让用户直观看到已用空间与离线待传条数。
-            // 用量来自 /api/sync/usage（viewModel.cloudUsage），待传来自 uploadQueue.size。
+            // 云端用量 + 待备份/离线队列 + 上次备份时间：登录态展示。
+            // 用量来自 /api/sync/usage（viewModel.cloudUsage），待备份来自 uploadQueue.size，
+            // 上次备份时间来自 SettingsState.lastBackupTime（持久化 ms）。
             if (AuthState.isLoggedIn) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
@@ -509,19 +534,31 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
-                if (viewModel.uploadQueue.size > 0) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("待上传（离线队列）", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "${viewModel.uploadQueue.size} 项",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.tertiary
-                        )
-                    }
+                // 待备份项数：离线队列大小即待备份条数（PRD-v7 §1.5）。
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("待备份", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "${viewModel.uploadQueue.size} 项",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 上次备份完成时间（PRD-v7 §1.5）：从未备份显示"未备份"。
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("上次备份时间", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        formatBackupTime(SettingsState.lastBackupTime),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
                 }
             }
 
@@ -634,4 +671,50 @@ private fun modeLabel(mode: ThemeMode): String = when (mode) {
     ThemeMode.LIGHT -> "浅色"
     ThemeMode.DARK -> "暗色"
     ThemeMode.AMOLED -> "AMOLED 纯黑"
+}
+
+/** 一天对应的毫秒数（UTC）。 */
+private const val MILLIS_PER_DAY = 86_400_000L
+
+/**
+ * 把上次备份时间（epoch 毫秒）格式化为 "YYYY-MM-DD HH:MM" 本地时间（PRD-v7 §1.5）。
+ *
+ * commonMain 无 java.time / kotlinx-datetime，用 Howard Hinnant civil_from_days 纯整数
+ * 算法分解年月日（与 MediaViewModel.groupMediaByDate 同源做法），时分由当日剩余毫秒折算。
+ * 时区偏移由 [systemTimeZoneOffsetMillis] 提供以对齐本地午夜。0L/无效显示"未备份"。
+ */
+private fun formatBackupTime(timeMs: Long): String {
+    if (timeMs <= 0L) return "未备份"
+    val tzOffset = systemTimeZoneOffsetMillis()
+    // 本地日历日 + 当日内毫秒
+    val shifted = timeMs + tzOffset
+    val day = if (shifted >= 0) shifted / MILLIS_PER_DAY
+    else (shifted - MILLIS_PER_DAY + 1) / MILLIS_PER_DAY
+    val millisInDay = (shifted - day * MILLIS_PER_DAY).let { if (it < 0) it + MILLIS_PER_DAY else it }
+    val (y, m, d) = civilFromDays(day)
+    val totalMinutes = (millisInDay / 60_000L).toInt()
+    val hour = totalMinutes / 60
+    val minute = totalMinutes % 60
+    return "$y-${m.pad2()}-${d.pad2()} ${hour.pad2()}:${minute.pad2()}"
+}
+
+/** 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。 */
+private fun Int.pad2(): String = if (this < 10) "0$this" else this.toString()
+
+/**
+ * Howard Hinnant civil_from_days：自 1970-01-01 起的天数 → (年, 月, 日)。
+ * 纯整数运算，无平台依赖。详见 http://howardhinnant.github.io/date_algorithms.html
+ */
+private fun civilFromDays(z: Long): Triple<Int, Int, Int> {
+    val z0 = z + 719468L
+    val era = if (z0 >= 0) z0 / 146097 else (z0 - 146096) / 146097
+    val doe = z0 - era * 146097                       // [0, 146096]
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365  // [0, 399]
+    val y = yoe + era * 400
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)  // [0, 365]
+    val mp = (5 * doy + 2) / 153                       // [0, 11]
+    val d = (doy - (153 * mp + 2) / 5 + 1).toInt()      // [1, 31]
+    val m = (if (mp < 10) mp + 3 else mp - 9).toInt()   // [1, 12]
+    val year = if (m <= 2) y + 1 else y
+    return Triple(year.toInt(), m, d)
 }
