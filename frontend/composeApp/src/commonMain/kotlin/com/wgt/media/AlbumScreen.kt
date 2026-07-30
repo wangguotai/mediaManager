@@ -462,6 +462,32 @@ private fun AlbumDetailPage(
                             contentDescription = "返回相册列表"
                         )
                     }
+                },
+                actions = {
+                    // V7 §2.3：分享相册按钮
+                    var showShareDialog by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showShareDialog = true }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_share),
+                            contentDescription = "共享相册"
+                        )
+                    }
+                    if (showShareDialog) {
+                        var shareError by remember { mutableStateOf<String?>(null) }
+                        ShareAlbumDialog(
+                            onDismiss = { showShareDialog = false },
+                            onShare = { username ->
+                                viewModel.shareAlbum(
+                                    albumId = albumId,
+                                    username = username,
+                                    onSuccess = { showShareDialog = false },
+                                    onError = { msg ->
+                                        shareError = msg
+                                    }
+                                )
+                            }
+                        )
+                    }
                 }
             )
         }
@@ -551,6 +577,53 @@ private fun CreateAlbumDialog(
                 },
                 enabled = name.trim().isNotEmpty()
             ) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+// ---- V7 §2.3 共享相册对话框 ----
+
+/**
+ * 共享相册对话框：输入用户名邀请共享。
+ *
+ * @param onDismiss 取消
+ * @param onShare 确认共享，传入被邀请用户名
+ */
+@Composable
+private fun ShareAlbumDialog(
+    onDismiss: () -> Unit,
+    onShare: (String) -> Unit
+) {
+    var username by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("共享相册") },
+        text = {
+            Column {
+                Text(
+                    "输入要邀请的用户名，共享后对方可查看和添加图片。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    label = { Text("用户名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onShare(username.trim()) },
+                enabled = username.trim().isNotEmpty()
+            ) { Text("共享") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
