@@ -394,6 +394,20 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	// V7 §1.3：排序参数（date=按时间降序默认，size=按大小降序，name=按文件名升序）。
 	sortBy := r.URL.Query().Get("sort")
 
+	// V7：文件大小范围筛选（min_size / max_size，单位字节）。
+	// 在 gateway 层后处理过滤，避免改 proto + service 层。
+	var minSize, maxSize int64
+	if v := r.URL.Query().Get("min_size"); v != "" {
+		if n, _ := parseIntSafe(v); n > 0 {
+			minSize = int64(n)
+		}
+	}
+	if v := r.URL.Query().Get("max_size"); v != "" {
+		if n, _ := parseIntSafe(v); n > 0 {
+			maxSize = int64(n)
+		}
+	}
+
 	resp, err := s.mediaSvc.GetMediaList(r.Context(), &gen.GetMediaListRequest{
 		Page:        page,
 		PageSize:    pageSize,
@@ -403,6 +417,22 @@ func (s *Server) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+
+	// V7：文件大小范围筛选（gateway 层后处理，避免改 proto）。
+	if minSize > 0 || maxSize > 0 {
+		filtered := make([]*gen.MediaMetadata, 0, len(resp.MediaList))
+		for _, m := range resp.MediaList {
+			if minSize > 0 && m.Size < minSize {
+				continue
+			}
+			if maxSize > 0 && m.Size > maxSize {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		resp.MediaList = filtered
+		resp.TotalCount = int32(len(filtered))
 	}
 
 	// V7 §1.3：在 gateway 层按 sort 参数排序，避免改 proto + 重生成。
