@@ -140,6 +140,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
 	// V7：按月份分组的时间轴端点
 	s.mux.HandleFunc("/api/media/timeline", s.handleMediaTimeline)
+	// V7：按类型+月份分组的存储统计
+	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V7：批量下载（zip）
@@ -2048,6 +2050,87 @@ func (s *Server) handleMediaTimeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"groups":      result,
 		"total_months": len(result),
+	})
+}
+
+// handleMediaStorageBreakdown V7：GET /api/media/storage-breakdown — 按类型+月份分组的存储统计。
+// 返回格式: {"by_type": {"IMAGE":{count,bytes}, ...}, "by_month": {"2026-07":{count,bytes}, ...}, "total":{count,bytes}}
+func (s *Server) handleMediaStorageBreakdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type stat struct {
+		Count int   `json:"count"`
+		Bytes int64 `json:"bytes"`
+	}
+	byType := map[string]*stat{"IMAGE": {}, "VIDEO": {}, "LIVE_PHOTO": {}}
+	byMonth := make(map[string]*stat)
+	var totalCount int
+	var totalBytes int64
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+
+		// 按类型
+		t := m.Type
+		if t == "" {
+			t = "IMAGE"
+		}
+		if _, ok := byType[t]; !ok {
+			byType[t] = &stat{}
+		}
+		byType[t].Count++
+		byType[t].Bytes += m.Size
+
+		// 按月份
+		month := m.CreatedAt.Format("2006-01")
+		if _, ok := byMonth[month]; !ok {
+			byMonth[month] = &stat{}
+		}
+		byMonth[month].Count++
+		byMonth[month].Bytes += m.Size
+	}
+
+	// byMonth 转为有序列表（月份倒序）
+	type monthStat struct {
+		Month string `json:"month"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	var months []monthStat
+	for mo, st := range byMonth {
+		months = append(months, monthStat{Month: mo, Count: st.Count, Bytes: st.Bytes})
+	}
+	sort.Slice(months, func(i, j int) bool { return months[i].Month > months[j].Month })
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"by_type":  byType,
+		"by_month": months,
+		"total": map[string]any{
+			"count": totalCount,
+			"bytes": totalBytes,
+			"mb":    float64(totalBytes) / (1024 * 1024),
+		},
 	})
 }
 
