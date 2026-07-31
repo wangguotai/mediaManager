@@ -493,6 +493,11 @@ func (s *Server) registerRoutes() {
 	// 仪表盘（合并存储健康度+quick_stats+upload_streak+recent_activity+tag_top3+coverage 为一次请求），
 	// 供前端首页/我的Tab 一次拉取渲染全部关键卡片，区别于 stat-summary（偏数据概览）与 full-report（年度报告）。
 	s.mux.HandleFunc("/api/media/dashboard", s.handleMediaDashboard)
+	// 用户增强仪表盘 v2（一次请求合并6大维度：quick_stats + storage_health + activity_score +
+	// coverage + upload_streak + insights 为单一 JSON 对象）。区别于 dashboard（v1，5维度无
+	// activity_score/insights）：v2 把\"活跃度评分\"与\"智能洞察\"也并入，一次拉全部首页数据，
+	// 前端无需再额外请求 user-activity-score / insights 两个端点。
+	s.mux.HandleFunc("/api/media/user-dashboard-v2", s.handleUserDashboardV2)
 	// V20：上传模式分析（最常上传的类型/大小范围/时段/星期，基于 created_at）。
 	s.mux.HandleFunc("/api/media/upload-pattern-analysis", s.handleUploadPatternAnalysis)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
@@ -13052,6 +13057,459 @@ func (s *Server) handleMediaDashboard(w http.ResponseWriter, r *http.Request) {
 		"tag_top3":        tagTop3,
 		"coverage":        coverage,
 		"user_id":         uid,
+	})
+}
+
+// handleUserDashboardV2 GET /api/media/user-dashboard-v2 — 增强用户仪表盘。
+//
+// 一次请求合并 6 大维度数据为单一 JSON 对象，供前端首页一次拉取渲染：
+//
+//   - quick_stats     ← 6 个核心计数（total_media/total_bytes/image/video/album/favorite）
+//   - health          ← 存储健康度评分 0-100 + 等级 A/B/C/D（重复率/配额/冷数据，同 storage-health 口径）
+//   - activity        ← 用户活跃度评分 + 等级（upload/favorite/share/tag/rename/rotate 加权，同 user-activity-score）
+//   - coverage        ← 媒体整理覆盖率（tagged% + favorited%，基于未软删总数）
+//   - streak          ← 上传连续天数（current_streak + longest_streak + total_active_days + today_count）
+//   - insights        ← 智能洞察 top 3（复用 insights 的条目结构，取前 3 条）
+//
+// 区别于 dashboard（v1，5 维度无 activity/insights）：v2 额外并入活跃度评分与洞察建议，
+// 前端无需再请求 user-activity-score / insights。实现策略与 v1 一致：ListMediaByUser
+// 一次拉全量未软删媒体，单次遍历派生 quick_stats/streak/health；AuditLogStats 一次查询
+// 派生 activity；ListAllTags + SearchMediaByTag 派生 tagged 集合；insights 复用同口径
+// 按需产出后截取前 3。各步骤独立容错（单步失败记 warn 不阻断）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleUserDashboardV2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 handleStorageHealth / handleMediaDashboard 一致
+	now := time.Now()
+	nowUTC := now.UTC()
+	today := nowUTC.Format("2006-01-02")
+
+	// 1. 一次拉取全量未软删媒体（ListMediaByUser 已过滤 deleted 且按 created_at DESC 排序）。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 2. 单次遍历派生 quick_stats + streak + health（与 handleMediaDashboard 同口径）。
+	var (
+		totalMedia     int
+		imgCount       int
+		vidCount       int
+		usedBytes      int64
+		coldCount      int
+		todayCount     int
+		duplicateCount int
+		days           = make(map[string]bool)
+		shaCounts      = make(map[string]int)
+		// insights 派生用的临时统计：按类型字节/计数 + 上传时段。
+		typeBytes       = map[string]int64{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
+		typeCounts      = map[string]int{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
+		periodCounts    = map[string]int{"早晨": 0, "下午": 0, "晚上": 0, "深夜": 0}
+		dupBySHA        = make(map[string]int)  // sha → 出现次数（仅 >1 的进 dupReclaimable 计算）
+		dupReclaimBytes = make(map[string]int64) // sha → 单文件 size
+	)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalMedia++
+		usedBytes += m.Size
+		switch m.Type {
+		case "IMAGE":
+			imgCount++
+		case "VIDEO":
+			vidCount++
+		}
+		if _, ok := typeBytes[m.Type]; ok {
+			typeBytes[m.Type] += m.Size
+			typeCounts[m.Type]++
+		} else {
+			typeBytes[m.Type] += m.Size
+			typeCounts[m.Type]++
+		}
+		// streak 维度（UTC 日期，与 handleUploadStreak 一致避免时区错位）
+		day := m.CreatedAt.Format("2006-01-02")
+		days[day] = true
+		if day == today {
+			todayCount++
+		}
+		// health 维度
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+			dupBySHA[m.SHA256]++
+			if _, set := dupReclaimBytes[m.SHA256]; !set {
+				dupReclaimBytes[m.SHA256] = m.Size
+			}
+		}
+		// insights 维度：上传时段（created_at 本地小时，同 handleMediaInsights 口径）
+		hour := m.CreatedAt.Hour()
+		switch {
+		case hour >= 6 && hour < 12:
+			periodCounts["早晨"]++
+		case hour >= 12 && hour < 18:
+			periodCounts["下午"]++
+		case hour >= 18 && hour < 24:
+			periodCounts["晚上"]++
+		default:
+			periodCounts["深夜"]++
+		}
+	}
+
+	// 3. quick_stats: album/favorite count 来自 mediaSvc provider 接口。
+	favoriteIDs := []string{}
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteIDs = fav.ListFavorites(uid)
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+	quickStats := map[string]any{
+		"total_media":    totalMedia,
+		"total_bytes":    usedBytes,
+		"image_count":    imgCount,
+		"video_count":    vidCount,
+		"album_count":    albumCount,
+		"favorite_count": len(favoriteIDs),
+	}
+
+	// 4. upload_streak：复用 handleUploadStreak 算法（current + longest）。
+	sortedDays := make([]string, 0, len(days))
+	for d := range days {
+		sortedDays = append(sortedDays, d)
+	}
+	sort.Strings(sortedDays)
+	longestStreak := 0
+	curRun := 0
+	var prev time.Time
+	for _, d := range sortedDays {
+		t, perr := time.Parse("2006-01-02", d)
+		if perr != nil {
+			continue
+		}
+		if curRun == 0 || t.Sub(prev) == 24*time.Hour {
+			curRun++
+			if curRun > longestStreak {
+				longestStreak = curRun
+			}
+		} else {
+			curRun = 1
+		}
+		prev = t
+	}
+	currentStreak := 0
+	cursor, _ := time.Parse("2006-01-02", today)
+	if !days[today] {
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	for days[cursor.Format("2006-01-02")] {
+		currentStreak++
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	lastUpload := ""
+	if len(sortedDays) > 0 {
+		lastUpload = sortedDays[len(sortedDays)-1]
+	}
+	streak := map[string]any{
+		"current_streak":    currentStreak,
+		"longest_streak":    longestStreak,
+		"total_active_days": len(days),
+		"last_upload_date":  lastUpload,
+		"today_count":       todayCount,
+	}
+
+	// 5. storage_health_score + grade：复用 handleStorageHealth 评分模型。
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateCount += c - 1
+		}
+	}
+	orphanCount := 0 // 孤立文件需磁盘扫描，本端点跳过避免 IO 放大（与 handleStorageHealth 一致）
+	duplicateRate := 0.0
+	ageScore := 1.0
+	quotaUsage := 0.0
+	if totalMedia > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+		ageScore = 1.0 - float64(coldCount)/float64(totalMedia)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(usedBytes) / float64(defaultQuotaBytes)
+	}
+	dupPenalty := min01(duplicateRate) * 30
+	orphanPenalty := min01(float64(orphanCount)/float64(max1(totalMedia))) * 20
+	quotaPenalty := min01(quotaUsage) * 30
+	agePenalty := (1.0 - min01(ageScore)) * 20
+	healthScore := 100.0 - (dupPenalty + orphanPenalty + quotaPenalty + agePenalty)
+	if healthScore < 0 {
+		healthScore = 0
+	}
+	if healthScore > 100 {
+		healthScore = 100
+	}
+	healthGrade := "D"
+	switch {
+	case healthScore >= 85:
+		healthGrade = "A"
+	case healthScore >= 70:
+		healthGrade = "B"
+	case healthScore >= 50:
+		healthGrade = "C"
+	}
+	health := map[string]any{
+		"score":           int(healthScore),
+		"grade":           healthGrade,
+		"duplicate_rate":  round2(duplicateRate),
+		"quota_usage":     round2(quotaUsage),
+		"age_score":       round2(ageScore),
+		"duplicate_count": duplicateCount,
+		"cold_count":      coldCount,
+		"used_bytes":      usedBytes,
+		"quota_bytes":     defaultQuotaBytes,
+	}
+
+	// 6. activity_score + level：复用 handleUserActivityScore 模型（audit_log 操作统计 + 加权）。
+	// upload_count 用未软删媒体总数代表；favorite_count 优先 favoriteProvider。
+	favoriteCount := len(favoriteIDs)
+	actionCount := make(map[string]int)
+	if stats, aerr := s.store.AuditLogStats(r.Context(), uid); aerr == nil {
+		for _, st := range stats {
+			action, _ := st["action"].(string)
+			cnt, _ := st["count"].(int)
+			if action == "" {
+				continue
+			}
+			actionCount[action] += cnt
+		}
+	} else {
+		slog.Warn("user-dashboard-v2: audit log stats failed", "error", aerr)
+	}
+	shareCount := actionCount["share"] + actionCount["share_toggle"]
+	activityWeights := map[string]int{
+		"upload": 3, "favorite": 2, "share": 4, "tag": 1, "rename": 1, "rotate": 1,
+	}
+	activityCounts := map[string]int{
+		"upload": totalMedia, "favorite": favoriteCount, "share": shareCount,
+		"tag": actionCount["tag"], "rename": actionCount["rename"], "rotate": actionCount["rotate"],
+	}
+	activityOrder := []string{"upload", "favorite", "share", "tag", "rename", "rotate"}
+	activityScore := 0
+	totalActions := 0
+	breakdown := make([]map[string]any, 0, len(activityOrder))
+	for _, act := range activityOrder {
+		c := activityCounts[act]
+		w := activityWeights[act]
+		points := c * w
+		activityScore += points
+		totalActions += c
+		breakdown = append(breakdown, map[string]any{
+			"action": act, "count": c, "weight": w, "points": points,
+		})
+	}
+	level := "新手"
+	switch {
+	case activityScore >= 101:
+		level = "专家"
+	case activityScore >= 51:
+		level = "达人"
+	case activityScore >= 11:
+		level = "活跃"
+	}
+	activity := map[string]any{
+		"score":         activityScore,
+		"level":         level,
+		"breakdown":     breakdown,
+		"total_actions": totalActions,
+	}
+
+	// 7. coverage：tagged% + favorited%（基于未软删媒体总数，同 handleMediaDashboard 口径）。
+	liveIDs := make(map[string]struct{}, totalMedia)
+	for _, m := range mediaList {
+		if !m.Deleted {
+			liveIDs[m.ID] = struct{}{}
+		}
+	}
+	taggedSet := make(map[string]struct{})
+	if totalMedia > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		} else {
+			slog.Warn("user-dashboard-v2: list tags failed", "error", terr)
+		}
+	}
+	favSet := make(map[string]struct{})
+	for _, id := range favoriteIDs {
+		favSet[id] = struct{}{}
+	}
+	countInLive := func(set map[string]struct{}) int {
+		n := 0
+		for id := range set {
+			if _, ok := liveIDs[id]; ok {
+				n++
+			}
+		}
+		return n
+	}
+	taggedCount := countInLive(taggedSet)
+	favoritedCount := countInLive(favSet)
+	pct := func(c int) float64 {
+		if totalMedia == 0 {
+			return 0
+		}
+		return round2(float64(c) / float64(totalMedia) * 100)
+	}
+	coverage := map[string]any{
+		"total":             totalMedia,
+		"tagged_count":      taggedCount,
+		"tagged_percent":    pct(taggedCount),
+		"fav_count":         favoritedCount,
+		"favorited_percent": pct(favoritedCount),
+	}
+
+	// 8. insights（top 3）：复用 handleMediaInsights 推导逻辑，按需产出后截取前 3 条。
+	// (a) 重复文件可回收字节
+	dupCount := 0
+	var dupReclaimable int64
+	for sha, c := range dupBySHA {
+		if c <= 1 {
+			continue
+		}
+		dupCount += c - 1
+		dupReclaimable += int64(c-1) * dupReclaimBytes[sha]
+	}
+	// (b) 存储类型分布最大占比
+	var dominantType string
+	var dominantTypeBytes int64
+	for t, b := range typeBytes {
+		if b > dominantTypeBytes {
+			dominantTypeBytes = b
+			dominantType = t
+		}
+	}
+	typePercentVal := 0.0
+	if usedBytes > 0 && dominantTypeBytes > 0 {
+		typePercentVal = float64(dominantTypeBytes) / float64(usedBytes) * 100
+	}
+	// (c) 最常上传时段
+	periodOrder := []string{"早晨", "下午", "晚上", "深夜"}
+	var dominantPeriod string
+	maxPeriod := -1
+	for _, p := range periodOrder {
+		if c := periodCounts[p]; c > maxPeriod {
+			maxPeriod = c
+			dominantPeriod = p
+		}
+	}
+	// (d) 未标签媒体数（liveTagged 已在上面派生）
+	liveTagged := countInLive(taggedSet)
+	untaggedCount := totalMedia - liveTagged
+
+	type insightItem struct {
+		Type      string `json:"type"`
+		Title     string `json:"title"`
+		Detail    string `json:"detail"`
+		ActionURL string `json:"action_url,omitempty"`
+	}
+	insights := make([]insightItem, 0, 6)
+	if dupCount > 0 {
+		insights = append(insights, insightItem{
+			Type:      "duplicates",
+			Title:     fmt.Sprintf("你有 %d 个重复文件，可回收 %s", dupCount, formatBytes(dupReclaimable)),
+			Detail:    fmt.Sprintf("重复文件占用 %s 存储空间，清理后可释放。重复率 %.1f%%。", formatBytes(dupReclaimable), duplicateRate*100),
+			ActionURL: "/api/media/duplicate-cleanup",
+		})
+	}
+	if totalMedia > 0 && dominantType != "" {
+		typeLabel := map[string]string{
+			"IMAGE": "图片", "VIDEO": "视频", "LIVE_PHOTO": "动态照片",
+		}[dominantType]
+		if typeLabel == "" {
+			typeLabel = dominantType
+		}
+		insights = append(insights, insightItem{
+			Type:   "distribution",
+			Title:  fmt.Sprintf("你的%s占 %.1f%% 存储空间", typeLabel, typePercentVal),
+			Detail: fmt.Sprintf("媒体库共 %d 项、占用 %s，其中%s %d 项占 %s（%s）。", totalMedia, formatBytes(usedBytes), typeLabel, typeCounts[dominantType], formatBytes(dominantTypeBytes), fmtPercent(typePercentVal)),
+		})
+	}
+	if totalMedia > 0 && dominantPeriod != "" {
+		insights = append(insights, insightItem{
+			Type:   "upload_habit",
+			Title:  fmt.Sprintf("最常上传的时段是%s", dominantPeriod),
+			Detail: fmt.Sprintf("在%s时段上传了 %d 项媒体，占上传总数的 %s。", dominantPeriod, periodCounts[dominantPeriod], fmtPercent(float64(periodCounts[dominantPeriod])/float64(totalMedia)*100)),
+		})
+	}
+	if untaggedCount > 0 {
+		insights = append(insights, insightItem{
+			Type:      "untagged",
+			Title:     fmt.Sprintf("你有 %d 个未标签的媒体", untaggedCount),
+			Detail:    fmt.Sprintf("未标签媒体占总数的 %s，建议打标签便于检索与整理。", fmtPercent(float64(untaggedCount)/float64(max1(totalMedia))*100)),
+			ActionURL: "/api/media/tag-recommendations",
+		})
+	}
+	// top_album 洞察——albumStoreProvider 未配置时跳过（不产，不 501，同 handleMediaInsights 口径）
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		var topAlbumName string
+		topAlbumCount := 0
+		hasTop := false
+		for _, a := range provider.ListAlbums(uid) {
+			if n := len(a.MediaIDs); n > topAlbumCount {
+				topAlbumCount = n
+				topAlbumName = a.Name
+				hasTop = true
+			}
+		}
+		if hasTop && topAlbumCount > 0 {
+			insights = append(insights, insightItem{
+				Type:      "top_album",
+				Title:     fmt.Sprintf("相册'%s'照片最多，有 %d 项", topAlbumName, topAlbumCount),
+				Detail:    fmt.Sprintf("相册'%s'内含 %d 项媒体，是你收录最多的相册。", topAlbumName, topAlbumCount),
+				ActionURL: "/api/media/album/count-ranking",
+			})
+		}
+	}
+	insights = append(insights, insightItem{
+		Type:      "health",
+		Title:     fmt.Sprintf("你的存储健康度为%s级", healthGrade),
+		Detail:    fmt.Sprintf("综合重复率（%s）、配额使用率（%s）、冷数据占比，存储健康度评分 %d/100，等级 %s。", fmtPercent(duplicateRate*100), fmtPercent(quotaUsage*100), int(healthScore), healthGrade),
+		ActionURL: "/api/media/storage-health",
+	})
+	// 按优先顺序产出，截取 top 3（任务规格：insights top 3）。
+	if len(insights) > 3 {
+		insights = insights[:3]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"quick_stats": quickStats,
+		"health":      health,
+		"activity":    activity,
+		"coverage":    coverage,
+		"streak":      streak,
+		"insights":    insights,
+		"user_id":     uid,
 	})
 }
 
