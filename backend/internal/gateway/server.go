@@ -178,6 +178,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
 	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
 	s.mux.HandleFunc("/api/media/weekly-summary", s.handleWeeklySummary)
+	// V8：媒体生命周期分析
+	s.mux.HandleFunc("/api/media/media-lifecycle", s.handleMediaLifecycle)
 	// V13：年度回顾报告（某年媒体统计摘要：总览/月分布/类型分布/收藏数/上传最忙日）。
 	s.mux.HandleFunc("/api/media/yearly-review", s.handleMediaYearlyReview)
 	// V21：综合报告（合并 quick-stats/yearly-review/storage/tag/pattern/duplicate 为一次请求），
@@ -4427,6 +4429,70 @@ func (s *Server) handleWeeklySummary(w http.ResponseWriter, r *http.Request) {
 		"most_active_day":  mostActive,
 		"new_tags_count":   newTagsCount,
 		"new_albums_count": newAlbumsCount,
+	})
+}
+
+// handleMediaLifecycle V8：GET /api/media/media-lifecycle — 媒体生命周期分析。
+// 从 audit_log 获取各 action 的统计，展示上传→收藏→分享→删除各阶段分布。
+func (s *Server) handleMediaLifecycle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	stats, err := s.store.AuditLogStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 阶段映射：action → 生命周期阶段
+	stageMap := map[string]string{
+		"upload":     "上传",
+		"favorite":   "收藏",
+		"unfavorite": "取消收藏",
+		"share":      "分享",
+		"rename":     "重命名",
+		"tag":        "打标签",
+		"rotate":     "旋转",
+		"delete":     "删除",
+		"restore":    "恢复",
+	}
+	total := 0
+	for _, s2 := range stats {
+		cnt, _ := s2["count"].(int)
+		total += cnt
+	}
+	lifecycle := make([]map[string]any, 0, len(stats))
+	for _, s2 := range stats {
+		action, _ := s2["action"].(string)
+		cnt, _ := s2["count"].(int)
+		stage := stageMap[action]
+		if stage == "" {
+			stage = action
+		}
+		pct := 0.0
+		if total > 0 {
+			pct = float64(cnt) * 100.0 / float64(total)
+		}
+		lifecycle = append(lifecycle, map[string]any{
+			"stage":      stage,
+			"action":     action,
+			"count":      cnt,
+			"percentage": pct,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"lifecycle":      lifecycle,
+		"total_actions":  total,
+		"total_stages":   len(lifecycle),
 	})
 }
 
