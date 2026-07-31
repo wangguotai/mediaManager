@@ -234,6 +234,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/recent-uploads", s.handleMediaRecentUploads)
 	// V8：极端媒体（最老+最大）
 	s.mux.HandleFunc("/api/media/extreme-media", s.handleMediaExtremeMedia)
+	// V8：按 MIME 类型统计
+	s.mux.HandleFunc("/api/media/file-types", s.handleMediaFileTypes)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3179,6 +3181,64 @@ func (s *Server) handleMediaExtremeMedia(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"oldest":  mediaToMap(oldest),
 		"largest": mediaToMap(largest),
+	})
+}
+
+// handleMediaFileTypes V8：GET /api/media/file-types — 按 MIME 类型统计。
+func (s *Server) handleMediaFileTypes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	type mimeStat struct {
+		Mime  string `json:"mime"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	byMime := make(map[string]*mimeStat)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		key := m.Mime
+		if key == "" {
+			key = "unknown"
+		}
+		if _, ok := byMime[key]; !ok {
+			byMime[key] = &mimeStat{Mime: key}
+		}
+		byMime[key].Count++
+		byMime[key].Bytes += m.Size
+	}
+	stats := make([]mimeStat, 0, len(byMime))
+	for _, v := range byMime {
+		stats = append(stats, *v)
+	}
+	// 按数量倒序
+	for i := 0; i < len(stats)-1; i++ {
+		for j := i + 1; j < len(stats); j++ {
+			if stats[j].Count > stats[i].Count {
+				stats[i], stats[j] = stats[j], stats[i]
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"types":  stats,
+		"total":  len(stats),
 	})
 }
 
