@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -398,6 +399,36 @@ func (s *Store) PurgeAllTrashForUser(ctx context.Context, userID string) (int, e
 		`DELETE FROM "media" WHERE deleted = 1 AND user_id = ?`, userID)
 	if err != nil {
 		return 0, fmt.Errorf("purge all trash for user: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// BatchRestoreMedia V8：批量恢复回收站媒体（单条 UPDATE，区别于逐条 UndeleteMediaForUser）。
+// 把指定 mediaIDs 中属于 userID 且 deleted=1 的记录置为 deleted=0，刷新 updated_at。
+// 返回实际复活的行数（未命中 / 已恢复 / 不属于当前用户均不计入，符合回收站"不泄露
+// media_id 是否存在"的越权防护语义）。mediaIDs 为空或 userID 为空直接返回 (0, nil)。
+//
+// SQL 注入防护：IN 列表用 strings.Repeat("?,", n) 生成等量占位符，mediaIDs 作为参数
+// 逐个绑定（不拼接进 SQL 文本），参考 BatchRemoveFromAlbum/批量查询的参数化模式。
+func (s *Store) BatchRestoreMedia(ctx context.Context, userID string, mediaIDs []string) (int, error) {
+	if userID == "" || len(mediaIDs) == 0 {
+		return 0, nil
+	}
+	// 构造 IN (?, ?, ...) 占位符：n 个 "?" 用 "," 连接，外层包 "IN (" ")"。
+	placeholders := strings.Repeat("?,", len(mediaIDs))
+	placeholders = placeholders[:len(placeholders)-1] // 去掉末尾多余的 ","
+	args := make([]any, 0, len(mediaIDs)+2)
+	args = append(args, timeToVal(time.Now())) // updated_at = ?
+	for _, id := range mediaIDs { // id IN (...) — 逐个追加，避免 []string→[]any 的 ... 展开类型不符
+		args = append(args, id)
+	}
+	args = append(args, userID) // AND user_id = ?
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE "media" SET deleted = 0, updated_at = ? WHERE id IN (`+placeholders+`) AND user_id = ? AND deleted = 1`,
+		args...)
+	if err != nil {
+		return 0, fmt.Errorf("batch restore media: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil

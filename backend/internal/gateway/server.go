@@ -214,6 +214,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/purge", s.handleMediaPurge)
 	// V8：清空回收站（物理删除当前用户的所有已软删媒体）
 	s.mux.HandleFunc("/api/media/empty-trash", s.handleMediaEmptyTrash)
+	// V8：批量恢复回收站媒体（单条 UPDATE，区别于逐条 /api/media/restore）
+	s.mux.HandleFunc("/api/media/batch-restore", s.handleMediaBatchRestore)
 	// V8：媒体标签系统
 	s.mux.HandleFunc("/api/media/tag/add", s.handleMediaTagAdd)
 	s.mux.HandleFunc("/api/media/tag/remove", s.handleMediaTagRemove)

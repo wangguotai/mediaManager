@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -252,7 +253,51 @@ func (s *Server) handleMediaEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "success",
+		"status":       "success",
 		"purged_count": count,
+	})
+}
+
+// handleMediaBatchRestore V8：POST /api/media/batch-restore — 批量恢复回收站媒体。
+//
+// 与 POST /api/media/restore 的区别：restore 逐条调 UndeleteMediaForUser（按 (id,user_id)
+// 双键校验，返回逐条成功/失败明细）；本端点用单条 UPDATE ... WHERE id IN (...) AND user_id=?
+// 一次性恢复，仅返回总恢复计数（不区分逐条结果），适合前端"全选恢复"等不关心明细的场景。
+//
+// 请求体复用 batchIDsRequest（{"media_ids": [...]}），校验复用 decodeBatchIDs（非空、≤maxBatchIDs）。
+// 审计日志记一条 "restore"（mediaID 留空，detail 注明批量恢复数量），与 share/empty-trash 等批量操作一致。
+// 响应：{"status":"success","restored_count":N}，N 为实际复活行数（未命中/已恢复/非己有均不计入）。
+func (s *Server) handleMediaBatchRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "trash is not configured"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+
+	req, ok := decodeBatchIDs(w, r)
+	if !ok {
+		return // decodeBatchIDs 已写错误响应
+	}
+
+	count, err := s.store.BatchRestoreMedia(r.Context(), uid, req.MediaIDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 审计日志：best-effort，失败不影响恢复结果（与 handleShareCreate 等一致）。
+	_ = s.store.AddAuditLog(r.Context(), uid, "restore", "", fmt.Sprintf("batch restore %d items", count))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "success",
+		"restored_count": count,
 	})
 }
