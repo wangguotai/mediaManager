@@ -246,6 +246,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
 	// V8：按天统计上传量（日历热力图）
 	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
+	// V8：磁盘使用情况
+	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3499,6 +3501,41 @@ func (s *Server) handleMediaTagMerge(w http.ResponseWriter, r *http.Request) {
 		"source_tag":    req.SourceTag,
 		"target_tag":    req.TargetTag,
 		"merged_count":  count,
+	})
+}
+
+// handleDiskUsage V8：GET /api/media/disk-usage — 返回服务器磁盘使用情况。
+func (s *Server) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "uploads dir not configured"})
+		return
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(uploadsDir, &stat); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("statfs: %v", err)})
+		return
+	}
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	usedBytes := totalBytes - freeBytes
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_bytes":   totalBytes,
+		"total_gb":      float64(totalBytes) / (1024 * 1024 * 1024),
+		"used_bytes":    usedBytes,
+		"used_gb":       float64(usedBytes) / (1024 * 1024 * 1024),
+		"free_bytes":    freeBytes,
+		"free_gb":       float64(freeBytes) / (1024 * 1024 * 1024),
+		"usage_percent": float64(usedBytes) / float64(totalBytes) * 100,
 	})
 }
 
