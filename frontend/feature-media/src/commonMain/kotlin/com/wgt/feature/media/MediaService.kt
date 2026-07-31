@@ -1935,6 +1935,78 @@ object MediaService {
     }
 
     /**
+     * 搜索查询统计条目 —— 对应 GET /api/media/media-query-stats 返回结构。
+     *
+     * 后端结构：
+     * - [totalSearches]：`total_searches` 累计搜索次数（int）。
+     * - [topKeywords]：`top_keywords` 热搜关键词数组，每条 `{keyword, count}`。
+     * - [searchTrend]：`search_trend` 趋势数组，每条 `{date, count}`（前端暂未展示，仅透传）。
+     *
+     * 注：使用 [TopKeyword] / [SearchTrendPoint] 而非 `KeywordCount` / `DayCount`，
+     * 因 MediaService 已存在 [DayCount]（本周上传摘要的元素，字段为 day+count），
+     * 重名会冲突；此处语义不同（date+count），故独立命名。
+     * 调用方（搜索栏"热门搜索"区）在有数据（totalSearches > 0）时展示热词 chip。
+     */
+    data class TopKeyword(
+        val keyword: String,
+        val count: Int
+    )
+
+    data class SearchTrendPoint(
+        val date: String,
+        val count: Int
+    )
+
+    data class MediaQueryStats(
+        val totalSearches: Int,
+        val topKeywords: List<TopKeyword>,
+        val searchTrend: List<SearchTrendPoint>
+    )
+
+    /**
+     * GET /api/media/media-query-stats — 搜索查询统计（热词 + 趋势）。
+     *
+     * 响应：`{total_searches, top_keywords:[{keyword,count}], search_trend:[{date,count}]}`。
+     * 成功返回 [MediaQueryStats]；失败/非 200 返回 null，调用方降级为不展示"热门搜索"区。
+     * count 后端为 int，用 [jsonPrimitive.intOrNull] 容错解析。鉴权由 [jsonClient]
+     * defaultRequest 统一附加 Bearer token。
+     */
+    suspend fun getMediaQueryStats(): MediaQueryStats? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-query-stats") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val total = obj["total_searches"]?.jsonPrimitive?.intOrNull ?: 0
+                val topKeywords = obj["top_keywords"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val kw = o["keyword"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    TopKeyword(
+                        keyword = kw,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                val trend = obj["search_trend"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    SearchTrendPoint(
+                        date = date,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                MediaQueryStats(totalSearches = total, topKeywords = topKeywords, searchTrend = trend)
+            } else {
+                logger.info("MediaService", "getMediaQueryStats status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaQueryStats FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：DELETE /api/share/{token} — 撤销分享链接。
      */
     suspend fun deleteShare(token: String): Boolean {

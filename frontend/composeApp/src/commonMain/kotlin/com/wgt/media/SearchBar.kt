@@ -525,6 +525,77 @@ fun SearchBar(
                 }
             }
         }
+        // V25：热门搜索区——展开态且输入为空时，调 GET /api/media/media-query-stats
+        // 拉取搜索热词统计，仅在 totalSearches > 0（后端有搜索记录）时显示。
+        // 位置：排在"最近操作"区之后、"标签快捷区"之前，作为搜索建议的一部分。
+        // 每个 chip 显示热词 + 🔥 + 次数，点击触发本地搜索（与搜索历史 chip 行为一致）。
+        if (expanded && queryText.isEmpty()) {
+            var queryStats by remember {
+                mutableStateOf<MediaService.MediaQueryStats?>(null)
+            }
+            LaunchedEffect(expanded) {
+                if (expanded) {
+                    queryStats = MediaService.getMediaQueryStats()
+                }
+            }
+            // 仅在 totalSearches > 0 时展示：避免无搜索记录时出现空区。
+            if (queryStats != null && queryStats!!.totalSearches > 0) {
+                // top_keywords 后端已排序（按 count 倒序），前端取前 5。
+                val top5 = queryStats!!.topKeywords.take(5)
+                if (top5.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    // 标题行：\"热门搜索\"文案，标识此区为热搜词聚合。
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "热门搜索",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(top5.size) { index ->
+                            val hotWord = top5[index]
+                            AssistChip(
+                                onClick = {
+                                    // 点击热词触发本地搜索，与搜索历史 chip 行为一致。
+                                    queryText = hotWord.keyword
+                                    queryVisible = true
+                                    onDebouncedQueryChange(hotWord.keyword)
+                                    SearchHistory.add(hotWord.keyword)
+                                },
+                                label = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("🔥", fontSize = 13.sp)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(hotWord.keyword, fontSize = 13.sp, maxLines = 1)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            "${hotWord.count}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
         // V8：标签快捷区——展开态且输入为空时显示用户所有标签，点击触发标签搜索
         if (expanded && queryText.isEmpty()) {
             var allTags by remember { mutableStateOf<List<String>>(emptyList()) }
