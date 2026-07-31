@@ -242,6 +242,28 @@ private fun AlbumListPage(
                     if (selectionMode) {
                         TextButton(onClick = {
                             if (selectedAlbumIds.isNotEmpty()) {
+                                val ids = selectedAlbumIds.toList()
+                                batchScope.launch {
+                                    var okCount = 0
+                                    for (id in ids) {
+                                        if (MediaService.pinAlbum(id)) okCount++
+                                    }
+                                    if (okCount > 0) {
+                                        pinnedIds = MediaService.getPinnedAlbumIds()
+                                        viewModel.loadAlbums(forceRefresh = true)
+                                        selectionMode = false
+                                        selectedAlbumIds.clear()
+                                        viewModel.showErrorMessage("已置顶 $okCount/${ids.size} 个相册")
+                                    } else {
+                                        viewModel.showErrorMessage("置顶失败")
+                                    }
+                                }
+                            }
+                        }) {
+                            Text("置顶(${selectedAlbumIds.size})")
+                        }
+                        TextButton(onClick = {
+                            if (selectedAlbumIds.isNotEmpty()) {
                                 showBatchDeleteConfirm = true
                             }
                         }) {
