@@ -955,6 +955,110 @@ private fun MyTabContent(
             }
         }
 
+        // V9：用户活跃度卡片——在仪表盘卡片（存储概览）之后展示活跃度评分。
+        // 调 GET /api/media/user-activity-score，大字显示 score + level（按等级着色），
+        // 下方分维度明细（action + count + points），最多 5 行。
+        // 后端返回 null（未登录/异常）时静默跳过，与其他统计卡片一致的 null 容错。
+        var activityScore by remember { mutableStateOf<MediaService.UserActivityScore?>(null) }
+        LaunchedEffect(Unit) { activityScore = MediaService.getUserActivityScore() }
+        activityScore?.let { act ->
+            // 等级颜色：新手灰 / 活跃蓝 / 达人橙 / 专家绿
+            val levelColor = when (act.level) {
+                "专家" -> Color(0xFF43A047)
+                "达人" -> Color(0xFFFF9800)
+                "活跃" -> Color(0xFF1E88E5)
+                else -> Color(0xFF9E9E9E)  // 新手 / 未知
+            }
+            // 维度中文名映射，便于用户理解 action 字段
+            fun actionLabel(action: String): String = when (action) {
+                "upload" -> "上传"
+                "favorite" -> "收藏"
+                "share" -> "分享"
+                "tag" -> "标签"
+                "rename" -> "重命名"
+                "rotate" -> "旋转"
+                else -> action
+            }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "活跃度",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 大字号显示 score + level
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            "${act.score}",
+                            fontSize = 40.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = levelColor
+                        )
+                        Text(
+                            act.level,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = levelColor,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text(
+                            "共 ${act.totalActions} 次操作",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 分维度明细（最多 5 行）
+                    act.breakdown.take(5).forEach { b ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                actionLabel(b.action),
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "${b.count} 次",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.width(60.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.End
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "${b.points} 分",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = levelColor,
+                                modifier = Modifier.width(56.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.End
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：存储预测卡片——在配额进度条卡片之后，展示月均增长/未来用量/预计满配额月数。
         // 后端尚未铺量到生产时 getStorageForecast 返回 null，此处静默跳过不渲染占位。
         var storageForecast by remember { mutableStateOf<MediaService.StorageForecast?>(null) }

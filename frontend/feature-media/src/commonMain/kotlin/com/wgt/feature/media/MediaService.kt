@@ -1455,6 +1455,80 @@ object MediaService {
     }
 
     /**
+     * V9：用户活跃度评分维度明细——后端 [handleUserActivityScore] 的 breakdown 元素。
+     *
+     * 后端结构：`{action, count, weight, points}`，前端展示 action + count + points
+     * （weight 后端也回传，但 UI 不展示，留 [weight] 供后续优化）。
+     *
+     * @param action 动作名（upload/favorite/share/tag/rename/rotate）
+     * @param count  该动作累计次数
+     * @param weight 权重（后端回传，前端可选展示）
+     * @param points 该维度得分（count * weight）
+     */
+    data class ScoreBreakdown(
+        val action: String,
+        val count: Int,
+        val weight: Int = 0,
+        val points: Int
+    )
+
+    /**
+     * V9：用户活跃度评分结果——对应后端 [handleUserActivityScore] 响应。
+     *
+     * 后端结构：`{score, level, breakdown:[{action,count,weight,points}], total_actions, user_id}`。
+     *
+     * @param score 总分（各维度 count*weight 之和）
+     * @param level 等级（新手/活跃/达人/专家）
+     * @param breakdown 各维度明细列表（顺序：upload → favorite → share → tag → rename → rotate）
+     * @param totalActions 总操作次数（各维度 count 之和）
+     */
+    data class UserActivityScore(
+        val score: Int,
+        val level: String,
+        val breakdown: List<ScoreBreakdown>,
+        val totalActions: Int
+    )
+
+    /**
+     * V9：GET /api/media/user-activity-score — 用户活跃度评分。
+     *
+     * 拉取后端按各操作维度加权累计的活跃度评分：总分数 + 等级 + 维度明细。
+     * 需认证（Authorization 头由 [jsonClient] defaultRequest 自动注入）；失败返回 null。
+     *
+     * 等级映射（与后端 [handleUserActivityScore] 一致）：
+     * - 新手(0-10) / 活跃(11-50) / 达人(51-100) / 专家(101+)
+     */
+    suspend fun getUserActivityScore(): UserActivityScore? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/user-activity-score")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val breakdown = obj["breakdown"]?.jsonArray?.map { el ->
+                    val b = el.jsonObject
+                    ScoreBreakdown(
+                        action = b["action"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = b["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        weight = b["weight"]?.jsonPrimitive?.intOrNull ?: 0,
+                        points = b["points"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                UserActivityScore(
+                    score = obj["score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    level = obj["level"]?.jsonPrimitive?.contentOrNull ?: "新手",
+                    breakdown = breakdown,
+                    totalActions = obj["total_actions"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getUserActivityScore status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUserActivityScore FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：GET /api/media/duplicates → 重复文件检测（按 SHA256 分组）。
      */
     suspend fun getDuplicates(): DuplicateResult? {
