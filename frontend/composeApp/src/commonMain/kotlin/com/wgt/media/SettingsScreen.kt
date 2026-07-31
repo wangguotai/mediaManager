@@ -1057,6 +1057,157 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V15：清理建议卡片（GET /api/media/storage-recommendations + POST duplicate-cleanup）
+            var recs by remember { mutableStateOf<MediaService.StorageRecommendations?>(null) }
+            var recsLoading by remember { mutableStateOf(true) }
+            var cleaning by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                orphanScope.launch {
+                    recs = MediaService.getStorageRecommendations()
+                    recsLoading = false
+                }
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                modifier = Modifier.padding(vertical = 6.dp)
+            )
+            SectionTitle("清理建议", iconRes = Res.drawable.ic_delete)
+            if (recsLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (recs == null) {
+                Text(
+                    "无法获取清理建议",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val r = recs!!
+                // 🔄 重复文件
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("🔄 重复文件", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "${r.duplicates.count} 个 · 可回收 ${formatBytesToMB(r.duplicates.reclaimableBytes)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 📦 大文件（top 3，后端已按 size 倒序，本地取前 3）
+                if (r.largeFiles.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "📦 大文件 · top ${minOf(3, r.largeFiles.size)}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    r.largeFiles.take(3).forEach { lf ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 1.dp)
+                                .padding(start = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                lf.filename.ifEmpty { "(未命名)" },
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                formatBytesToMB(lf.size),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                }
+                // 📅 旧文件
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("📅 旧文件", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "${r.oldFiles.count} 个 · ${formatBytesToMB(r.oldFiles.bytes)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 总计可回收
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(vertical = 6.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "总计可回收",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        formatBytesToMB(r.totalReclaimableBytes),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                // 一键清理重复按钮（仅在有重复时启用）
+                Button(
+                    onClick = {
+                        if (cleaning) return@Button
+                        cleaning = true
+                        orphanScope.launch {
+                            val deleted = MediaService.cleanupDuplicates()
+                            cleaning = false
+                            if (deleted != null) {
+                                if (deleted > 0) {
+                                    snackbarHostState.showSnackbar("已清理 $deleted 个重复文件")
+                                } else {
+                                    snackbarHostState.showSnackbar("无重复文件可清理")
+                                }
+                                // 刷新建议数据（清理后重复数应降为 0）
+                                recs = MediaService.getStorageRecommendations()
+                            } else {
+                                snackbarHostState.showSnackbar("清理失败，请重试")
+                            }
+                        }
+                    },
+                    enabled = !cleaning && r.duplicates.count > 0,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                ) {
+                    if (cleaning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("清理中...")
+                    } else {
+                        Text("一键清理重复（${r.duplicates.count}）")
+                    }
+                }
+            }
+
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }

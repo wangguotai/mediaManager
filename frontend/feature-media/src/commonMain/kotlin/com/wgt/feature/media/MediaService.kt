@@ -3422,6 +3422,113 @@ object MediaService {
     )
 
     /**
+     * V15：GET /api/media/storage-recommendations — 存储清理建议。
+     *
+     * 后端一次拉取用户全部媒体，从重复/大文件/旧文件/孤立四个维度分析可回收空间。响应：
+     * ```
+     * { "duplicates": {"count","reclaimable_bytes"},
+     *   "large_files": [{"media_id","filename","size"}],
+     *   "old_files": {"count","bytes"},
+     *   "orphans": {"count","bytes"},
+     *   "total_reclaimable_bytes": N,
+     *   "recommendation_count": N }
+     * ```
+     * 前端消费 duplicates + large_files + old_files + total_reclaimable_bytes，
+     * 拍平为 [StorageRecommendations] 供设置页"清理建议"卡片展示。orphans 字段后端
+     * 返回但前端暂不展示（手动解析忽略即可）。失败返回 null，调用方按空态处理。
+     */
+    suspend fun getStorageRecommendations(): StorageRecommendations? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-recommendations") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val dup = o["duplicates"]?.jsonObject
+                val old = o["old_files"]?.jsonObject
+                val larges = o["large_files"]?.jsonArray?.map { lf ->
+                    val lo = lf.jsonObject
+                    LargeFile(
+                        mediaId = lo["media_id"]?.jsonPrimitive?.content ?: "",
+                        filename = lo["filename"]?.jsonPrimitive?.content ?: "",
+                        size = lo["size"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                } ?: emptyList()
+                StorageRecommendations(
+                    duplicates = DupInfo(
+                        count = dup?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        reclaimableBytes = dup?.get("reclaimable_bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                    ),
+                    largeFiles = larges,
+                    oldFiles = OldInfo(
+                        count = old?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = old?.get("bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                    ),
+                    totalReclaimableBytes = o["total_reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    recommendationCount = o["recommendation_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageRecommendations FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V8：POST /api/media/duplicate-cleanup — 一键清理重复媒体。
+     *
+     * 后端按 SHA256 分组，每组保留最早的，其余软删（置 deleted 标志）。响应：
+     * `{ "status","groups_found","deleted_count","deleted":[{media_id,filename,sha256}] }`。
+     *
+     * @return 成功删除的重复文件数；失败（网络/HTTP 非 200）返回 null，调用方提示重试。
+     */
+    suspend fun cleanupDuplicates(): Int? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/duplicate-cleanup") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val deleted = o["deleted_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "cleanupDuplicates deleted=$deleted")
+                deleted
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "cleanupDuplicates FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V15：storage-recommendations 重复文件子统计。 */
+    data class DupInfo(
+        val count: Int,
+        val reclaimableBytes: Long
+    )
+
+    /** V15：storage-recommendations 大文件条目。 */
+    data class LargeFile(
+        val mediaId: String,
+        val filename: String,
+        val size: Long
+    )
+
+    /** V15：storage-recommendations 旧文件子统计。 */
+    data class OldInfo(
+        val count: Int,
+        val bytes: Long
+    )
+
+    /** V15：storage-recommendations 汇总结果（重复/大文件/旧文件 + 总可回收字节）。 */
+    data class StorageRecommendations(
+        val duplicates: DupInfo,
+        val largeFiles: List<LargeFile>,
+        val oldFiles: OldInfo,
+        val totalReclaimableBytes: Long,
+        val recommendationCount: Int
+    )
+
+    /**
      * V9：GET /api/media/stat-summary — 一站式统计汇总。
      *
      * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
