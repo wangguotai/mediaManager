@@ -649,6 +649,30 @@ func (s *MediaService) ReorderAlbumMedia(uid, albumID string, newOrder []string)
 	return s.albumStore.ReorderAlbumMedia(uid, albumID, newOrder)
 }
 
+// PinAlbum V9：委托 AlbumStore 置顶相册。
+func (s *MediaService) PinAlbum(uid, albumID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.PinAlbum(uid, albumID)
+}
+
+// UnpinAlbum V9：委托 AlbumStore 取消相册置顶。
+func (s *MediaService) UnpinAlbum(uid, albumID string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.UnpinAlbum(uid, albumID)
+}
+
+// ListPinnedAlbums V9：委托 AlbumStore 返回置顶相册列表。
+func (s *MediaService) ListPinnedAlbums(uid string) ([]*Album, error) {
+	if s.albumStore == nil {
+		return nil, fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.ListPinnedAlbums(uid)
+}
+
 // favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。
 const favoriteFilterKey = "favorite=true"
 

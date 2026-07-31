@@ -20,6 +20,7 @@ type Album struct {
 	MediaIDs     []string `json:"media_ids"`
 	CreatedAt    int64    `json:"created_at"`
 	CoverMediaID string   `json:"cover_media_id,omitempty"` // V7：相册封面 media_id
+	Pinned       bool     `json:"pinned"`                    // V9：相册是否置顶
 }
 
 // AlbumStore 按 user_id 维度隔离持久化相册列表。
@@ -358,4 +359,59 @@ func (as *AlbumStore) ReorderAlbumMedia(uid, albumID string, newOrder []string) 
 	}
 	album.MediaIDs = newOrder
 	return pa.save()
+}
+
+// PinAlbum V9：将 uid 名下指定相册置顶（Pinned=true）并持久化。
+func (as *AlbumStore) PinAlbum(uid, albumID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return fmt.Errorf("album not found: %s", albumID)
+	}
+	album.Pinned = true
+	return pa.save()
+}
+
+// UnpinAlbum V9：取消 uid 名下指定相册的置顶（Pinned=false）并持久化。
+func (as *AlbumStore) UnpinAlbum(uid, albumID string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return fmt.Errorf("album not found: %s", albumID)
+	}
+	album.Pinned = false
+	return pa.save()
+}
+
+// ListPinnedAlbums V9：返回 uid 名下所有 Pinned=true 的相册，按创建时间倒序。
+func (as *AlbumStore) ListPinnedAlbums(uid string) ([]*Album, error) {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return nil, fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.RLock()
+	defer pa.mu.RUnlock()
+	list := make([]*Album, 0)
+	for _, a := range pa.albums {
+		if !a.Pinned {
+			continue
+		}
+		copy := *a
+		copy.MediaIDs = append([]string{}, a.MediaIDs...) // 确保非 nil 副本
+		list = append(list, &copy)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt > list[j].CreatedAt
+	})
+	return list, nil
 }

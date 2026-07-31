@@ -279,6 +279,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/auto-cover", s.handleAlbumAutoCover)
 	// V8：按日期排序相册内媒体
 	s.mux.HandleFunc("/api/media/album/sort-by-date", s.handleAlbumSortByDate)
+	// V9：相册置顶 — 置顶 / 取消置顶 / 列出置顶相册
+	s.mux.HandleFunc("/api/media/album/pin", s.handleAlbumPin)
+	s.mux.HandleFunc("/api/media/album/unpin", s.handleAlbumUnpin)
+	s.mux.HandleFunc("/api/media/album/pinned", s.handleAlbumPinned)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
@@ -1429,6 +1433,9 @@ type albumStoreProvider interface {
 	DeleteAlbum(uid, albumID string) error
 	RenameAlbum(uid, albumID, newName string) error
 	ReorderAlbumMedia(uid, albumID string, newOrder []string) error
+	PinAlbum(uid, albumID string) error
+	UnpinAlbum(uid, albumID string) error
+	ListPinnedAlbums(uid string) ([]*service.Album, error)
 }
 
 // handleAlbumCreate 处理 POST /api/media/album，创建新相册。
@@ -4419,6 +4426,113 @@ func (s *Server) handleAlbumSortByDate(w http.ResponseWriter, r *http.Request) {
 		"order":     req.Order,
 		"reordered": len(newOrder),
 	})
+}
+
+// handleAlbumPin V9：POST /api/media/album/pin — 置顶相册。
+// 请求体: { "album_id": "x" } → PinAlbum → { "status": "success", "album_id": "x" }
+func (s *Server) handleAlbumPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.AlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id is required"})
+		return
+	}
+	// 先校验相册归属，避免对不存在/非己有的相册操作
+	if provider.GetAlbum(uid, req.AlbumID) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	if err := provider.PinAlbum(uid, req.AlbumID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID})
+}
+
+// handleAlbumUnpin V9：POST /api/media/album/unpin — 取消相册置顶。
+// 请求体: { "album_id": "x" } → UnpinAlbum → { "status": "success", "album_id": "x" }
+func (s *Server) handleAlbumUnpin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.AlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id is required"})
+		return
+	}
+	if provider.GetAlbum(uid, req.AlbumID) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	if err := provider.UnpinAlbum(uid, req.AlbumID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID})
+}
+
+// handleAlbumPinned V9：GET /api/media/album/pinned — 列出当前用户置顶的相册。
+// 返回 { "albums": [...], "count": N }
+func (s *Server) handleAlbumPinned(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums, err := provider.ListPinnedAlbums(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if albums == nil {
+		albums = []*service.Album{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"albums": albums, "count": len(albums)})
 }
 
 // handleAlbumAutoCoverAll V8：POST /api/media/album/auto-cover-all — 批量给
