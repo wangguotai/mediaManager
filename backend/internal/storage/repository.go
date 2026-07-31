@@ -497,6 +497,27 @@ func (s *Store) SearchMediaByTag(ctx context.Context, userID, tagName string) ([
 	return ids, nil
 }
 
+// TagStats V8：返回每个标签的媒体数量，按数量倒序。
+func (s *Store) TagStats(ctx context.Context, userID string) ([]map[string]any, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tag_name, COUNT(*) as cnt FROM media_tags WHERE user_id = ? GROUP BY tag_name ORDER BY cnt DESC`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("tag stats: %w", err)
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var name string
+		var cnt int
+		if err := rows.Scan(&name, &cnt); err != nil {
+			return nil, fmt.Errorf("scan tag stats: %w", err)
+		}
+		out = append(out, map[string]any{"tag": name, "count": cnt})
+	}
+	return out, nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
