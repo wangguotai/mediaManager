@@ -232,6 +232,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 	// V8：标签自动补全
 	s.mux.HandleFunc("/api/media/tag/autocomplete", s.handleMediaTagAutocomplete)
+	// V8：合并标签
+	s.mux.HandleFunc("/api/media/tag/merge", s.handleMediaTagMerge)
 	// V8：用户存储配额
 	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
 	// V8：最近上传的媒体
@@ -3451,6 +3453,52 @@ func (s *Server) handleMediaTagAutocomplete(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"suggestions": suggestions,
 		"q":           q,
+	})
+}
+
+// handleMediaTagMerge V8：POST /api/media/tag/merge — 合并标签。
+// 请求体: { source_tag, target_tag }
+// 把所有 source_tag 的记录改为 target_tag（INSERT OR IGNORE 处理冲突），然后删除 source_tag。
+func (s *Server) handleMediaTagMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		SourceTag string `json:"source_tag"`
+		TargetTag string `json:"target_tag"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.SourceTag == "" || req.TargetTag == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source_tag and target_tag required"})
+		return
+	}
+	if req.SourceTag == req.TargetTag {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source and target must be different"})
+		return
+	}
+	// 复用 RenameTag 逻辑
+	count, err := s.store.RenameTag(r.Context(), uid, req.SourceTag, req.TargetTag)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"source_tag":    req.SourceTag,
+		"target_tag":    req.TargetTag,
+		"merged_count":  count,
 	})
 }
 
