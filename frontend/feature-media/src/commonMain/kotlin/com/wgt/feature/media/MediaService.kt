@@ -5940,6 +5940,39 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/storage-trend-extended — 扩展存储趋势（环比+同比）。 */
+    suspend fun getStorageTrendExtended(months: Int = 12): List<StorageTrendExtended>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-trend-extended?months=$months") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["months"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    StorageTrendExtended(
+                        month = o["month"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        momGrowth = o["mom_growth"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        yoyGrowth = o["yoy_growth"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageTrendExtended FAILED: ${e.message}")
+            null
+        }
+    }
+
+    data class StorageTrendExtended(
+        val month: String,
+        val count: Int,
+        val bytes: Long,
+        val momGrowth: Double,
+        val yoyGrowth: Double
+    )
+
     /**
      * V23：media-coverage 响应体。
      *

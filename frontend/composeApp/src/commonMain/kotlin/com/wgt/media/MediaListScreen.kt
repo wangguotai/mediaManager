@@ -1353,6 +1353,60 @@ private fun MyTabContent(
             }
         }
 
+        // V8：增长趋势详细卡片（环比+同比）
+        var trendExt by remember { mutableStateOf<List<MediaService.StorageTrendExtended>?>(null) }
+        LaunchedEffect(Unit) { trendExt = MediaService.getStorageTrendExtended(6) }
+        trendExt?.let { months ->
+            if (months.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "增长趋势",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        months.takeLast(6).forEach { m ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    m.month,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "${m.count} 项",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                val arrow = if (m.momGrowth >= 0) "↑" else "↓"
+                                val color = if (m.momGrowth >= 0)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    MaterialTheme.colorScheme.primary
+                                val growthStr = kotlin.math.round(m.momGrowth * 10.0) / 10.0
+                                Text(
+                                    "$arrow ${growthStr}%",
+                                    fontSize = 11.sp,
+                                    color = color
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：存储洞察卡片（最老+最大）
         var extreme by remember { mutableStateOf<MediaService.ExtremeMedia?>(null) }
         LaunchedEffect(Unit) { extreme = MediaService.getExtremeMedia() }
