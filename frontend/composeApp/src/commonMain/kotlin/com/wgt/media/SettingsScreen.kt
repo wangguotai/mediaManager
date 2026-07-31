@@ -1475,6 +1475,93 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // 深度存储分析卡片 —— 调 /api/media/storage-deep-analysis 的 by_year_type 矩阵，
+            // 按"年份 → 图片 N MB + 视频 N MB"展示最近 3 年的存储分布。与上方"近似重复"互补：
+            // 那个找冗余，这个看时间维度分布。与完整性报告/存储健康度同款 LaunchedEffect 拉取。
+            var storageDeep by remember { mutableStateOf<MediaService.StorageDeepAnalysis?>(null) }
+            var storageDeepLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                storageDeep = MediaService.getStorageDeepAnalysis()
+                storageDeepLoading = false
+            }
+            SectionTitle("📊 深度存储分析", iconRes = Res.drawable.ic_info)
+            if (storageDeepLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageDeep == null) {
+                Text(
+                    "无法获取深度存储分析",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageDeep!!.byYearType.isEmpty()) {
+                Text(
+                    "暂无媒体数据",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                // 年份按字符串降序（4 位年份同字典序），取最近 3 年。
+                val years = storageDeep!!.byYearType.keys.sortedDescending().take(3)
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    years.forEach { year ->
+                        val typeMap = storageDeep!!.byYearType[year].orEmpty()
+                        val img = typeMap["IMAGE"]
+                        val vid = typeMap["VIDEO"]
+                        val lp = typeMap["LIVE_PHOTO"]
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "$year 年",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.width(56.dp)
+                            )
+                            Text(
+                                "图片 ${img?.count ?: 0} · ${formatBytesToMB((img?.bytes ?: 0L).toDouble())} MB",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "视频 ${vid?.count ?: 0} · ${formatBytesToMB((vid?.bytes ?: 0L).toDouble())} MB",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        // 动态照片若该年有数据则补一行（与图片/视频同口径，次要展示）。
+                        if (lp != null && (lp.count > 0 || lp.bytes > 0L)) {
+                            Text(
+                                "　　动态照片 ${lp.count} · ${formatBytesToMB(lp.bytes.toDouble())} MB",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                modifier = Modifier.padding(start = 56.dp, bottom = 4.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "合计 ${storageDeep!!.totalCount} 个 · ${formatBytesToMB(storageDeep!!.totalBytes.toDouble())} MB",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V22：归档建议卡片 —— 调 /api/media/archive-suggest 显示冷数据 + 大视频归档候选，
             // 列出每项文件名 / 大小 / 归档年龄，并给出可释放空间汇总。
             // 放在"完整性报告"之后、\"数据概览\"之前。

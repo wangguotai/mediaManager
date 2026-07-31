@@ -6000,6 +6000,97 @@ object MediaService {
     }
 
     /**
+     * 深度存储分析——单个交叉格（年份×类型 或 大小段×类型）的计数与字节数。
+     *
+     * 与后端 [handleStorageDeepAnalysis] 的 typeStat `{count, bytes}` 对齐。
+     * [bytes] 用 Long（后端 int64）。前端展示时除以 1MB 换算。
+     */
+    data class TypeStat(
+        val count: Int,
+        val bytes: Long
+    )
+
+    /**
+     * 深度存储分析结果——对应后端 [handleStorageDeepAnalysis] 响应。
+     *
+     * 后端结构：
+     * ```
+     * { "by_year_type":  { "<year>": { "IMAGE":{count,bytes}, "VIDEO":..., "LIVE_PHOTO":... } },
+     *   "by_size_type":  { "small|medium|large|xlarge": { "<type>":{count,bytes} } },
+     *   "total":         { "count":N, "bytes":B, "mb":double } }
+     * ```
+     * 年份键为字符串（如 "2026"），类型键为 IMAGE/VIDEO/LIVE_PHOTO（后端已为每个年份补齐
+     * 三种主类型零值槽，前端直接按固定类型维度渲染即可）。[byYearType] 保留解析得到的
+     * 全部年份；设置页仅展示前 3 年，但数据层不截断以兼顾将来扩展。
+     *
+     * @param byYearType 年份 → 类型 → 该格统计
+     * @param bySizeType 大小段 → 类型 → 该格统计（本卡片暂不展示，留作扩展）
+     * @param totalCount 全部媒体计数（后端 total.count）
+     * @param totalBytes 全部媒体字节数（后端 total.bytes）
+     */
+    data class StorageDeepAnalysis(
+        val byYearType: Map<String, Map<String, TypeStat>>,
+        val bySizeType: Map<String, Map<String, TypeStat>> = emptyMap(),
+        val totalCount: Int = 0,
+        val totalBytes: Long = 0L
+    )
+
+    /**
+     * GET /api/media/storage-deep-analysis — 深度存储分析（年份×类型 / 大小段×类型 二维矩阵）。
+     *
+     * 后端对当前用户未软删媒体做两套交叉分桶：
+     * - by_year_type：按 CreatedAt UTC 年份 × IMAGE/VIDEO/LIVE_PHOTO，便于"每年图片/视频各占多少"。
+     * - by_size_type：按 small(<1MB)/medium(1-10MB)/large(10-100MB)/xlarge(>100MB) × 类型。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaDuplicatesSimilar] 同款，feature-media 无
+     * serialization 编译器插件）。年份键顺序不保证，调用方按需排序（设置页取最近 3 年）。
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理。鉴权头由 defaultRequest 统一注入。
+     *
+     * @return 深度分析结果；失败返回 null
+     */
+    suspend fun getStorageDeepAnalysis(): StorageDeepAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-deep-analysis")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // 解析交叉矩阵：外层 key→桶名/年份，内层 key→类型，值→{count,bytes}
+                fun parseMatrix(obj: JsonObject?): Map<String, Map<String, TypeStat>> {
+                    if (obj == null) return emptyMap()
+                    val out = LinkedHashMap<String, MutableMap<String, TypeStat>>()
+                    for ((bucket, typeMapEl) in obj) {
+                        val typeMap = typeMapEl.jsonObject
+                        val inner = LinkedHashMap<String, TypeStat>()
+                        for ((type, statEl) in typeMap) {
+                            val s = statEl.jsonObject
+                            inner[type] = TypeStat(
+                                count = s["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                                bytes = s["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                            )
+                        }
+                        out[bucket] = inner
+                    }
+                    return out
+                }
+                val byYearType = parseMatrix(o["by_year_type"]?.jsonObject)
+                val bySizeType = parseMatrix(o["by_size_type"]?.jsonObject)
+                val total = o["total"]?.jsonObject
+                StorageDeepAnalysis(
+                    byYearType = byYearType,
+                    bySizeType = bySizeType,
+                    totalCount = total?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = total?.get("bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else {
+                logger.info("MediaService", "getStorageDeepAnalysis status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageDeepAnalysis FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/stat-summary — 一站式统计汇总。
      *
      * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
