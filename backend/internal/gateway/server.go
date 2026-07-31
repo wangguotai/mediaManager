@@ -354,6 +354,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-clone", s.handleAlbumBatchClone)
 	// V14：相册媒体数量排行（按相册内媒体数倒序，返回哪些相册照片最多）。
 	s.mux.HandleFunc("/api/media/album/count-ranking", s.handleAlbumCountRanking)
+	// V19：相册统计摘要（总相册数+总照片数+平均每相册照片数+最大/最小相册）。
+	s.mux.HandleFunc("/api/media/album/stats-summary", s.handleAlbumStatsSummary)
 	// V15：相册活动时间线（每个相册最近一次有媒体加入/其成员最新上传时间，
 	// 按该时间倒序）。与 count-ranking 互补：后者看相册"大小"，本端点看相册"活跃度"。
 	s.mux.HandleFunc("/api/media/album/activity", s.handleAlbumActivity)
@@ -6938,6 +6940,70 @@ func (s *Server) handleAlbumCountRanking(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ranking":      ranking,
 		"total_albums": len(albums),
+	})
+}
+
+// handleAlbumStatsSummary V19：GET /api/media/album/stats-summary — 相册统计摘要。
+// 汇总当前用户全部相册：总相册数、总照片数（所有相册 media_ids 之和）、平均每相册
+// 照片数、媒体数最多的相册与最少的相册（仅 id+name+count）。
+//
+// 设计取舍：
+//   - 与 count-ranking 的区别：count-ranking 返回全部相册的完整排行列表，本端点只
+//     返回聚合数字 + 极值相册，面向首页/概览卡片，载荷小、前端无需再排序取极值。
+//   - total_media 为各相册 MediaIDs 长度之和；同一 media 被多相册收录时会重复计数，
+//     这与 count-ranking、“all-summary 的 media_count 之和”口径一致，均为相册视图下的
+//     “相册内照片数”而非去重后的“媒体库照片数”，避免本端点为去重额外拉全量媒体。
+//   - avg_per_album 计算到小数（float64）；无相册时为 0，max/min_album 为 nil。
+func (s *Server) handleAlbumStatsSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	type albumExt struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+
+	totalAlbums := len(albums)
+	totalMedia := 0
+	var maxAlbum, minAlbum *albumExt
+	for _, a := range albums {
+		count := len(a.MediaIDs)
+		totalMedia += count
+		cur := &albumExt{ID: a.ID, Name: a.Name, Count: count}
+		if maxAlbum == nil || count > maxAlbum.Count {
+			maxAlbum = cur
+		}
+		if minAlbum == nil || count < minAlbum.Count {
+			minAlbum = cur
+		}
+	}
+
+	var avgPerAlbum float64
+	if totalAlbums > 0 {
+		avgPerAlbum = float64(totalMedia) / float64(totalAlbums)
+	}
+
+	// max/minAlbum 为指针，无相册时为 nil；直接放入 map 让 JSON 编码为 null。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_albums":  totalAlbums,
+		"total_media":   totalMedia,
+		"avg_per_album": avgPerAlbum,
+		"max_album":     maxAlbum,
+		"min_album":     minAlbum,
 	})
 }
 
