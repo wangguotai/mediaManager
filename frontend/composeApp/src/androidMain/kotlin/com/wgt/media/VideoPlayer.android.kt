@@ -5,6 +5,7 @@ import android.net.Uri
 import android.widget.VideoView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -145,10 +147,35 @@ internal actual fun VideoPlayer(
         }
     }
 
+    // V7：手势进度调节状态
+    var seekStartPos by remember { mutableFloatStateOf(0f) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            // V7：水平拖动手势调节进度
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { seekStartPos = positionMs },
+                    onHorizontalDrag = { _, dragAmount ->
+                        val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                        val deltaMs = (dragAmount / widthPx) * durationMs
+                        val newPos = (seekStartPos + deltaMs).coerceIn(0f, durationMs)
+                        seeking = true
+                        positionMs = newPos
+                    },
+                    onDragEnd = {
+                        videoView.seekTo(positionMs.toInt())
+                        seekStartPos = 0f
+                        seeking = false
+                    },
+                    onDragCancel = {
+                        seekStartPos = 0f
+                        seeking = false
+                    }
+                )
+            }
     ) {
         // 视频画面
         AndroidView(
