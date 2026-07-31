@@ -3005,6 +3005,32 @@ fun MediaGridItem(
                 }
             }
 
+            // 媒体类型徽章：左上角半透明圆角标签，区分 图片(IMG/蓝) / 视频(VID/红) / Live(LIVE/绿)。
+            // 优先级 Live > Video > Image：Live Photo 即使 type=IMAGE 也标 LIVE。
+            // 选中态下水平右移 32dp 避开左上角的勾选圆圈，未选中时贴左上角显示；
+            // 渲染先于勾选圆，z-order 在下层，二者不重叠且互不遮挡。
+            val (typeBadgeText, typeBadgeColor) = when {
+                media.is_live_photo -> "LIVE" to Color(0xFF43A047)
+                isVideo -> "VID" to Color(0xFFE53935)
+                else -> "IMG" to Color(0xFF2196F3)
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = if (isSelected) 32.dp else 6.dp, top = 6.dp)
+                    .background(typeBadgeColor.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    typeBadgeText,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
             // 选中状态指示器（角落勾选）
             if (isSelected) {
                 Box(
