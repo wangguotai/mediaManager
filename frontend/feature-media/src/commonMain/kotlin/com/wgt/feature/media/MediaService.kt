@@ -3611,22 +3611,24 @@ object MediaService {
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与
-     * [created_at]（上传时间）之差，统计上传相对拍摄的延迟分布。响应结构：
+     * [created_at]（上传时间）之差，统计上传相对拍摄的延迟分布。响应结构（与后端
+     * [handleMediaTimeAnalysis] 对齐）：
      *
-     * `{avg_delay_minutes, same_day_count, total, delay_distribution:
-     *   {under_1h, h1_24, d1_7, over_7d}}`
+     * `{total, skipped_unknown, avg_delay_seconds, max_delay_seconds,
+     *   delay_buckets: {lt_1h, 1h_24h, 1d_7d, gt_7d}, same_day_count, same_day_ratio}`
      *
-     * - [avgDelayMinutes] 平均延迟（分钟，Double，1 天=1440.0）。无有效样本时为 0.0。
-     * - [sameDayCount] 当天上传（delay < 24h）的项数。
-     * - [total] 参与统计的媒体总数。
-     * - [buckets] 延迟分布四档（顺序固定，含 0 档）：&lt;1h / 1-24h / 1-7d / &gt;7d。
+     * - [total] 参与统计的有效媒体数（taken_at≠0）。
+     * - [skippedUnknown] 跳过拍摄时间未知的媒体数（taken_at=0）。
+     * - [avgDelaySeconds] / [maxDelaySeconds] 平均/最大延迟（**秒**，Double）。
+     *   前端按需换算为分钟/小时/天展示。负延迟（时钟异常）不计入 avg/max 但保留计数。
+     * - [buckets] 延迟分布四档（顺序固定，int64）：&lt;1h / 1-24h / 1-7d / &gt;7d。
+     * - [sameDayCount] 拍摄与上传落在同一 UTC 日期的数量。
+     * - [sameDayRatio] same_day_count / total，total=0 时为 0。
      *
-     * 后端尚未实现该端点时返回 HTTP 404 → 解析路径走 `else null`，调用方静默
-     * 跳过卡片渲染（与 [getUploadPatternAnalysis] 同语义：区分"成功但空"与"失败"）。
-     * total=0（无样本）也返回 null，避免渲染无意义的零分布。
+     * total=0（无有效样本）或请求异常时返回 null，调用方静默跳过卡片渲染
+     * （与 [getUploadPatternAnalysis] 同语义：区分"成功但空"与"失败"）。
      *
-     * count 均为后端 int64（永不为 JSON null），用 `?: 0` 安全默认；
-     * avg_delay_minutes 为 double（永不为 JSON null），用 `?: 0.0` 安全默认。
+     * count/ratio 均为后端 int64/double（永不为 JSON null），用 `?: 0` / `?: 0.0` 安全默认。
      */
     suspend fun getMediaTimeAnalysis(): MediaTimeAnalysis? {
         return try {
@@ -3637,20 +3639,23 @@ object MediaService {
                 val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
                 val total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
                 if (total == 0) return null
-                val dist = obj["delay_distribution"]?.jsonObject
+                val dist = obj["delay_buckets"]?.jsonObject
                 // 解析延迟分布四档——固定键，缺失时按 0 渲染。
                 fun bucket(key: String): Int =
                     dist?.get(key)?.jsonPrimitive?.intOrNull ?: 0
                 MediaTimeAnalysis(
-                    avgDelayMinutes = obj["avg_delay_minutes"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
-                    sameDayCount = obj["same_day_count"]?.jsonPrimitive?.intOrNull ?: 0,
                     total = total,
+                    skippedUnknown = obj["skipped_unknown"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgDelaySeconds = obj["avg_delay_seconds"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    maxDelaySeconds = obj["max_delay_seconds"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
                     buckets = DelayBuckets(
-                        under1h = bucket("under_1h"),
-                        h1To24 = bucket("h1_24"),
-                        d1To7 = bucket("d1_7"),
-                        over7d = bucket("over_7d")
-                    )
+                        under1h = bucket("lt_1h"),
+                        h1To24 = bucket("1h_24h"),
+                        d1To7 = bucket("1d_7d"),
+                        over7d = bucket("gt_7d")
+                    ),
+                    sameDayCount = obj["same_day_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    sameDayRatio = obj["same_day_ratio"]?.jsonPrimitive?.doubleOrNull ?: 0.0
                 )
             } else null
         } catch (e: Exception) {
@@ -3659,7 +3664,7 @@ object MediaService {
         }
     }
 
-    /** V22：延迟分布四档（<1h / 1-24h / 1-7d / >7d）。 */
+    /** V22：延迟分布四档（<1h / 1-24h / 1-7d / >7d，与后端 delay_buckets 对齐）。 */
     data class DelayBuckets(
         val under1h: Int,
         val h1To24: Int,
@@ -3667,12 +3672,15 @@ object MediaService {
         val over7d: Int
     )
 
-    /** V22：上传 vs 拍摄延迟分析结果（平均延迟 + 同日上传数 + 总数 + 四档分布）。 */
+    /** V22：上传 vs 拍摄延迟分析结果（秒级 avg/max + 四档分布 + 同日统计 + 总数）。 */
     data class MediaTimeAnalysis(
-        val avgDelayMinutes: Double,
-        val sameDayCount: Int,
         val total: Int,
-        val buckets: DelayBuckets
+        val skippedUnknown: Int,
+        val avgDelaySeconds: Double,
+        val maxDelaySeconds: Double,
+        val buckets: DelayBuckets,
+        val sameDayCount: Int,
+        val sameDayRatio: Double
     )
 
     /**

@@ -1887,17 +1887,21 @@ private fun MyTabContent(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("上传延迟", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(modifier = Modifier.height(8.dp))
-                    // 平均延迟：分钟<60 显示分钟，否则换算为小时/天，便于阅读。
+                    // 平均延迟：秒→可读单位。<60s 秒、<3600s 分钟、<86400s 小时、否则天。
                     // commonMain 无 String.format，沿用 toString().take 截断一位小数。
-                    val avgMin = ta.avgDelayMinutes
+                    val avgSec = ta.avgDelaySeconds
                     val avgStr = when {
-                        avgMin < 60.0 -> "${avgMin.toInt()} 分钟"
-                        avgMin < 1440.0 -> {
-                            val s = (avgMin / 60.0).toString()
+                        avgSec < 60.0 -> "${avgSec.toInt()} 秒"
+                        avgSec < 3600.0 -> {
+                            val s = (avgSec / 60.0).toString()
+                            "${s.take(s.indexOf('.') + 2)} 分钟"
+                        }
+                        avgSec < 86400.0 -> {
+                            val s = (avgSec / 3600.0).toString()
                             "${s.take(s.indexOf('.') + 2)} 小时"
                         }
                         else -> {
-                            val s = (avgMin / 1440.0).toString()
+                            val s = (avgSec / 86400.0).toString()
                             "${s.take(s.indexOf('.') + 2)} 天"
                         }
                     }
@@ -1914,7 +1918,9 @@ private fun MyTabContent(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("📅 同日上传", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("${ta.sameDayCount} 项",
+                        // 同日比例按百分比展示一位小数（commonMain 无 String.format，take 截断）。
+                        val ratioStr = (ta.sameDayRatio * 100.0).toString()
+                        Text("${ta.sameDayCount} 项（${ratioStr.take(ratioStr.indexOf('.') + 2)}%）",
                             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
                     }
                     Spacer(modifier = Modifier.height(8.dp))
