@@ -4338,4 +4338,69 @@ object MediaService {
             null
         }
     }
+
+    /**
+     * V22：GET /api/media/storage-health — 存储健康度评估。
+     *
+     * 后端综合重复率、配额占用、数据新鲜度（age）算出一个 0-100 的 [StorageHealth.score]
+     * 与字母等级 [StorageHealth.grade]（A/B/C/D），并给出可操作 [StorageHealth.suggestions]。
+     * 设置页"存储健康度"卡片据此渲染：大字号评分+等级、3 条比例条、建议列表。
+     *
+     * 后端响应结构：
+     * ```
+     * { "score": 82, "grade": "B",
+     *   "duplicate_rate": 0.12,   // 0.0-1.0
+     *   "quota_usage": 0.65,      // 0.0-1.0
+     *   "age_score": 0.30,        // 0.0-1.0（越低越"冷"）
+     *   "suggestions": ["...", "..."] }
+     * ```
+     *
+     * 解析宽容：缺字段回退零值/空列表，保证 UI 永不崩。HTTP 非 200 或网络异常返回 null，
+     * 调用方按空态提示"无法获取存储健康度"。鉴权头由 defaultRequest 统一注入，此处不再
+     * 重复附加（与 [getStatSummary] 同款）。
+     *
+     * @return 健康度对象；失败返回 null
+     */
+    suspend fun getStorageHealth(): StorageHealth? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-health")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                StorageHealth(
+                    score = o["score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = o["grade"]?.jsonPrimitive?.contentOrNull ?: "",
+                    duplicateRate = o["duplicate_rate"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    quotaUsage = o["quota_usage"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    ageScore = o["age_score"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    suggestions = o["suggestions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: emptyList()
+                )
+            } else {
+                logger.info("MediaService", "getStorageHealth status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageHealth FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V22：storage-health 响应体。
+     *
+     * @param score 0-100 健康度评分（越高越好）
+     * @param grade 字母等级 A/B/C/D（后端给定，前端按首字母着色）
+     * @param duplicateRate 重复率 0.0-1.0
+     * @param quotaUsage 配额占用 0.0-1.0
+     * @param ageScore 数据温度 0.0-1.0（越低越冷/越陈旧）
+     * @param suggestions 改善建议文本列表
+     */
+    data class StorageHealth(
+        val score: Int,
+        val grade: String,
+        val duplicateRate: Double,
+        val quotaUsage: Double,
+        val ageScore: Double,
+        val suggestions: List<String>
+    )
 }

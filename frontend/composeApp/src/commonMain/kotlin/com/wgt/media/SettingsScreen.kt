@@ -896,6 +896,110 @@ fun SettingsScreen(
                     }
                 }
             }
+            // V22：存储健康度卡片 —— 调 /api/media/storage-health 显示评分+等级+比例条+建议。
+            // 放在"数据概览"前，作为首屏健康度总览；后端即将提供该端点。
+            var storageHealth by remember { mutableStateOf<MediaService.StorageHealth?>(null) }
+            var storageHealthLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                storageHealth = MediaService.getStorageHealth()
+                storageHealthLoading = false
+            }
+            SectionTitle("存储健康度", iconRes = Res.drawable.ic_info)
+            if (storageHealthLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageHealth == null) {
+                Text(
+                    "无法获取存储健康度",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val sh = storageHealth!!
+                // 等级颜色：A 绿 / B 蓝 / C 橙 / D 红（默认灰）
+                val gradeColor = when (sh.grade.firstOrNull()?.uppercaseChar()) {
+                    'A' -> Color(0xFF4CAF50)
+                    'B' -> Color(0xFF2196F3)
+                    'C' -> Color(0xFFFF9800)
+                    'D' -> Color(0xFFF44336)
+                    else -> MaterialTheme.colorScheme.outline
+                }
+                // 大字号评分 + 等级徽章
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${sh.score}",
+                        fontSize = 40.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = gradeColor
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(gradeColor)
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            sh.grade.ifEmpty { "-" },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "分",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 3 条比例条：重复率 / 配额使用 / 数据温度
+                HealthRatioBar(
+                    label = "重复率",
+                    fraction = sh.duplicateRate.coerceIn(0.0, 1.0).toFloat(),
+                    barColor = Color(0xFFEF5350)
+                )
+                HealthRatioBar(
+                    label = "配额使用",
+                    fraction = sh.quotaUsage.coerceIn(0.0, 1.0).toFloat(),
+                    barColor = Color(0xFF42A5F5)
+                )
+                HealthRatioBar(
+                    label = "数据温度",
+                    fraction = sh.ageScore.coerceIn(0.0, 1.0).toFloat(),
+                    barColor = Color(0xFFFFA726)
+                )
+                // 建议列表：每条一行 📌 + 文字
+                if (sh.suggestions.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    sh.suggestions.forEach { tip ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Text("📌", style = MaterialTheme.typography.bodyMedium)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                tip,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
             // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
             // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。
@@ -1482,6 +1586,50 @@ private fun StatCell(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
+    }
+}
+
+/**
+ * 存储健康度卡片（V22）的比例条：标签 + 百分比在上一行，下方一条灰底满宽槽内
+ * 按 [fraction] 填充 [barColor] 色条。用于重复率/配额使用/数据温度三项 0.0-1.0 指标。
+ *
+ * [fraction] 会被 [coerceIn] 限制到 0..1，避免后端越界值撑破布局。
+ */
+@Composable
+private fun HealthRatioBar(
+    label: String,
+    fraction: Float,
+    barColor: Color
+) {
+    val clamped = fraction.coerceIn(0f, 1f)
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "${(clamped * 100).toInt()}%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        Spacer(modifier = Modifier.height(3.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(clamped)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(barColor)
+            )
+        }
     }
 }
 
