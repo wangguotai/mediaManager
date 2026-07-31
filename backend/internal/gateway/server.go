@@ -198,6 +198,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
 	// V9：按月统计媒体数量（所有媒体 created_at 的 YYYY-MM 分布，不限时间范围）。
 	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
+	// 按年份统计媒体（每年的 count + bytes + 按月分布 + 按类型分布）。默认当年（UTC），?year=2026 指定。
+	s.mux.HandleFunc("/api/media/media-year-stats", s.handleMediaYearStats)
 	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
@@ -6757,6 +6759,97 @@ func (s *Server) handleMediaYearlyReview(w http.ResponseWriter, r *http.Request)
 		"last_upload":  lastISO,
 		"top_day":      map[string]any{"date": topDay, "count": topCount},
 		"favorites":    favoriteCount,
+	})
+}
+
+// handleMediaYearStats GET /api/media/media-year-stats — 按年份统计媒体。
+//
+// 返回指定年份的媒体统计（基于 created_at 的 UTC 年份筛选）：
+//   - total_count / total_bytes：该年媒体总量
+//   - by_month：1..12 各月的 count 与 bytes，固定 12 项（含 0），便于前端无脑渲染
+//   - by_type：按媒体类型分桶 {IMAGE, VIDEO, LIVE}（LIVE 含 LIVE_PHOTO）
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。?year=2026 默认当前 UTC 年，非法回退当年。
+func (s *Server) handleMediaYearStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// year 默认当年（UTC），?year=2026 指定；非法回退到当年。
+	now := time.Now().UTC()
+	year := now.Year()
+	if q := r.URL.Query().Get("year"); q != "" {
+		if y, err := strconv.Atoi(q); err == nil && y >= 1970 && y <= 9999 {
+			year = y
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 聚合：按月分桶（count+bytes）+ 类型分桶 + 总量。
+	var totalCount, totalBytes int64
+	var imageCount, videoCount, liveCount int64
+	monthCounts := make([]int64, 12) // index 0=1月
+	monthBytes := make([]int64, 12)
+
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		if ca.Year() != year {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+
+		idx := int(ca.Month()) - 1
+		if idx >= 0 && idx < 12 {
+			monthCounts[idx]++
+			monthBytes[idx] += m.Size
+		}
+
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			imageCount++
+		case "VIDEO":
+			videoCount++
+		case "LIVE_PHOTO", "LIVE":
+			liveCount++
+		}
+	}
+
+	// by_month 固定 12 项，count=0 的也返回，便于前端无脑渲染。
+	byMonth := make([]map[string]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		byMonth = append(byMonth, map[string]any{
+			"month": i + 1,
+			"count": monthCounts[i],
+			"bytes": monthBytes[i],
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"year":         year,
+		"total_count":  totalCount,
+		"total_bytes":  totalBytes,
+		"by_month":     byMonth,
+		"by_type": map[string]any{
+			"IMAGE": imageCount,
+			"VIDEO": videoCount,
+			"LIVE":  liveCount,
+		},
 	})
 }
 
