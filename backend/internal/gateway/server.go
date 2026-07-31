@@ -277,6 +277,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/auto-cover", s.handleAlbumAutoCover)
 	// V8：按日期排序相册内媒体
 	s.mux.HandleFunc("/api/media/album/sort-by-date", s.handleAlbumSortByDate)
+	// V8：批量给所有无封面相册自动设封面（用第一个 media）
+	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：自动清理重复媒体
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
@@ -4409,6 +4411,52 @@ func (s *Server) handleAlbumSortByDate(w http.ResponseWriter, r *http.Request) {
 		"status":    "success",
 		"order":     req.Order,
 		"reordered": len(newOrder),
+	})
+}
+
+// handleAlbumAutoCoverAll V8：POST /api/media/album/auto-cover-all — 批量给
+// 当前用户所有无封面相册自动设封面（用每个相册的第一个 media）。
+// 无请求体。跳过已有封面或空相册。返回 { status, updated_count, total_albums }。
+func (s *Server) handleAlbumAutoCoverAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+	total := len(albums)
+	updated := 0
+	for _, album := range albums {
+		// 已有封面则跳过
+		if album.CoverMediaID != "" {
+			continue
+		}
+		// 空相册无法设封面
+		if len(album.MediaIDs) == 0 {
+			continue
+		}
+		if err := provider.SetAlbumCover(uid, album.ID, album.MediaIDs[0]); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":    err.Error(),
+				"album_id": album.ID,
+			})
+			return
+		}
+		updated++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"updated_count": updated,
+		"total_albums":  total,
 	})
 }
 
