@@ -965,6 +965,57 @@ object MediaService {
     }
 
     /**
+     * V8：所有相册摘要项（GET /api/media/album/all-summary 的单条）。
+     *
+     * 与后端 [handleAlbumAllSummary] 返回字段对齐：
+     * id / name / media_count / cover_media_id / created_at（unix 秒）。
+     * 与 [Album] 的区别在于带 [createdAt]，用于"相册概览"卡片按创建时间排序展示。
+     */
+    data class AlbumSummaryItem(
+        val id: String,
+        val name: String,
+        val mediaCount: Int = 0,
+        val coverMediaId: String? = null,
+        val createdAt: Long = 0L
+    )
+
+    /**
+     * V8：GET /api/media/album/all-summary — 获取当前用户所有相册的摘要列表。
+     *
+     * 后端返回 `{"albums":[{id,name,media_count,cover_media_id,created_at}], "total":N}`。
+     * 每条仅含计数与封面 ID（不含 media_ids 列表），比 [getAlbums] 更轻，
+     * "我的"Tab 的"相册概览"卡片用它做概览展示。
+     *
+     * @return 相册摘要列表；后端不可用/出错时返回空列表（卡片据此显示空态）
+     */
+    suspend fun getAllAlbumsSummary(): List<AlbumSummaryItem> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/all-summary")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["albums"]?.jsonArray ?: JsonArray(emptyList())
+                arr.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    AlbumSummaryItem(
+                        id = id,
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        coverMediaId = o["cover_media_id"]?.jsonPrimitive?.contentOrNull,
+                        createdAt = o["created_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAllAlbumsSummary FAILED: ${e::class.simpleName} ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头

@@ -1385,6 +1385,89 @@ private fun MyTabContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V8：相册概览卡片（GET /api/media/album/all-summary）
+        // 在设备列表后、分享列表前展示所有相册摘要：相册名 + N 项 + 封面信息，最多 5 个。
+        var albumSummary by remember { mutableStateOf<List<MediaService.AlbumSummaryItem>?>(null) }
+        LaunchedEffect(Unit) { albumSummary = MediaService.getAllAlbumsSummary() }
+        albumSummary?.let { albums ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "相册概览",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (albums.isEmpty()) {
+                        Text(
+                            "暂无相册",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        // 按创建时间倒序（新的在前），最多展示 5 个
+                        albums
+                            .sortedByDescending { it.createdAt }
+                            .take(5)
+                            .forEach { album ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("🖼️", fontSize = 18.sp)
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                album.name.ifEmpty { "未命名相册" },
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                "${album.mediaCount} 项" +
+                                                    (album.coverMediaId?.let { " · 封面 ${it.take(8)}…" }
+                                                        ?: " · 无封面"),
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        if (album.createdAt > 0) formatPreviewDate(album.createdAt * 1000) else "",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                }
+                            }
+                        if (albums.size > 5) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "共 ${albums.size} 个相册，仅显示前 5 个",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // V7：分享链接列表卡片
         var shares by remember { mutableStateOf<List<MediaService.ShareInfo>?>(null) }
         LaunchedEffect(Unit) { shares = MediaService.listShares() }
