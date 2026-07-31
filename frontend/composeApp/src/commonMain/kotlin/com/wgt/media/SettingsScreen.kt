@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wgt.platform.logger.logger
@@ -1182,6 +1183,101 @@ fun SettingsScreen(
                                 tip,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // V25：媒体错误检查卡片 —— 调 /api/media/media-error-check 显示损坏文件列表。
+            // 放在"存储健康度"之后、"数据概览"之前。展示检查项数 + 错误数 + 错误列表（仅
+            // totalErrors>0 时显示列表），并提供"重新检查"按钮触发重新拉取。
+            var mediaErrorReport by remember { mutableStateOf<MediaService.MediaErrorReport?>(null) }
+            var mediaErrorLoading by remember { mutableStateOf(true) }
+            val mediaErrorScope = rememberCoroutineScope()
+            LaunchedEffect(Unit) {
+                mediaErrorReport = MediaService.getMediaErrorCheck()
+                mediaErrorLoading = false
+            }
+            SectionTitle("🔍 媒体错误检查", iconRes = Res.drawable.ic_info)
+            if (mediaErrorLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (mediaErrorReport == null) {
+                Text(
+                    "无法获取媒体错误检查结果",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val report = mediaErrorReport!!
+                // 汇总行：检查 N 项，发现 M 个错误
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "检查 ${report.totalChecked} 项，发现 ${report.totalErrors} 个错误",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            mediaErrorLoading = true
+                            mediaErrorScope.launch {
+                                mediaErrorReport = MediaService.getMediaErrorCheck()
+                                mediaErrorLoading = false
+                            }
+                        }
+                    ) { Text("重新检查", fontSize = 13.sp) }
+                }
+                // 错误列表：仅 totalErrors > 0 时显示，每行 filename + error_type
+                if (report.totalErrors > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    report.errors.forEach { err ->
+                        val errorTypeText = when (err.errorType) {
+                            "zero_size" -> "数据损坏"
+                            "missing_file" -> "文件缺失"
+                            "size_mismatch" -> "大小不符"
+                            else -> err.errorType.ifEmpty { "未知" }
+                        }
+                        val errorColor = when (err.errorType) {
+                            "missing_file" -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.tertiary
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Text(
+                                "⚠️",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = errorColor
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                err.filename.ifEmpty { err.mediaId },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                errorTypeText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = errorColor,
+                                fontWeight = FontWeight.Medium
                             )
                         }
                     }

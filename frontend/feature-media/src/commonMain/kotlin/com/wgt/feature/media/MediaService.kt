@@ -5481,6 +5481,93 @@ object MediaService {
     )
 
     /**
+     * V25：GET /api/media/media-error-check — 媒体错误检查（损坏文件检测）。
+     *
+     * 后端逐条扫描未软删媒体，按优先级判定三种错误（单条 media 至多记录一种）：
+     * zero_size（DB Size<=0）/ missing_file（磁盘文件缺失或 stat 失败）/ size_mismatch
+     * （磁盘大小与 DB 不符）。设置页"媒体错误检查"卡片据此渲染检查项数、错误数与错误列表。
+     *
+     * 后端响应结构：
+     * ```
+     * { "errors": [
+     *     { "media_id": "...", "filename": "...", "error_type": "zero_size|missing_file|size_mismatch",
+     *       "db_size": 1234, "disk_size": 1300 }   // disk_size 仅 size_mismatch 时携带（omitempty）
+     *   ],
+     *   "total_errors": 2,
+     *   "total_checked": 100 }
+     * ```
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization 编译器插件）。
+     * `disk_size` 为后端 `int64` + `omitempty`——仅在 size_mismatch 时出现，其余情况 key 缺失或
+     * JSON null，需用 [JsonNull] 守卫后再取 `.jsonPrimitive`（直接 `?.jsonPrimitive` 会抛
+     * IllegalStateException）。HTTP 非 200 或网络异常返回 null，调用方按"无法获取"提示。
+     * 鉴权头由 defaultRequest 统一注入（与 [getStorageHealth] 同款，此处不重复附加）。
+     *
+     * @return 错误检查报告；失败返回 null
+     */
+    suspend fun getMediaErrorCheck(): MediaErrorReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-error-check")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaErrorReport(
+                    errors = o["errors"]?.jsonArray?.mapNotNull { item ->
+                        val e = item.jsonObject
+                        MediaError(
+                            mediaId = e["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                            filename = e["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                            errorType = e["error_type"]?.jsonPrimitive?.contentOrNull ?: "",
+                            dbSize = e["db_size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                            diskSize = e["disk_size"]?.let {
+                                if (it is JsonNull) null else it.jsonPrimitive?.longOrNull
+                            }
+                        )
+                    } ?: emptyList(),
+                    totalErrors = o["total_errors"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalChecked = o["total_checked"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaErrorCheck status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaErrorCheck FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V25：media-error-check 响应体。
+     *
+     * @param errors 损坏文件列表（每条含 media_id/filename/error_type/db_size，size_mismatch 时带 disk_size）
+     * @param totalErrors 错误总数
+     * @param totalChecked 本次检查的媒体总数
+     */
+    data class MediaErrorReport(
+        val errors: List<MediaError>,
+        val totalErrors: Int,
+        val totalChecked: Int
+    )
+
+    /**
+     * V25：单条媒体错误。`diskSize` 仅在 [errorType] == "size_mismatch" 时由后端携带，
+     * 其余错误类型为 null。
+     *
+     * @param mediaId 媒体 ID
+     * @param filename 文件名
+     * @param errorType 错误类型：zero_size / missing_file / size_mismatch
+     * @param dbSize DB 记录大小（字节）
+     * @param diskSize 磁盘实际大小（字节），仅 size_mismatch 时非 null
+     */
+    data class MediaError(
+        val mediaId: String,
+        val filename: String,
+        val errorType: String,
+        val dbSize: Long,
+        val diskSize: Long?
+    )
+
+    /**
      * V23：GET /api/media/media-coverage — 媒体覆盖率分析。
      *
      * 后端按 4 个维度统计媒体覆盖情况：已标签、已收藏、已分享、在相册；并给出未标签数。
