@@ -438,6 +438,10 @@ func (s *Server) registerRoutes() {
 	// 智能洞察报告——自动分析用户媒体库并给出可操作建议（重复/存储分布/上传习惯/
 	// 未标签/最大相册/存储健康度），一次请求合并多个分析维度，供前端"洞察"卡片展示。
 	s.mux.HandleFunc("/api/media/insights", s.handleMediaInsights)
+	// 相册智能建议——基于未分类媒体（不在任何相册中的 media）按日期/类型/标签分组，
+	// 推荐可创建的相册（如"2026年7月的照片"、"视频合集"、"旅行标签"等），供前端
+	// "推荐相册"功能展示并让用户一键创建。只读端点。
+	s.mux.HandleFunc("/api/media/album-suggestions", s.handleAlbumSuggestions)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -10599,6 +10603,245 @@ func (s *Server) handleMimeTypeStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mimes": stats,
 		"total": len(stats),
+	})
+}
+
+// handleAlbumSuggestions GET /api/media/album-suggestions — 相册智能建议。
+//
+// 基于当前用户**未分类**的媒体（不在任何相册中的 media），按日期/类型/标签分组，
+// 生成可一键创建的相册建议，供前端"推荐相册"功能展示。只读端点，不修改任何数据。
+//
+// 建议生成规则（每条建议携带 name/media_count/type/preview_ids）：
+//
+//	a) by_month  — 按"年-月"分组（优先 taken_at 拍摄时间，回退 created_at 上传时间，
+//	   UTC 归一化）；count >= 3 的月份产出一条建议，形如"2026年7月的照片"。
+//	b) by_type   — 所有 VIDEO 类型未分类媒体合并为一条"视频合集"（count >= 1 即产出）。
+//	c) by_tag    — 遍历用户所有标签（ListAllTags + SearchMediaByTag），对每个标签统计
+//	   其关联媒体中"未分类"的数量；count >= 2 的标签产出一条"旅行标签"形建议。
+//
+// 数据来源：media 来自 store.ListMediaByUser（已过滤 deleted）；相册归属来自
+// mediaSvc.albumStoreProvider.ListAlbums（Album.MediaIDs 汇总成 in-album 集合）。
+// albumStoreProvider 未配置时无法判定归属，此时把所有未删除媒体视为未分类
+// （保守建议——宁可多建议也不漏），而非 501：相册归属是过滤维度，非本端点核心能力。
+//
+// 响应:
+//
+//	{
+//	  "suggestions": [
+//	    {"name":"2026年7月的照片","media_count":12,"type":"by_month","preview_ids":["a","b","c","d"]},
+//	    {"name":"视频合集","media_count":5,"type":"by_type","preview_ids":[...]},
+//	    {"name":"旅行","media_count":8,"type":"by_tag","preview_ids":[...]}
+//	  ],
+//	  "total": 3
+//	}
+//
+// preview_ids 最多 4 个（取该组内最新的 media，按 created_at 降序），供前端渲染封面缩略图。
+func (s *Server) handleAlbumSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// in-album 集合：出现在任一相册 MediaIDs 中的 media_id。
+	// albumStoreProvider 未配置时为空集合 → 所有未删除媒体均视为未分类（保守建议）。
+	inAlbum := make(map[string]struct{})
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		for _, a := range provider.ListAlbums(uid) {
+			for _, id := range a.MediaIDs {
+				inAlbum[id] = struct{}{}
+			}
+		}
+	}
+
+	// 筛选未分类媒体（不在任何相册中且未软删；ListMediaByUser 已过滤 deleted，此处防御式再跳过）。
+	uncategorized := make([]*storage.Media, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		if _, ok := inAlbum[m.ID]; ok {
+			continue
+		}
+		uncategorized = append(uncategorized, m)
+	}
+
+	// albumSuggestion 是单条建议的响应结构。
+	type albumSuggestion struct {
+		Name       string   `json:"name"`
+		MediaCount int      `json:"media_count"`
+		Type       string   `json:"type"`
+		PreviewIDs []string `json:"preview_ids"`
+	}
+	suggestions := make([]albumSuggestion, 0)
+
+	// previewIDs 从一组 media（按 created_at 降序）取前 maxPreview 个 id。
+	const maxPreview = 4
+	previewIDs := func(group []*storage.Media) []string {
+		if len(group) == 0 {
+			return []string{}
+		}
+		// 复制后排序，避免改乱原切片（分组内仍需原顺序做后续聚合）。
+		sorted := make([]*storage.Media, len(group))
+		copy(sorted, group)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+		})
+		n := len(sorted)
+		if n > maxPreview {
+			n = maxPreview
+		}
+		ids := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			ids = append(ids, sorted[i].ID)
+		}
+		return ids
+	}
+
+	// 中文月份名（1..12 → "1月".."12月"），用于"YYYY年M月的照片"命名。
+	monthName := func(m int) string {
+		// int → 中文数字月份；1-9 用单字，10-12 直接拼接。
+		cnNums := []string{"", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"}
+		if m >= 1 && m <= 12 {
+			return cnNums[m] + "月"
+		}
+		return fmt.Sprintf("%d月", m)
+	}
+
+	// mediaTime 取一条 media 的代表性时间（优先拍摄时间 taken_at，回退上传时间 created_at），
+	// UTC 归一化（codebase 时间聚合约定）。taken_at 为 int64 毫秒时间戳，0 表未知。
+	mediaTime := func(m *storage.Media) time.Time {
+		if m.TakenAt > 0 {
+			return time.UnixMilli(m.TakenAt).UTC()
+		}
+		return m.CreatedAt.UTC()
+	}
+
+	// a) by_month：按"年-月"分组，count >= 3 产出建议。
+	type monthBucket struct {
+		year  int
+		month int
+		media []*storage.Media
+	}
+	byMonth := make(map[string]*monthBucket)
+	for _, m := range uncategorized {
+		t := mediaTime(m)
+		key := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
+		b, ok := byMonth[key]
+		if !ok {
+			b = &monthBucket{year: t.Year(), month: int(t.Month())}
+			byMonth[key] = b
+		}
+		b.media = append(b.media, m)
+	}
+	// 月份键按时间倒序（最近月份优先），便于前端展示"最近的未分类照片"在前。
+	monthKeys := make([]string, 0, len(byMonth))
+	for k := range byMonth {
+		monthKeys = append(monthKeys, k)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(monthKeys)))
+	for _, k := range monthKeys {
+		b := byMonth[k]
+		if len(b.media) < 3 {
+			continue
+		}
+		suggestions = append(suggestions, albumSuggestion{
+			Name:       fmt.Sprintf("%d年%s的照片", b.year, monthName(b.month)),
+			MediaCount: len(b.media),
+			Type:       "by_month",
+			PreviewIDs: previewIDs(b.media),
+		})
+	}
+
+	// b) by_type：所有 VIDEO 类型未分类媒体合并为"视频合集"（count >= 1）。
+	var videos []*storage.Media
+	for _, m := range uncategorized {
+		if strings.ToUpper(m.Type) == "VIDEO" {
+			videos = append(videos, m)
+		}
+	}
+	if len(videos) >= 1 {
+		suggestions = append(suggestions, albumSuggestion{
+			Name:       "视频合集",
+			MediaCount: len(videos),
+			Type:       "by_type",
+			PreviewIDs: previewIDs(videos),
+		})
+	}
+
+	// c) by_tag：遍历用户所有标签，对每个标签统计其关联媒体中"未分类"的数量（count >= 2）。
+	// 用 uncategorized 的 id 集合做 O(1) 成员判定，避免对每个标签重新过滤。
+	uncatIDs := make(map[string]struct{}, len(uncategorized))
+	for _, m := range uncategorized {
+		uncatIDs[m.ID] = struct{}{}
+	}
+	type tagBucket struct {
+		tag   string
+		ids   []string
+		count int
+	}
+	var tagBuckets []tagBucket
+	if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+		for _, tag := range tags {
+			if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+				b := tagBucket{tag: tag}
+				for _, id := range ids {
+					if _, ok := uncatIDs[id]; ok {
+						b.ids = append(b.ids, id)
+						b.count++
+					}
+				}
+				if b.count >= 2 {
+					tagBuckets = append(tagBuckets, b)
+				}
+			}
+		}
+	}
+	// 标签建议按命中未分类媒体数倒序（最有"成册价值"的标签在前），count 相同按标签名升序。
+	sort.Slice(tagBuckets, func(i, j int) bool {
+		if tagBuckets[i].count != tagBuckets[j].count {
+			return tagBuckets[i].count > tagBuckets[j].count
+		}
+		return tagBuckets[i].tag < tagBuckets[j].tag
+	})
+	for _, b := range tagBuckets {
+		// preview_ids 从该标签命中的未分类 media 中取（需映射回 *storage.Media 以按 created_at 排序）。
+		tagMedia := make([]*storage.Media, 0, len(b.ids))
+		for _, id := range b.ids {
+			// 从 uncategorized 线性查找；标签命中数通常较小，O(n) 可接受，
+			// 且避免再建一张 id→*Media 索引（uncategorized 已在内存中）。
+			for _, m := range uncategorized {
+				if m.ID == id {
+					tagMedia = append(tagMedia, m)
+					break
+				}
+			}
+		}
+		suggestions = append(suggestions, albumSuggestion{
+			Name:       b.tag,
+			MediaCount: b.count,
+			Type:       "by_tag",
+			PreviewIDs: previewIDs(tagMedia),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
 	})
 }
 
