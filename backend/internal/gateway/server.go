@@ -471,8 +471,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/activity", s.handleAlbumActivity)
 	// V15：存储清理建议（重复+大文件+旧文件+孤立文件分析，估算可回收空间）。
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
-	// V25：存储健康度评分（综合重复率/孤立率/配额使用率/冷数据占比给出 0-100 分+等级+建议）。
+	// V25：存储健康度评分（综合重复率/孤立率/配额使用率/冷数据占比给出 0-100 分+等级+建议）
 	s.mux.HandleFunc("/api/media/storage-health", s.handleStorageHealth)
+	// 深度存储分析：按年份×类型矩阵 + 按大小分段×类型交叉分析（三维度）。
+	// 与 storage-breakdown（类型+月份分桶）/ by-size-range（仅大小分桶单维度）互补：
+	// 本端点做二维交叉，便于前端展示"每年图片/视频各占多少"、"大文件主要是视频还是图片"。
+	s.mux.HandleFunc("/api/media/storage-deep-analysis", s.handleStorageDeepAnalysis)
 	// 仪表盘（合并存储健康度+quick_stats+upload_streak+recent_activity+tag_top3+coverage 为一次请求），
 	// 供前端首页/我的Tab 一次拉取渲染全部关键卡片，区别于 stat-summary（偏数据概览）与 full-report（年度报告）。
 	s.mux.HandleFunc("/api/media/dashboard", s.handleMediaDashboard)
@@ -12094,6 +12098,162 @@ func (s *Server) handleStorageHealth(w http.ResponseWriter, r *http.Request) {
 		"quota_bytes":     defaultQuotaBytes,
 		"suggestions":     suggestions,
 		"user_id":         uid,
+	})
+}
+
+// handleStorageDeepAnalysis GET /api/media/storage-deep-analysis — 深度存储分析。
+//
+// 三维度交叉分析，单次请求返回两张二维交叉表，供前端存储分析页做"按年看类型构成"
+// 与"按大小看类型构成"的可视化。区别于 storage-breakdown（类型×月份单维分桶，不含大小）、
+// by-size-range（大小单维分桶，不含类型）、storage-stats（仅类型汇总），本端点做类型×年份与
+// 类型×大小两张交叉矩阵。
+//
+// 数据源：s.store.ListMediaByUser（当前用户全部 media，含软删行，handler 内跳过 m.Deleted）。
+// 时间口径：按 CreatedAt（上传时间）的 UTC 年份分桶，与 storage-trend-extended 口径一致；
+// 不用 TakenAt（EXIF 拍摄时间），因为该字段可空（0=未知），且与同步端点排序口径保持统一。
+// 大小分桶阈值与 by-size-range 保持一致：small <1MB、medium 1-10MB、large 10-100MB、xlarge >100MB，
+// 便于与该端点结果对齐校验；这里额外按类型二次拆分。
+//
+// 响应结构：
+//
+//	{
+//	  "by_year_type": {
+//	    "2024": {"IMAGE":{"count":N,"bytes":N}, "VIDEO":{...}, "LIVE_PHOTO":{...}},
+//	    "2025": {...}
+//	  },
+//	  "by_size_type": {
+//	    "small":  {"IMAGE":{"count":N,"bytes":N}, "VIDEO":{...}, ...},
+//	    "medium": {...},
+//	    "large":  {...},
+//	    "xlarge": {...}
+//	  },
+//	  "total": {"count": N, "bytes": N, "mb": float}
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageDeepAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// typeStat 记录单个交叉格的 count+bytes，用于两张矩阵的复用单元。
+	type typeStat struct {
+		Count int   `json:"count"`
+		Bytes int64 `json:"bytes"`
+	}
+	// ensureType 返回 map 中给定类型的条目，不存在则初始化（含三种主类型的零值槽），
+	// 保证每张矩阵每个类型键都出现（即便 count=0），便于前端按固定类型维度对齐渲染。
+	ensureType := func(m map[string]*typeStat, t string) *typeStat {
+		if st, ok := m[t]; ok {
+			return st
+		}
+		st := &typeStat{}
+		m[t] = st
+		return st
+	}
+	// normalizeType 把空字符串归一为 "IMAGE"（与 storage-breakdown 同口径），其余原样保留。
+	normalizeType := func(t string) string {
+		if t == "" {
+			return "IMAGE"
+		}
+		return t
+	}
+
+	byYearType := make(map[string]map[string]*typeStat) // year -> type -> stat
+	bySizeType := make(map[string]map[string]*typeStat) // sizeBucket -> type -> stat
+	var totalCount int
+	var totalBytes int64
+
+	const mb = 1024 * 1024
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+		t := normalizeType(m.Type)
+
+		// (a) 年份 × 类型矩阵：按 CreatedAt UTC 年份。
+		year := m.CreatedAt.UTC().Format("2006")
+		yt, ok := byYearType[year]
+		if !ok {
+			yt = make(map[string]*typeStat)
+			byYearType[year] = yt
+		}
+		ts := ensureType(yt, t)
+		ts.Count++
+		ts.Bytes += m.Size
+
+		// (b) 大小分段 × 类型矩阵：与 by-size-range 同阈值。
+		// small <1MB、medium 1-10MB、large 10-100MB、xlarge >100MB。
+		sizeMB := m.Size / mb
+		var bucket string
+		switch {
+		case sizeMB < 1:
+			bucket = "small"
+		case sizeMB < 10:
+			bucket = "medium"
+		case sizeMB < 100:
+			bucket = "large"
+		default:
+			bucket = "xlarge"
+		}
+		st, ok := bySizeType[bucket]
+		if !ok {
+			st = make(map[string]*typeStat)
+			bySizeType[bucket] = st
+		}
+		ss := ensureType(st, t)
+		ss.Count++
+		ss.Bytes += m.Size
+	}
+
+	// 确保两张矩阵的三种主类型在每个出现的桶里都有槽（即便该类型无数据）。
+	// by_year_type：每个年份补齐 IMAGE/VIDEO/LIVE_PHOTO 零值槽。
+	mainTypes := []string{"IMAGE", "VIDEO", "LIVE_PHOTO"}
+	for _, yt := range byYearType {
+		for _, t := range mainTypes {
+			ensureType(yt, t)
+		}
+	}
+	// by_size_type：每个存在的大小桶补齐三种主类型零值槽，并补齐缺失的大小桶（4 档全返）。
+	allBuckets := []string{"small", "medium", "large", "xlarge"}
+	for _, b := range allBuckets {
+		st, ok := bySizeType[b]
+		if !ok {
+			st = make(map[string]*typeStat)
+			bySizeType[b] = st
+		}
+		for _, t := range mainTypes {
+			ensureType(st, t)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"by_year_type": byYearType,
+		"by_size_type": bySizeType,
+		"total": map[string]any{
+			"count": totalCount,
+			"bytes": totalBytes,
+			"mb":    float64(totalBytes) / float64(mb),
+		},
 	})
 }
 
