@@ -28,6 +28,8 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -698,18 +700,40 @@ private fun AlbumDetailPage(
                             }
                         )
                     }
-                    // V8：按日期排序按钮
+                    // V8：排序下拉菜单（按日期↓ / 按日期↑）
                     val sortScope = rememberCoroutineScope()
-                    IconButton(onClick = {
-                        sortScope.launch {
-                            if (MediaService.sortAlbumByDate(albumId, "desc")) {
-                                viewModel.loadAlbumDetail(albumId)
-                            }
-                        }
-                    }) {
+                    var showSortMenu by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showSortMenu = true }) {
                         Icon(
                             painterResource(Res.drawable.ic_sort),
-                            contentDescription = "按日期排序"
+                            contentDescription = "排序"
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("按日期 ↓（新→旧）") },
+                            onClick = {
+                                showSortMenu = false
+                                sortScope.launch {
+                                    if (MediaService.sortAlbumByDate(albumId, "desc")) {
+                                        viewModel.loadAlbumDetail(albumId)
+                                    }
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("按日期 ↑（旧→新）") },
+                            onClick = {
+                                showSortMenu = false
+                                sortScope.launch {
+                                    if (MediaService.sortAlbumByDate(albumId, "asc")) {
+                                        viewModel.loadAlbumDetail(albumId)
+                                    }
+                                }
+                            }
                         )
                     }
                     // V7 §2.3：分享相册按钮
