@@ -161,6 +161,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-trend", s.handleMediaStorageTrend)
 	// V10：扩展存储趋势（按月 count+bytes+环比 mom_growth+同比 yoy_growth）
 	s.mux.HandleFunc("/api/media/storage-trend-extended", s.handleStorageTrendExtended)
+	// 标签使用趋势（最近 N 个月每月新增标签数）。复用 audit_log 中 action="tag"
+	// 记录的 created_at 按月分组，语义与 weekly-summary 的 new_tags_count 一致。
+	s.mux.HandleFunc("/api/media/tag-trend", s.handleTagTrend)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
@@ -9793,6 +9796,100 @@ func (s *Server) handleMediaQueryStats(w http.ResponseWriter, r *http.Request) {
 		"total_searches": len(entries),
 		"top_keywords":   topKeywords,
 		"search_trend":   trend,
+	})
+}
+
+// handleTagTrend 返回最近 N 个月每月新增标签数（标签使用趋势）。
+//
+// GET /api/media/tag-trend?months=6
+//
+// 数据来源：audit_log 中 action="tag" 的记录（与 weekly-summary 的
+// new_tags_count 同口径）。ListAuditLogs 无法按时间范围查询，取较大 limit
+// （5000）在内存按 created_at 的 UTC 月份分组。月份窗口为 [本月往前推
+// months-1 个月 .. 本月]，含本月，共 months 个槽位，时间升序。
+//
+// 响应:
+//
+//	{
+//	  months: [{month: "2026-03", new_tags: N}, ...], // 升序，含空月 count=0
+//	  total_new_tags: N                              // 窗口内合计
+//	}
+//
+// 未登录 401；store 不可用 503；months<1 默认 6，>24 收敛到 24。
+func (s *Server) handleTagTrend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	months := 6
+	if v := r.URL.Query().Get("months"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			months = n
+		}
+	}
+	if months < 1 {
+		months = 6
+	}
+	if months > 24 {
+		months = 24
+	}
+
+	// 取较大 limit 拉足够记录在内存按时间窗口过滤（ListAuditLogs 无法按时间范围查询）。
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 月份窗口：[本月往前推 months-1 个月 .. 本月]，UTC，共 months 个槽位，升序。
+	now := time.Now().UTC()
+	thisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	startMonth := thisMonth.AddDate(0, -(months - 1), 0)
+
+	type monthEntry struct {
+		Month   string `json:"month"`
+		NewTags int    `json:"new_tags"`
+	}
+	trend := make([]monthEntry, 0, months)
+	idxByMonth := make(map[string]int, months)
+	for i := 0; i < months; i++ {
+		ms := startMonth.AddDate(0, i, 0)
+		key := ms.Format("2006-01")
+		idxByMonth[key] = i
+		trend = append(trend, monthEntry{Month: key, NewTags: 0})
+	}
+
+	totalNewTags := 0
+	for _, a := range logs {
+		if a.Action != "tag" {
+			continue
+		}
+		ca := a.CreatedAt.UTC()
+		monthStart := time.Date(ca.Year(), ca.Month(), 1, 0, 0, 0, 0, time.UTC)
+		if monthStart.Before(startMonth) {
+			continue // 超出窗口
+		}
+		key := monthStart.Format("2006-01")
+		idx, ok := idxByMonth[key]
+		if !ok {
+			continue
+		}
+		trend[idx].NewTags++
+		totalNewTags++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"months":         trend,
+		"total_new_tags": totalNewTags,
 	})
 }
 
