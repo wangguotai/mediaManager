@@ -272,6 +272,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/auto-cover", s.handleAlbumAutoCover)
 	// V8：按日期排序相册内媒体
 	s.mux.HandleFunc("/api/media/album/sort-by-date", s.handleAlbumSortByDate)
+	// V8：自动清理重复媒体
+	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -4294,6 +4296,74 @@ func (s *Server) handleAlbumSortByDate(w http.ResponseWriter, r *http.Request) {
 		"status":    "success",
 		"order":     req.Order,
 		"reordered": len(newOrder),
+	})
+}
+
+// handleMediaDuplicateCleanup V8：POST /api/media/duplicate-cleanup — 自动清理重复媒体。
+// 按 SHA256 找重复（非空），每组保留最早的，其余软删。
+func (s *Server) handleMediaDuplicateCleanup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 SHA256 分组（跳过空 SHA256 和已删除）
+	bySHA := make(map[string][]*storage.Media)
+	for _, m := range mediaList {
+		if m.Deleted || m.SHA256 == "" {
+			continue
+		}
+		bySHA[m.SHA256] = append(bySHA[m.SHA256], m)
+	}
+
+	// 对每组（>1个），保留最早的，其余软删
+	type deletedItem struct {
+		ID       string `json:"media_id"`
+		Filename string `json:"filename"`
+		SHA256   string `json:"sha256"`
+	}
+	var deleted []deletedItem
+	for sha, group := range bySHA {
+		if len(group) < 2 {
+			continue
+		}
+		// 找最早的（保留）
+		oldest := group[0]
+		for _, m := range group[1:] {
+			if m.CreatedAt.Before(oldest.CreatedAt) {
+				oldest = m
+			}
+		}
+		// 软删其余
+		for _, m := range group {
+			if m.ID == oldest.ID {
+				continue
+			}
+			m.Deleted = true
+			if err := s.store.UpdateMedia(r.Context(), m); err == nil {
+				deleted = append(deleted, deletedItem{ID: m.ID, Filename: m.Filename, SHA256: sha[:16]})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "success",
+		"groups_found":   len(bySHA),
+		"deleted_count":  len(deleted),
+		"deleted":        deleted,
 	})
 }
 
