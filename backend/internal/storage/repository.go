@@ -392,6 +392,17 @@ func (s *Store) PurgeExpiredTrash(ctx context.Context, maxAge time.Duration) (in
 	return int(n), nil
 }
 
+// PurgeAllTrashForUser V8：物理删除当前用户的所有已软删媒体。
+func (s *Store) PurgeAllTrashForUser(ctx context.Context, userID string) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM "media" WHERE deleted = 1 AND user_id = ?`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("purge all trash for user: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；

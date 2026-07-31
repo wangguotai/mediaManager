@@ -228,3 +228,31 @@ func decodeBatchIDs(w http.ResponseWriter, r *http.Request) (*batchIDsRequest, b
 	}
 	return &req, true
 }
+
+// handleMediaEmptyTrash V8：POST /api/media/empty-trash — 清空当前用户回收站。
+// 物理删除所有 deleted=1 的媒体记录（磁盘文件遗留由清理任务处理）。
+func (s *Server) handleMediaEmptyTrash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "trash is not configured"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+
+	count, err := s.store.PurgeAllTrashForUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "success",
+		"purged_count": count,
+	})
+}

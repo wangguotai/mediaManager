@@ -209,6 +209,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/trash", s.handleTrashList)
 	s.mux.HandleFunc("/api/media/restore", s.handleMediaRestore)
 	s.mux.HandleFunc("/api/media/purge", s.handleMediaPurge)
+	// V8：清空回收站（物理删除当前用户的所有已软删媒体）
+	s.mux.HandleFunc("/api/media/empty-trash", s.handleMediaEmptyTrash)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
