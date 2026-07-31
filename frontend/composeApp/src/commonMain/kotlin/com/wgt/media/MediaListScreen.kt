@@ -3635,6 +3635,10 @@ private fun MyTabContent(
                             // 后端已按 count DESC 返回，此处取 top 5 渲染奖牌排行。null/空静默跳过。
                             var mostUsedTags by remember { mutableStateOf<List<MediaService.MostUsedTag>?>(null) }
                             LaunchedEffect(Unit) { mostUsedTags = MediaService.getMostUsedTags(limit = 5) }
+                            // V23：标签影响力排行（调 GET /api/media/tag-power-score），用于"标签影响力"区。
+                            // 后端已按 power_score DESC 返回，此处取 top 5。null/空静默跳过。
+                            var tagPower by remember { mutableStateOf<List<MediaService.TagPowerItem>?>(null) }
+                            LaunchedEffect(Unit) { tagPower = MediaService.getTagPowerScore() }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -3678,6 +3682,53 @@ private fun MyTabContent(
                                                         ) {
                                                             Text(
                                                                 "$medal #${t.tagName} (${t.count} 项 · ${formatBytesToMB(t.totalBytes)})",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                        }
+                                                    }
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                }
+                                            }
+                                            // V23：标签影响力排行区——展示 power_score 最高的 5 个标签，
+                                            // 每行 ⚡ #tag (score N · N 项 · X%)。数据来自 getTagPowerScore()
+                                            // （后端已按 power_score DESC 返回）；null（请求失败/未铺量）或
+                                            // 空则静默跳过，不影响下方标签列表。评分一位小数沿用 take 截断约定
+                                            // （commonMain 无 String.format）。满覆盖率/整数分直接取整显示。
+                                            tagPower?.let { powers ->
+                                                if (powers.isNotEmpty()) {
+                                                    Text(
+                                                        "标签影响力",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    powers.take(5).forEach { p ->
+                                                        // power_score 取一位小数（commonMain 无 String.format，
+                                                        // 沿用 take 截断约定，与月均增长/totalMB 等处一致）。
+                                                        // 整数分值（indexOf('.')<0）则原样显示，避免空截断。
+                                                        val rawScore = p.powerScore.toString()
+                                                        val scoreStr = if (rawScore.indexOf('.') >= 0) {
+                                                            rawScore.take(rawScore.indexOf('.') + 2)
+                                                        } else rawScore
+                                                        // coverage_percent 同理一位小数。
+                                                        val rawCov = p.coveragePercent.toString()
+                                                        val covStr = if (rawCov.indexOf('.') >= 0) {
+                                                            rawCov.take(rawCov.indexOf('.') + 2)
+                                                        } else rawCov
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                "⚡ #${p.tagName} (score $scoreStr · ${p.mediaCount} 项 · ${covStr}%)",
                                                                 fontSize = 13.sp,
                                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                                 modifier = Modifier.weight(1f),

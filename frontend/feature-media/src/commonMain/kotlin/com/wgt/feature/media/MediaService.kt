@@ -4167,6 +4167,55 @@ object MediaService {
     )
 
     /**
+     * V23：GET /api/media/tag-power-score — 标签影响力排行。
+     *
+     * 后端按 power_score DESC 返回全部标签，每条含 tag_name、media_count（关联媒体数）、
+     * total_bytes（关联媒体总大小）、coverage_percent（覆盖用户总媒体的百分比）、
+     * power_score（影响力分 = media_count*2 + total_bytes_mb*0.1）。另返回 total_tags
+     * （用户全部标签数），前端目前仅消费 tags 列表渲染影响力排行区，取 top 5。
+     *
+     * 响应: `{tags: [{tag_name, media_count, total_bytes, coverage_percent, power_score}], total_tags}`。
+     *
+     * 解析沿用 [getMostUsedTags] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过排行区，不崩溃标签管理面板。
+     *
+     * @return 按 power_score DESC 排序的标签影响力列表（后端已排序，前端取 top 5）；失败返回 null
+     */
+    suspend fun getTagPowerScore(): List<TagPowerItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-power-score") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagPowerItem(
+                        tagName = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        coveragePercent = o["coverage_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        powerScore = o["power_score"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagPowerScore FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V23：标签影响力排行项（[getTagPowerScore] 返回）。 */
+    data class TagPowerItem(
+        val tagName: String,
+        val mediaCount: Int,
+        val totalBytes: Long,
+        val coveragePercent: Double,
+        val powerScore: Double
+    )
+
+    /**
      * V22：GET /api/media/tag-trend?months=6 — 标签使用趋势（每月新增标签数）。
      *
      * 后端返回 `{ months: [{month, new_tags}], total_new_tags }`：month 形如
