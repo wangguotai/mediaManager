@@ -1419,6 +1419,40 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/recent-uploads — 最近上传的媒体。 */
+    suspend fun getRecentUploads(): List<RecentUpload>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/recent-uploads") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["items"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    RecentUpload(
+                        id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = o["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getRecentUploads FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：最近上传项 */
+    data class RecentUpload(
+        val id: String,
+        val filename: String,
+        val type: String,
+        val size: Long,
+        val createdAt: String
+    )
+
     /** V8：GET /api/media/user-quota — 用户存储配额信息。 */
     suspend fun getUserQuota(): UserQuota? {
         return try {

@@ -1207,6 +1207,57 @@ private fun MyTabContent(
             }
         }
 
+        // V8：最近上传卡片
+        var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
+        LaunchedEffect(Unit) { recentUploads = MediaService.getRecentUploads() }
+        recentUploads?.let { uploads ->
+            if (uploads.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "最近上传",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        uploads.forEach { u ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        if (u.type == "VIDEO") "🎬" else "📷",
+                                        fontSize = 16.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        u.filename,
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                Text(
+                                    u.createdAt.take(10),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：标签云卡片
         var tagStats by remember { mutableStateOf<List<MediaService.TagStat>?>(null) }
         LaunchedEffect(Unit) { tagStats = MediaService.getTagStats() }
