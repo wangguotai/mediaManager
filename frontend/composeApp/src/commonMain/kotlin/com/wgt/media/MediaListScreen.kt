@@ -145,6 +145,8 @@ fun MediaListScreen(
     var shareLinkError by remember { mutableStateOf<String?>(null) }
     var showShareLinkConfig by remember { mutableStateOf(false) }
     var showBatchRenameDialog by remember { mutableStateOf(false) }
+    // V8：媒体详情对话框
+    var mediaInfoTarget by remember { mutableStateOf<String?>(null) }
 
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
@@ -218,7 +220,8 @@ fun MediaListScreen(
                         previewIndex = null
                         slideshowActive = true
                     },
-                    onRename = { media -> renameTarget = media }
+                    onRename = { media -> renameTarget = media },
+                    onShowInfo = { id -> mediaInfoTarget = id }
                 )
             } else {
                 // 点击的是视频但不知为何 previewIndex 被设置（理论上不会发生），关关闭
@@ -366,6 +369,14 @@ fun MediaListScreen(
                 showBatchRenameDialog = false
                 viewModel.batchRenameSelected(pattern)
             }
+        )
+    }
+
+    // V8：媒体详情对话框
+    mediaInfoTarget?.let { mediaId ->
+        MediaInfoDialog(
+            mediaId = mediaId,
+            onDismiss = { mediaInfoTarget = null }
         )
     }
 
@@ -1281,7 +1292,8 @@ fun ImagePreviewDialog(
     isFavorite: (MediaMetadata) -> Boolean = { false },
     onSlideshow: () -> Unit = {},
     onRename: (MediaMetadata) -> Unit = {},
-    onSetCover: (MediaMetadata) -> Unit = {}
+    onSetCover: (MediaMetadata) -> Unit = {},
+    onShowInfo: (String) -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -1352,7 +1364,7 @@ fun ImagePreviewDialog(
                             }
                         },
                         onLongPress = {
-                            // 长按图片：如果是 Live Photo，播放关联视频
+                            // 长按图片：如果是 Live Photo，播放关联视频；否则弹详情
                             val m = mediaList[page]
                             if (m.is_live_photo && m.live_photo_video_id.isNotEmpty()) {
                                 if (useBackendLoader) {
@@ -1376,6 +1388,11 @@ fun ImagePreviewDialog(
                                             )
                                         }
                                     }
+                                }
+                            } else {
+                                // V8：非 Live Photo 长按 → 弹媒体详情
+                                if (useBackendLoader) {
+                                    onShowInfo(m.id)
                                 }
                             }
                         }
@@ -3692,4 +3709,76 @@ fun BatchRenameDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         }
     )
+}
+
+/**
+ * V8：媒体详情对话框 — 调 /api/media/info/{id} 显示完整信息。
+ */
+@Composable
+fun MediaInfoDialog(
+    mediaId: String,
+    onDismiss: () -> Unit
+) {
+    var info by remember { mutableStateOf<MediaService.MediaInfo?>(null) }
+    LaunchedEffect(mediaId) { info = MediaService.getMediaInfo(mediaId) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("媒体详情") },
+        text = {
+            info?.let { i ->
+                Column {
+                    InfoRow("文件名", i.filename)
+                    InfoRow("类型", i.type)
+                    InfoRow("尺寸", "${i.width} × ${i.height}")
+                    val sizeStr = if (i.sizeMB >= 1) {
+                        val s = i.sizeMB.toString(); s.take(s.indexOf('.') + 3) + " MB"
+                    } else {
+                        val s = i.sizeKB.toString(); s.take(s.indexOf('.') + 3) + " KB"
+                    }
+                    InfoRow("大小", sizeStr)
+                    InfoRow("MIME", i.mime)
+                    if (i.sha256.isNotEmpty()) {
+                        InfoRow("SHA256", i.sha256.take(16) + "…")
+                    }
+                    InfoRow("上传时间", i.createdAt)
+                    if (i.takenAt > 0) {
+                        InfoRow("拍摄时间", formatPreviewDate(i.takenAt * 1000))
+                    }
+                }
+            } ?: run {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        )
+        Text(
+            value,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
 }

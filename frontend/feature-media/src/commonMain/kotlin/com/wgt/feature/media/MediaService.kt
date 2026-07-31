@@ -1320,6 +1320,52 @@ object MediaService {
     }
 
     /**
+     * V8：GET /api/media/info/{id} — 返回单个媒体详情。
+     */
+    suspend fun getMediaInfo(mediaId: String): MediaInfo? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/info/$mediaId") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaInfo(
+                    id = o["id"]?.jsonPrimitive?.contentOrNull ?: "",
+                    filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                    type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                    size = o["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    mime = o["mime"]?.jsonPrimitive?.contentOrNull ?: "",
+                    width = o["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                    height = o["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                    sha256 = o["sha256"]?.jsonPrimitive?.contentOrNull ?: "",
+                    createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: "",
+                    takenAt = o["taken_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaInfo FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V8：媒体详情 */
+    data class MediaInfo(
+        val id: String,
+        val filename: String,
+        val type: String,
+        val size: Long,
+        val mime: String,
+        val width: Int,
+        val height: Int,
+        val sha256: String,
+        val createdAt: String,
+        val takenAt: Long
+    ) {
+        val sizeKB: Double get() = size.toDouble() / 1024.0
+        val sizeMB: Double get() = sizeKB / 1024.0
+    }
+
+    /**
      * V8：POST /api/media/batch-rename — 批量重命名，返回结果。
      */
      suspend fun batchRename(
