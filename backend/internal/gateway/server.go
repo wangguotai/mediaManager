@@ -301,6 +301,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/empty-trash", s.handleMediaEmptyTrash)
 	// V8：批量恢复回收站媒体（单条 UPDATE，区别于逐条 /api/media/restore）
 	s.mux.HandleFunc("/api/media/batch-restore", s.handleMediaBatchRestore)
+	// V8：审计日志时间线（按时间倒序显示用户操作历史，含中文相对时间）。
+	s.mux.HandleFunc("/api/media/audit-timeline", s.handleAuditTimeline)
 	// V8：媒体标签系统
 	s.mux.HandleFunc("/api/media/tag/add", s.handleMediaTagAdd)
 	s.mux.HandleFunc("/api/media/tag/remove", s.handleMediaTagRemove)
@@ -4179,6 +4181,110 @@ func (s *Server) handleMediaRecentActivity(w http.ResponseWriter, r *http.Reques
 		"activities": activities,
 		"total":      len(activities),
 	})
+}
+
+// handleAuditTimeline V8：GET /api/media/audit-timeline
+// 返回当前用户的审计日志时间线（按 created_at 倒序，最近在前），
+// 每条附中文相对时间 relative_time（"3分钟前"/"1小时前"/"昨天"/"3天前"等），
+// 供前端"操作历史"时间线渲染。查询参数 ?limit=50（上限 200，<=0 回退默认 50）。
+//
+// 数据源 store.ListAuditLogs 已按 created_at DESC 排序，无需在此重排。
+// 返回: {"timeline":[{id,action,detail,media_id,created_at,relative_time}],"total":N}
+func (s *Server) handleAuditTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	limit := 50
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type item struct {
+		ID           string    `json:"id"`
+		Action       string    `json:"action"`
+		Detail       string    `json:"detail,omitempty"`
+		MediaID      string    `json:"media_id,omitempty"`
+		CreatedAt    time.Time `json:"created_at"`
+		RelativeTime string    `json:"relative_time"`
+	}
+
+	now := time.Now()
+	out := make([]item, 0, len(logs))
+	for _, a := range logs {
+		out = append(out, item{
+			ID:           a.ID,
+			Action:       a.Action,
+			Detail:       a.Detail,
+			MediaID:      a.MediaID,
+			CreatedAt:    a.CreatedAt,
+			RelativeTime: relativeTimeZh(now, a.CreatedAt),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"timeline": out,
+		"total":    len(out),
+	})
+}
+
+// relativeTimeZh 返回中文相对时间描述，参照点为 now。格式遵循前端时间线惯例：
+//   - 同一天内：<1分钟 "刚刚"，否则 "X分钟前" / "X小时前"
+//   - 昨天（自然日差 1 天）："昨天"
+//   - 近 7 天内："X天前"
+//   - 更早：回退到 "YYYY-MM-DD" 明确日期，避免"X周前/X月前"造成歧义。
+//
+// t 零值或晚于 now 时回退到 t 的 RFC3339 字符串，保证不崩。
+func relativeTimeZh(now, t time.Time) string {
+	if t.IsZero() {
+		return t.Format(time.RFC3339)
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		// 未来时间（时钟偏移等异常）回退绝对时间。
+		return t.Format("2006-01-02")
+	}
+
+	// 自然日差：用 Calendar 天数比较，"昨天" 严格指自然日差 1。
+	nowDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	tDay := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	dayDiff := int(nowDay.Sub(tDay).Hours() / 24)
+
+	switch {
+	case d < time.Minute:
+		return "刚刚"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "分钟前"
+	case dayDiff == 0:
+		return strconv.Itoa(int(d.Hours())) + "小时前"
+	case dayDiff == 1:
+		return "昨天"
+	case dayDiff < 7:
+		return strconv.Itoa(dayDiff) + "天前"
+	default:
+		return t.Format("2006-01-02")
+	}
 }
 
 // handleMediaStorageTrend V7：GET /api/media/storage-trend
