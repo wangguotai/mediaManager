@@ -144,6 +144,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
 	// V7：搜索建议（基于文件名前缀）
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
+	// V7：最近活动（合并最近上传/收藏/分享）
+	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V7：批量下载（zip）
@@ -2189,6 +2191,83 @@ func (s *Server) handleMediaSearchSuggestions(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"suggestions": suggestions,
 		"q":           q,
+	})
+}
+
+// handleMediaRecentActivity V7：GET /api/media/recent-activity
+// 合并最近上传/收藏/分享活动，按时间倒序返回（最多 20 条）。
+func (s *Server) handleMediaRecentActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	type activity struct {
+		Type      string `json:"type"`       // upload / favorite / share
+		MediaID   string `json:"media_id"`
+		Filename  string `json:"filename"`
+		Timestamp int64  `json:"timestamp"`
+		Detail    string `json:"detail"`
+	}
+
+	var activities []activity
+
+	// 1. 最近上传（取最近 10 个媒体）
+	mediaList, _ := s.store.ListMediaByUser(r.Context(), uid)
+	for i, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		activities = append(activities, activity{
+			Type:      "upload",
+			MediaID:   m.ID,
+			Filename:  m.Filename,
+			Timestamp: m.CreatedAt.Unix(),
+			Detail:    "上传了 " + m.Filename,
+		})
+		if i >= 9 {
+			break
+		}
+	}
+
+	// 2. 最近分享
+	if shares, err := s.store.ListShareTokensByUser(r.Context(), uid); err == nil {
+		for i, st := range shares {
+			activities = append(activities, activity{
+				Type:      "share",
+				MediaID:   st.Token,
+				Filename:  st.Token,
+				Timestamp: st.CreatedAt.Unix(),
+				Detail:    "创建了分享链接",
+			})
+			if i >= 4 {
+				break
+			}
+		}
+	}
+
+	// 按时间倒序排序
+	sort.Slice(activities, func(i, j int) bool {
+		return activities[i].Timestamp > activities[j].Timestamp
+	})
+
+	// 最多 20 条
+	if len(activities) > 20 {
+		activities = activities[:20]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activities": activities,
+		"total":      len(activities),
 	})
 }
 
