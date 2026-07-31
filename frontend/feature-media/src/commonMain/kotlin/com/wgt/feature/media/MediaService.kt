@@ -1047,6 +1047,68 @@ object MediaService {
     )
 
     /**
+     * 封面分析：GET /api/media/album-smart-cover?album_id=xxx。
+     *
+     * 后端对比当前封面与相册内所有媒体，按封面质量评分给出当前封面分数与推荐封面
+     * （含推荐原因），并标记是否建议更换（should_change）。前端用于"封面分析"弹窗：
+     * 展示当前 vs 推荐对比，用户确认后可一键应用推荐封面（复用 [setAlbumCover]）。
+     *
+     * 响应: `{current_cover: {id, score}, recommended: {id, score, reason}, should_change: bool}`。
+     * recommended 可为 null（如相册内仅一张图片时无推荐）。
+     *
+     * @param albumId 目标相册 id
+     * @return 分析结果；HTTP 非 200 / 异常返回 null（不抛，调用方按空态处理）
+     */
+    suspend fun getAlbumSmartCover(albumId: String): SmartCoverResult? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-smart-cover") {
+                parameter("album_id", albumId)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val current = obj["current_cover"]?.jsonObject
+                val rec = obj["recommended"]?.jsonObject
+                SmartCoverResult(
+                    currentCover = CoverInfo(
+                        id = current?.get("id")?.jsonPrimitive?.contentOrNull ?: "",
+                        score = current?.get("score")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        reason = current?.get("reason")?.jsonPrimitive?.contentOrNull
+                    ),
+                    recommended = rec?.let {
+                        CoverInfo(
+                            id = it["id"]?.jsonPrimitive?.contentOrNull ?: "",
+                            score = it["score"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                            reason = it["reason"]?.jsonPrimitive?.contentOrNull
+                        )
+                    },
+                    shouldChange = obj["should_change"]?.jsonPrimitive?.booleanOrNull ?: false
+                )
+            } else {
+                logger.info("MediaService", "getAlbumSmartCover status=${response.status} albumId=$albumId")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumSmartCover FAILED albumId=$albumId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 封面分析结果（与后端 album-smart-cover 响应对齐）。 */
+    data class SmartCoverResult(
+        val currentCover: CoverInfo,
+        val recommended: CoverInfo?,
+        val shouldChange: Boolean
+    )
+
+    /** 封面信息：媒体 id + 质量评分（0~100）+ 可选原因。 */
+    data class CoverInfo(
+        val id: String,
+        val score: Double,
+        val reason: String?
+    )
+
+    /**
      * 给整个相册的所有媒体批量打标签。
      *
      * POST /api/media/tag/batch-tag-album

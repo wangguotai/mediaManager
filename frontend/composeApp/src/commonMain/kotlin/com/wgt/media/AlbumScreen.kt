@@ -1127,6 +1127,24 @@ private fun AlbumDetailPage(
                             Text("🎯", fontSize = 20.sp)
                         }
                     }
+                    // 封面分析按钮 📊 — 弹出 Dialog 显示当前封面 vs 推荐封面对比，
+                    // 调 GET /api/media/album-smart-cover。shouldChange=true 时可一键应用推荐封面。
+                    var showCoverAnalysis by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showCoverAnalysis = true }) {
+                        Text("📊", fontSize = 20.sp)
+                    }
+                    if (showCoverAnalysis) {
+                        CoverAnalysisDialog(
+                            albumId = albumId,
+                            onDismiss = { showCoverAnalysis = false },
+                            onApplied = {
+                                // 应用推荐封面后刷新列表与详情，使新封面立即可见
+                                viewModel.loadAlbums(forceRefresh = true)
+                                viewModel.loadAlbumDetail(albumId)
+                            },
+                            onMessage = { msg -> viewModel.showErrorMessage(msg) }
+                        )
+                    }
                     // V12：给相册打标签按钮 🏷️ — 弹出对话框输入标签名，
                     // 调 batch-tag-album 给整个相册所有媒体批量打标签，成功后 Snackbar 提示数量。
                     var showTagAlbumDialog by remember { mutableStateOf(false) }
@@ -1467,6 +1485,169 @@ private fun ShareAlbumDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+/**
+ * 封面分析对话框 — 调 [MediaService.getAlbumSmartCover] 显示当前封面 vs 推荐封面对比。
+ *
+ * 进入时异步拉取分析结果（loading 态）；失败时显示错误提示。
+ * shouldChange=true 且有推荐封面时，显示"应用推荐"按钮——调 [MediaService.setAlbumCover]
+ * 落库，成功后回调 [onApplied]（刷新）并关闭对话框。
+ *
+ * @param albumId 目标相册 id
+ * @param onDismiss 关闭回调
+ * @param onApplied 成功应用推荐封面后的刷新回调
+ * @param onMessage 消息提示回调（成功/失败均走此通道，复用 showErrorMessage）
+ */
+@Composable
+private fun CoverAnalysisDialog(
+    albumId: String,
+    onDismiss: () -> Unit,
+    onApplied: () -> Unit,
+    onMessage: (String) -> Unit
+) {
+    var result by remember { mutableStateOf<MediaService.SmartCoverResult?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var applying by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(albumId) {
+        loading = true
+        result = MediaService.getAlbumSmartCover(albumId)
+        loading = false
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!applying) onDismiss() },
+        title = { Text("封面分析", fontWeight = FontWeight.Bold) },
+        text = {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                when {
+                    loading -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Text("分析中…", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    result == null -> {
+                        Text(
+                            "无法获取封面分析，请稍后重试",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    else -> {
+                        val r = result!!
+                        Column {
+                            // 当前封面
+                            Text(
+                                "当前封面",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "评分：${r.currentCover.score.toInt()}/100",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            // 推荐封面
+                            Text(
+                                "推荐封面",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            // recommended 是跨模块 public 属性，smart cast 不适用，故提取局部 val。
+                            // （feature-media 与 composeApp 不同模块，kotlin 跨模块 public API 属性禁 smart cast。）
+                            val rec = r.recommended
+                            if (rec != null) {
+                                Text(
+                                    "评分：${rec.score.toInt()}/100",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                rec.reason?.let { reason ->
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        reason,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (r.shouldChange) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            "💡 建议更换封面以获得更佳效果",
+                                            modifier = Modifier.padding(8.dp),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    "无推荐（相册内无可选封面）",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            // 仅当有推荐封面且 shouldChange=true 时显示"应用推荐"按钮
+            if (result != null && !loading && result!!.shouldChange && result!!.recommended != null) {
+                TextButton(
+                    enabled = !applying,
+                    onClick = {
+                        if (applying) return@TextButton
+                        val recId = result!!.recommended!!.id
+                        applying = true
+                        scope.launch {
+                            val ok = MediaService.setAlbumCover(albumId, recId)
+                            applying = false
+                            if (ok) {
+                                onMessage("已应用推荐封面")
+                                onApplied()
+                                onDismiss()
+                            } else {
+                                onMessage("应用失败")
+                            }
+                        }
+                    }
+                ) {
+                    if (applying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("应用推荐")
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !applying,
+                onClick = onDismiss
+            ) { Text("关闭") }
         }
     )
 }
