@@ -47,8 +47,13 @@ import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.draw.clip
 import com.wgt.media.BackendImageLoader
 import com.wgt.feature.media.MediaService
 import mediamanager.composeapp.generated.resources.Res
@@ -286,6 +291,11 @@ fun SettingsScreen(
     var showOpenClawDialog by remember { mutableStateOf(false) }
     val openClawViewModel = remember { OpenClawViewModel() }
 
+    // V9：年度回顾对话框状态
+    var showYearlyReview by remember { mutableStateOf(false) }
+    var yearlyReview by remember { mutableStateOf<MediaService.YearlyReview?>(null) }
+    var yearlyReviewYear by remember { mutableStateOf(2026) }
+
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
@@ -298,6 +308,20 @@ fun SettingsScreen(
         OpenClawCommandDialog(
             viewModel = openClawViewModel,
             onDismiss = { showOpenClawDialog = false }
+        )
+    }
+
+    // V9：年度回顾对话框——打开时加载数据，关闭时清空以便下次重新拉取
+    if (showYearlyReview) {
+        LaunchedEffect(Unit) {
+            if (yearlyReview == null) {
+                yearlyReview = MediaService.getYearlyReview(yearlyReviewYear)
+            }
+        }
+        YearlyReviewDialog(
+            year = yearlyReviewYear,
+            review = yearlyReview,
+            onDismiss = { showYearlyReview = false }
         )
     }
 
@@ -915,6 +939,20 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V9：年度回顾入口——点击弹 Dialog 展示该年上传统计详情
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("年度回顾", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = {
+                    yearlyReview = null  // 清空以触发重新拉取
+                    showYearlyReview = true
+                }) {
+                    Text("查看年度回顾")
+                }
+            }
             // V8：操作历史统计卡片（GET /api/media/audit-log/stats）
             var auditStats by remember { mutableStateOf<List<MediaService.AuditLogStat>?>(null) }
             LaunchedEffect(Unit) { auditStats = MediaService.getAuditLogStats() }
@@ -1202,6 +1240,126 @@ private fun StatCell(
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
     }
+}
+
+/**
+ * V9：年度回顾对话框——展示该年上传统计详情。
+ *
+ * 内容：
+ * - 总 N 项 + 图片/视频拆分
+ * - 最忙的一天（日期 + N 项）
+ * - 第一个 / 最后一个上传日期
+ * - 12 个月柱状图（FlowRow 方块，深浅按强度着色）
+ *
+ * [review] 为 null 时显示加载中；拉取失败（仍为 null）显示错误提示。
+ * 对话框内容垂直可滚动，避免小屏溢出。
+ */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun YearlyReviewDialog(
+    year: Int,
+    review: MediaService.YearlyReview?,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "$year 年度回顾",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            if (review == null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("加载中...", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 总数 + 图片/视频/Live 拆分
+                    Text(
+                        "共 ${review.totalCount} 项 · " +
+                            "图片 ${review.byType.image} · " +
+                            "视频 ${review.byType.video}" +
+                            (if (review.byType.live > 0) " · Live ${review.byType.live}" else ""),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    // 最忙的一天
+                    if (review.topDay.date.isNotEmpty() && review.topDay.count > 0) {
+                        Text(
+                            "最忙的一天：${review.topDay.date}（${review.topDay.count} 项）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                    // 第一个 / 最后一个上传日期
+                    if (review.firstUpload.isNotEmpty() || review.lastUpload.isNotEmpty()) {
+                        Text(
+                            buildString {
+                                if (review.firstUpload.isNotEmpty()) append("首次上传：${review.firstUpload.take(10)}")
+                                if (review.firstUpload.isNotEmpty() && review.lastUpload.isNotEmpty()) append("\n")
+                                if (review.lastUpload.isNotEmpty()) append("末次上传：${review.lastUpload.take(10)}")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                    // 12 个月柱状图：FlowRow 方块，深浅表示当月上传统计强度
+                    val maxMonthCount = review.byMonth.maxOf { it.count }.coerceAtLeast(1)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        review.byMonth.forEach { mc ->
+                            val intensity = if (mc.count == 0) 0.08f
+                            else (mc.count.toFloat() / maxMonthCount).coerceIn(0.15f, 1f)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(22.dp)
+                                        .height(36.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = intensity)
+                                        )
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    "${mc.month}月",
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                    // 收藏数（如果 >0）
+                    if (review.favorites > 0) {
+                        Text(
+                            "收藏 ${review.favorites} 项",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 private fun modeLabel(mode: ThemeMode): String = when (mode) {
