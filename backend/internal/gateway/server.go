@@ -172,6 +172,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
 	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
+	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
+	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
@@ -3466,6 +3468,7 @@ func (s *Server) handleMediaExif(w http.ResponseWriter, r *http.Request) {
 //   - days 按 (date,type) 分组，date 为 YYYY-MM-DD（UTC），type 为 IMAGE/VIDEO/LIVE_PHOTO 等，
 //     count 为该类型当天数量，total 为当天所有类型合计。
 //   - total_days：有媒体的不同日期数；total_media：有拍摄时间的媒体总数。
+//
 // 需认证，按 user_id 隔离；store 未注入返回 503。
 func (s *Server) handleMediaTimelineCalendar(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -3715,7 +3718,7 @@ func (s *Server) handleStorageForecast(w http.ResponseWriter, r *http.Request) {
 
 	// 7) 配额耗尽估算。默认 10GB，与 handleUserQuota 的 defaultQuotaBytes 保持一致。
 	const quotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
-	var monthsUntilFull any // 默认 nil → JSON null
+	var monthsUntilFull any                          // 默认 nil → JSON null
 	if monthlyAverageBytes > 0 && currentBytes < quotaBytes {
 		remaining := quotaBytes - currentBytes
 		// 向上取整：剩余空间除不尽时算多一个月。
@@ -3736,6 +3739,109 @@ func (s *Server) handleStorageForecast(w http.ResponseWriter, r *http.Request) {
 		"forecast":              forecast,
 		"quota_bytes":           quotaBytes,
 		"months_until_full":     monthsUntilFull,
+	})
+}
+
+// handleMediaGrowthReport GET /api/media/growth-report — 媒体增长报告。
+//
+// 返回本周/本月/本年的上传统计（count+bytes）对比，以及周环比/月环比增长率。
+// 基于 created_at（上传时间，go time.Time）在 Go 侧分桶，复用 ListMediaByUser
+// （仅未软删行，created_at DESC），不新增 Store 方法。
+//
+// 周边界按 ISO-8601：本周 = 从本周一 00:00 UTC 到当前时刻；上周 = 上周一到本周一。
+// 月边界：本月 = 本月 1 日 00:00 UTC；上月 = 上月 1 日到本月 1 日。
+// 年边界：本年 = 本年 1 月 1 日 00:00 UTC。
+// 环比增长率 = (本期-上期)/上期*100，上期为 0 时返回 null（避免除零）。
+//
+// 响应结构：
+//
+//	{
+//	  "this_week":  {"count":N,"bytes":N},
+//	  "last_week":  {"count":N,"bytes":N},
+//	  "week_change_percent": 12.34 或 null,
+//	  "this_month": {"count":N,"bytes":N},
+//	  "last_month": {"count":N,"bytes":N},
+//	  "month_change_percent": 12.34 或 null,
+//	  "this_year":  {"count":N,"bytes":N}
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaGrowthReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 用 UTC 计算时间边界，与 timeline/time-distribution 等统计端点一致。
+	now := time.Now().UTC()
+	year, month, day := now.Date()
+	// 本周一 00:00 UTC（ISO-8601周：周一为周首）。
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7 // Go 的 Sunday=0，ISO 需转为 7
+	}
+	thisWeekStart := time.Date(year, month, day-weekday+1, 0, 0, 0, 0, time.UTC)
+	lastWeekStart := thisWeekStart.AddDate(0, 0, -7)
+	thisMonthStart := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
+	thisYearStart := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var twCount, twBytes, lwCount, lwBytes, tmCount, tmBytes, lmCount, lmBytes, tyCount, tyBytes int64
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		size := m.Size
+		if !ca.Before(thisWeekStart) && ca.Before(now) {
+			twCount++
+			twBytes += size
+		} else if !ca.Before(lastWeekStart) && ca.Before(thisWeekStart) {
+			lwCount++
+			lwBytes += size
+		}
+		if !ca.Before(thisMonthStart) {
+			tmCount++
+			tmBytes += size
+		} else if !ca.Before(lastMonthStart) {
+			lmCount++
+			lmBytes += size
+		}
+		if !ca.Before(thisYearStart) {
+			tyCount++
+			tyBytes += size
+		}
+	}
+
+	// 环比增长率：上期为 0 时返回 null（避免除零）。
+	var weekChange, monthChange any
+	if lwCount > 0 {
+		weekChange = float64(twCount-lwCount) / float64(lwCount) * 100
+	}
+	if lmCount > 0 {
+		monthChange = float64(tmCount-lmCount) / float64(lmCount) * 100
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"this_week":            map[string]any{"count": twCount, "bytes": twBytes},
+		"last_week":            map[string]any{"count": lwCount, "bytes": lwBytes},
+		"week_change_percent":  weekChange,
+		"this_month":           map[string]any{"count": tmCount, "bytes": tmBytes},
+		"last_month":           map[string]any{"count": lmCount, "bytes": lmBytes},
+		"month_change_percent": monthChange,
+		"this_year":            map[string]any{"count": tyCount, "bytes": tyBytes},
 	})
 }
 
@@ -3849,11 +3955,11 @@ func (s *Server) handleMediaStatSummary(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		summary = map[string]any{
-			"total_count":  total,
-			"total_bytes":  usedBytes,
-			"image_count":  imgCount,
-			"video_count":  vidCount,
-			"live_count":   liveCount,
+			"total_count": total,
+			"total_bytes": usedBytes,
+			"image_count": imgCount,
+			"video_count": vidCount,
+			"live_count":  liveCount,
 		}
 		n := len(mediaList)
 		if n > recentUploadLimit {
@@ -3940,7 +4046,7 @@ func (s *Server) handleMediaStatSummary(w http.ResponseWriter, r *http.Request) 
 		"favorites":      favoriteCount,
 		"shares":         shareCount,
 		"albums":         albumCount,
-		"trash":         trashCount,
+		"trash":          trashCount,
 		"recent_uploads": recentUploads,
 	})
 }
@@ -4368,6 +4474,7 @@ func (s *Server) handleMediaTagBatchRename(w http.ResponseWriter, r *http.Reques
 		"failed":        failed,
 	})
 }
+
 // handleMediaTagImport V8：POST /api/media/tag/import — 批量导入标签。
 // 用于从外部系统迁移标签数据。请求体: { tags: [{media_id, tag_name}, ...] }
 // 遍历调 s.store.AddMediaTag(ctx, uid, media_id, tag_name)；底层 INSERT OR IGNORE 幂等。
@@ -4456,10 +4563,10 @@ func (s *Server) handleMediaTagImport(w http.ResponseWriter, r *http.Request) {
 		status = "skipped"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          status,
-		"imported_count":  imported,
-		"skipped_count":   skipped,
-		"total":           len(req.Tags),
+		"status":         status,
+		"imported_count": imported,
+		"skipped_count":  skipped,
+		"total":          len(req.Tags),
 	})
 }
 
@@ -4488,9 +4595,9 @@ func (s *Server) handleMediaTagExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type tagExport struct {
-		TagName   string   `json:"tag_name"`
-		MediaIDs  []string `json:"media_ids"`
-		Count     int      `json:"count"`
+		TagName  string   `json:"tag_name"`
+		MediaIDs []string `json:"media_ids"`
+		Count    int      `json:"count"`
 	}
 	tags := make([]tagExport, 0, len(tagNames))
 	totalRelations := 0
@@ -4511,9 +4618,9 @@ func (s *Server) handleMediaTagExport(w http.ResponseWriter, r *http.Request) {
 		totalRelations += len(mediaIDs)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tags":             tags,
-		"total_tags":       len(tags),
-		"total_relations":  totalRelations,
+		"tags":            tags,
+		"total_tags":      len(tags),
+		"total_relations": totalRelations,
 	})
 }
 
@@ -6288,9 +6395,9 @@ func (s *Server) handleAlbumBatchSetCover(w http.ResponseWriter, r *http.Request
 		updated++
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         "success",
-		"updated_count":  updated,
-		"skipped_count":  skipped,
+		"status":        "success",
+		"updated_count": updated,
+		"skipped_count": skipped,
 	})
 }
 
