@@ -203,6 +203,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-year-stats", s.handleMediaYearStats)
 	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
+	// V14：存储增长预测（基于最近 6 个月趋势预测未来 3/6/12 个月用量 + 10GB 配额用完日期）。
+	s.mux.HandleFunc("/api/media/storage-growth-prediction", s.handleStorageGrowthPrediction)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
 	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
@@ -6432,6 +6434,128 @@ func (s *Server) handleStorageForecast(w http.ResponseWriter, r *http.Request) {
 		"forecast":              forecast,
 		"quota_bytes":           quotaBytes,
 		"months_until_full":     monthsUntilFull,
+	})
+}
+
+// handleStorageGrowthPrediction GET /api/media/storage-growth-prediction — 存储增长预测。
+//
+// 基于最近 6 个月每月上传字节的趋势，线性外推预测未来 3/6/12 个月的存储用量，
+// 并估算在 10GB 配额下"用完"的具体日期（YYYY-MM-DD）。
+//
+// 算法（与 handleStorageForecast 同源分桶逻辑，仅响应字段口径不同）：
+//  1. 取全部未软删媒体，按 created_at 的 YYYY-MM 分桶累计 bytes，同时累加 current_bytes。
+//  2. 取最近最多 6 个月作为样本，月均增长率 = 样本月 bytes 之和 / 样本月数；
+//     样本月数 < 2 时无法拟合趋势，增长率置 0 且不预测增长（predictions 退化为 current_bytes）。
+//  3. 预测值 = current_bytes + monthlyGrowth * N（线性外推，N ∈ {3,6,12}）。
+//  4. estimated_full_date：以当前 UTC 日期 + ceil(剩余配额/月均增长) 个月得到用完日期；
+//     已满配额 → 返回当前日期；增长率为 0 或已达配额上限的边界 → 返回 null。
+//
+// 响应结构：
+//
+//	{
+//	  "current_bytes": N,
+//	  "avg_monthly_growth_bytes": N,
+//	  "predictions": {
+//	    "3_months":  N,
+//	    "6_months":  N,
+//	    "12_months": N
+//	  },
+//	  "estimated_full_date": "YYYY-MM-DD" 或 null
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageGrowthPrediction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 1) 按 created_at 的 YYYY-MM 分桶累计 bytes（仅未软删），同时累加 current_bytes。
+	buckets := make(map[string]int64) // month(YYYY-MM) → bytes
+	var currentBytes int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		currentBytes += m.Size
+		month := m.CreatedAt.UTC().Format("2006-01")
+		buckets[month] += m.Size
+	}
+
+	// 2) 收集月份键并升序排序（YYYY-MM 字典序 = 时间序）。
+	months := make([]string, 0, len(buckets))
+	for month := range buckets {
+		months = append(months, month)
+	}
+	sort.Strings(months)
+
+	// 3) 取最近最多 6 个月作为样本。
+	const sampleMonths = 6
+	recent := months
+	if len(recent) > sampleMonths {
+		recent = recent[len(recent)-sampleMonths:]
+	}
+
+	// 4) 月均增长率（bytes/month）：样本月 bytes 之和 / 样本月数。
+	//    样本月数 < 2 时无法拟合趋势，置 0（预测退化为 current_bytes，不推算用完日期）。
+	var sampleBytesSum int64
+	for _, month := range recent {
+		sampleBytesSum += buckets[month]
+	}
+	monthlyGrowth := int64(0)
+	if len(recent) >= 2 {
+		monthlyGrowth = sampleBytesSum / int64(len(recent))
+	}
+
+	// 5) 预测未来 3/6/12 个月后的用量（线性外推）。
+	predict3 := currentBytes + monthlyGrowth*3
+	predict6 := currentBytes + monthlyGrowth*6
+	predict12 := currentBytes + monthlyGrowth*12
+
+	// 6) estimated_full_date：10GB 配额（与 handleStorageForecast/handleUserQuota 的
+	//    defaultQuotaBytes 保持一致）下"用完"的具体日期。增长率为 0 或无趋势 → null；
+	//    已达/超配额 → 当前日期（视为已用完）。
+	const quotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
+	var estimatedFullDate any // 默认 nil → JSON null
+	now := time.Now().UTC()
+	if monthlyGrowth > 0 && currentBytes < quotaBytes {
+		remaining := quotaBytes - currentBytes
+		// 向上取整：剩余空间除不尽时算多一个月（与 storage-forecast 的 months_until_full 同口径）。
+		n := remaining / monthlyGrowth
+		if remaining%monthlyGrowth != 0 {
+			n++
+		}
+		fullDate := now.AddDate(0, int(n), 0)
+		estimatedFullDate = fullDate.Format("2006-01-02")
+	} else if currentBytes >= quotaBytes {
+		// 已达或超配额 → 视为今天用完。
+		estimatedFullDate = now.Format("2006-01-02")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_bytes":            currentBytes,
+		"avg_monthly_growth_bytes": monthlyGrowth,
+		"predictions": map[string]any{
+			"3_months":  predict3,
+			"6_months":  predict6,
+			"12_months": predict12,
+		},
+		"estimated_full_date": estimatedFullDate,
 	})
 }
 
