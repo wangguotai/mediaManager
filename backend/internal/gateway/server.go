@@ -171,6 +171,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
 	s.mux.HandleFunc("/api/media/batch-rename", s.handleMediaBatchRename)
+	// 批量重命名建议：GET ?prefix=IMG_&start=1&limit=10，生成 prefix+三位序号的建议名（只读预览，不落库）。
+	s.mux.HandleFunc("/api/media/media-batch-rename-suggest", s.handleMediaBatchRenameSuggest)
 	// V8：单个媒体详情
 	s.mux.HandleFunc("/api/media/info/", s.handleMediaInfo)
 	// 相关媒体推荐：基于相同标签 / 相同类型 + 相近日期（±7天）推荐，去掉自身去重。
@@ -4978,6 +4980,100 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 		"renamed_count": len(succeeded),
 		"renamed":       succeeded,
 		"failed":        failed,
+	})
+}
+
+// handleMediaBatchRenameSuggest：GET /api/media/media-batch-rename-suggest
+//
+// 批量重命名建议（只读预览，不落库）。按序号模式为用户最近的媒体生成统一重命名建议，
+// 如 IMG_001/IMG_002/IMG_003。前端可拿这份建议让用户预览确认后再调用 batch-rename 落盘。
+//
+// 查询参数：
+//   - prefix：建议名前缀（如 "IMG_"、"vacation_"）。默认 "IMG_"。允许含下划线/连字符/中文，
+//     为空回退默认值。
+//   - start：起始序号，默认 1，下限 1（小于 1 视为 1）。
+//   - limit：建议条数（取用户最近 limit 个未软删媒体），默认 10，上限 100，下限 1。
+//
+// 媒体来源：s.store.ListMediaByUser（已按 created_at DESC，最新在前；仅未软删），
+// 截前 limit 条作为建议对象。建议名 = prefix + 三位零填充序号 + 原文件扩展名。
+// 序号从 start 起递增。返回 {suggestions:[{media_id, old_name, suggested_name}], total}。
+//
+// 鉴权：需有效 token（uid 取自 context）。store 未注入返回 503。
+func (s *Server) handleMediaBatchRenameSuggest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// prefix：默认 IMG_。
+	prefix := r.URL.Query().Get("prefix")
+	if prefix == "" {
+		prefix = "IMG_"
+	}
+
+	// start：默认 1，下限 1。
+	start := 1
+	if v := r.URL.Query().Get("start"); v != "" {
+		if n, err := parseIntSafe(v); err == nil && n >= 1 {
+			start = n
+		}
+	}
+
+	// limit：默认 10，上限 100，下限 1。
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := parseIntSafe(v); err == nil && n >= 1 {
+			limit = n
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	// 取用户全部未软删媒体（已按 created_at DESC），截前 limit 条。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(mediaList) > limit {
+		mediaList = mediaList[:limit]
+	}
+
+	type suggestion struct {
+		MediaID       string `json:"media_id"`
+		OldName       string `json:"old_name"`
+		SuggestedName string `json:"suggested_name"`
+	}
+	suggestions := make([]suggestion, 0, len(mediaList))
+	seq := start
+	for _, m := range mediaList {
+		// 保留原扩展名（含点），无扩展名则为空串。
+		ext := ""
+		if i := strings.LastIndex(m.Filename, "."); i >= 0 {
+			ext = m.Filename[i:]
+		}
+		suggested := fmt.Sprintf("%s%03d%s", prefix, seq, ext)
+		suggestions = append(suggestions, suggestion{
+			MediaID:       m.ID,
+			OldName:       m.Filename,
+			SuggestedName: suggested,
+		})
+		seq++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
 	})
 }
 
