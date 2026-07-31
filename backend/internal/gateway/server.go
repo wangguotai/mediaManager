@@ -264,6 +264,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/reorder", s.handleAlbumReorder)
 	// V8：移动照片到另一相册
 	s.mux.HandleFunc("/api/media/album/move-media", s.handleAlbumMoveMedia)
+	// V8：按文件名自动打标签
+	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -4028,6 +4030,63 @@ func (s *Server) handleAlbumMoveMedia(w http.ResponseWriter, r *http.Request) {
 		"status":         "success",
 		"moved_count":    removed,
 		"added_to_target": added,
+	})
+}
+
+// handleMediaAutoTag V8：POST /api/media/auto-tag — 按文件名自动打标签。
+// 规则：IMG_ → 照片, VID_ → 视频, Screenshot → 截图, color-* → 色卡
+// 扫描用户所有未删除媒体，为每个匹配的文件添加对应标签（幂等）。
+func (s *Server) handleMediaAutoTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 标签规则：文件名前缀 → 标签名
+	rules := []struct {
+		prefix  string
+		tagName string
+	}{
+		{"IMG_", "照片"},
+		{"VID_", "视频"},
+		{"Screenshot", "截图"},
+		{"color-", "色卡"},
+		{"batch_", "批量重命名"},
+	}
+
+	tagged := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		nameUpper := strings.ToUpper(m.Filename)
+		for _, rule := range rules {
+			if strings.HasPrefix(nameUpper, strings.ToUpper(rule.prefix)) {
+				if err := s.store.AddMediaTag(r.Context(), uid, m.ID, rule.tagName); err == nil {
+					tagged++
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "success",
+		"scanned":      len(mediaList),
+		"tagged_count": tagged,
+		"rules":        len(rules),
 	})
 }
 
