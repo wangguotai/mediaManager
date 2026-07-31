@@ -2193,6 +2193,60 @@ private fun MyTabContent(
             }
         }
 
+        // V22：仪表盘概览卡片——在活动流后，2x3 网格合并显示6关键指标。
+        // 前端组合已有数据源（getDashboardOverview 并发拉 summary+streak+tagCloud），
+        // 不依赖后端 dashboard 端点。六格：📁总媒体 / ⭐收藏 / 📁相册 / 🔗分享 / 🔥Streak / 🏷️标签。
+        // 与其它卡片的 null-skip 不同：本卡片即使全 0 也渲染（让用户看到骨架），
+        // 数据未到齐时显示占位"—"。
+        var dashboardOverview by remember { mutableStateOf<MediaService.DashboardOverview?>(null) }
+        LaunchedEffect(Unit) { dashboardOverview = MediaService.getDashboardOverview() }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "仪表盘概览",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                // 2x3 网格：2列3行，每格 emoji+大数字+小标签。
+                // 用两行 FlowRow 不便控制列数，改用 Column 套两行 Row（固定2列）。
+                val ov = dashboardOverview
+                // 六格数据：emoji / 数值（未到齐显示"—"）/ 标签
+                val cells = listOf(
+                    Triple("📁", ov?.totalMedia, "总媒体"),
+                    Triple("⭐", ov?.favoriteCount, "收藏"),
+                    Triple("📂", ov?.albumCount, "相册"),
+                    Triple("🔗", ov?.shareCount, "分享"),
+                    Triple("🔥", ov?.currentStreak, "Streak"),
+                    Triple("🏷️", ov?.tagCount, "标签")
+                )
+                // 分3行，每行2格
+                for (rowIdx in 0 until 3) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (colIdx in 0 until 2) {
+                            val idx = rowIdx * 2 + colIdx
+                            val (emoji, value, label) = cells[idx]
+                            DashboardMetricCell(
+                                emoji = emoji,
+                                value = value?.toString() ?: "—",
+                                label = label,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    if (rowIdx < 2) Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        }
+
         // V7：设备列表卡片
         var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
         LaunchedEffect(Unit) { devices = MediaService.listDevices() }
@@ -4369,23 +4423,23 @@ private fun parseIso8601ToEpochMillis(s: String): Long? {
     var epochMillis = daysSinceEpoch * 86_400_000L +
         hour * 3_600_000L + minute * 60_000L + second * 1_000L
 
-    // —— 时区归一化到本地 ——
+    // —— 时区归一化：结果必须是纯 UTC epoch 毫秒 ——
+    // days_from_civil 给的是 UTC 天数，故上面已是"按 UTC 分量"算的 epoch。
+    // [nowEpochMillis] 返回的也是 UTC epoch（[System.currentTimeMillis] / NSDate 自 1970 UTC），
+    // 两数相减才得真实经过时长——相对时间差与时区无关。
+    //   - `Z` / 空（无偏移）：分量已是 UTC，无需调整。
+    //   - `±hh:mm`：分量是当地时间，减去该偏移得 UTC。
+    // ⚠️ 切勿在此加 [systemTimeZoneOffsetMillis]：会把 UTC epoch 推到"未来"，
+    // 使相对差变负→提前触发日期兜底（曾经的 bug，ad-hoc 算法验证发现）。日期兜底
+    // [formatPreviewDate] 自己加偏移，这里不重复。
     val tz = tzPart.trim()
-    when {
-        tz.isEmpty() || tz.equals("Z", ignoreCase = true) -> {
-            // 无偏移/UTC：加本地时区偏移使其与本地时钟对齐
-            epochMillis += systemTimeZoneOffsetMillis()
-        }
-        tz.length >= 3 && (tz[0] == '+' || tz[0] == '-') -> {
-            // ±hh:mm 或 ±hhmm 或 ±hh
-            val sign = if (tz[0] == '-') -1 else 1
-            val rest = tz.substring(1).replace(":", "")
-            val tzH = rest.substring(0, 2).toIntOrNull() ?: 0
-            val tzM = rest.drop(2).take(2).toIntOrNull() ?: 0
-            val offsetMillis = sign * (tzH * 3_600_000L + tzM * 60_000L)
-            // 先减去该偏移回 UTC，再加本地偏移到本地时钟
-            epochMillis = epochMillis - offsetMillis + systemTimeZoneOffsetMillis()
-        }
+    if (tz.length >= 3 && (tz[0] == '+' || tz[0] == '-')) {
+        val sign = if (tz[0] == '-') -1 else 1
+        val rest = tz.substring(1).replace(":", "")
+        val tzH = rest.substring(0, 2).toIntOrNull() ?: 0
+        val tzM = rest.drop(2).take(2).toIntOrNull() ?: 0
+        val offsetMillis = sign * (tzH * 3_600_000L + tzM * 60_000L)
+        epochMillis = epochMillis - offsetMillis   // 当地分量 → UTC
     }
     return epochMillis
 }

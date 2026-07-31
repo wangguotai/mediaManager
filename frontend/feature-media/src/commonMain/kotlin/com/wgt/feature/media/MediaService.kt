@@ -12,6 +12,8 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import com.wgt.platform.logger.logger
 import kotlin.concurrent.Volatile
@@ -1520,6 +1522,55 @@ object MediaService {
         val shareCount: Int = 0
     ) {
         val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /**
+     * V22：仪表盘概览——前端组合已有多源数据（summary + uploadStreak + tagCloud），
+     * 不调后端独立 dashboard 端点，避免新增后端工作量。六个关键字段对应 UI 2x3 网格：
+     * 总媒体 / 收藏 / 相册 / 分享 / Streak / 标签数。
+     *
+     * 任一子源返回 null（后端未铺量/异常）时，对应字段回退 0，其余字段正常展示——
+     * 与"我的"页其它卡片的 null-skip 策略互补：这里始终渲染（哪怕全 0），让用户
+     * 看到完整六格骨架而非空白。
+     *
+     * 三路并发拉取（[coroutineScope] + async），减少串行 RTT；任一路失败不影响其余。
+     */
+    data class DashboardOverview(
+        val totalMedia: Int = 0,
+        val favoriteCount: Int = 0,
+        val albumCount: Int = 0,
+        val shareCount: Int = 0,
+        val currentStreak: Int = 0,
+        val tagCount: Int = 0
+    )
+
+    /**
+     * V22：组合拉取仪表盘概览六指标。并发调 [getMediaSummary]/[getUploadStreak]/
+     * [getTagCloudData]，任一失败回退 0 不抛。用 [coroutineScope] 保证三路 async
+     * 在同一 scope 内并发等待，[awaitAll] 容错单路异常（try/catch 包裹单路提取）。
+     */
+    suspend fun getDashboardOverview(): DashboardOverview {
+        return try {
+            coroutineScope {
+                val summaryDeferred = async { runCatching { getMediaSummary() }.getOrNull() }
+                val streakDeferred = async { runCatching { getUploadStreak() }.getOrNull() }
+                val tagDeferred = async { runCatching { getTagCloudData() }.getOrNull() }
+                val summary = summaryDeferred.await()
+                val streak = streakDeferred.await()
+                val tags = tagDeferred.await()
+                DashboardOverview(
+                    totalMedia = summary?.totalCount ?: 0,
+                    favoriteCount = summary?.favoriteCount ?: 0,
+                    albumCount = summary?.albumCount ?: 0,
+                    shareCount = summary?.shareCount ?: 0,
+                    currentStreak = streak?.currentStreak ?: 0,
+                    tagCount = tags?.size ?: 0
+                )
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getDashboardOverview FAILED: ${e::class.simpleName} ${e.message}")
+            DashboardOverview()
+        }
     }
 
     /**
