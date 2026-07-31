@@ -1262,6 +1262,42 @@ object MediaService {
         }
     }
 
+    /**
+     * V7：GET /api/media/recent-activity — 最近活动
+     */
+    suspend fun getRecentActivity(): List<ActivityInfo>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/recent-activity") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["activities"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    ActivityInfo(
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        timestamp = o["timestamp"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getRecentActivity FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V7：活动信息 */
+    data class ActivityInfo(
+        val type: String,
+        val mediaId: String,
+        val filename: String,
+        val timestamp: Long,
+        val detail: String
+    )
+
     // ---- 解析 ----
 
     /**

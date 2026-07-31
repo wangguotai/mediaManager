@@ -847,6 +847,67 @@ private fun MyTabContent(
             }
         }
 
+        // V7：最近活动卡片
+        var activities by remember { mutableStateOf<List<MediaService.ActivityInfo>?>(null) }
+        LaunchedEffect(Unit) { activities = MediaService.getRecentActivity() }
+        activities?.let { activityList ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "最近活动",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (activityList.isEmpty()) {
+                        Text(
+                            "暂无活动",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        activityList.take(5).forEach { act ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    when (act.type) {
+                                        "upload" -> "📤"
+                                        "share" -> "🔗"
+                                        "favorite" -> "⭐"
+                                        else -> "📋"
+                                    },
+                                    fontSize = 16.sp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    act.detail,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    if (act.timestamp > 0) formatPreviewDate(act.timestamp * 1000) else "",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：设备列表卡片
         var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
         LaunchedEffect(Unit) { devices = MediaService.listDevices() }
