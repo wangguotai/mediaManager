@@ -144,6 +144,7 @@ fun MediaListScreen(
     var shareLinkResult by remember { mutableStateOf<ShareLinkResult?>(null) }
     var shareLinkError by remember { mutableStateOf<String?>(null) }
     var showShareLinkConfig by remember { mutableStateOf(false) }
+    var showBatchRenameDialog by remember { mutableStateOf(false) }
 
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
@@ -356,6 +357,18 @@ fun MediaListScreen(
         )
     }
 
+    // V8：批量重命名对话框
+    if (showBatchRenameDialog) {
+        BatchRenameDialog(
+            selectedCount = viewModel.selectedCount,
+            onDismiss = { showBatchRenameDialog = false },
+            onConfirm = { pattern ->
+                showBatchRenameDialog = false
+                viewModel.batchRenameSelected(pattern)
+            }
+        )
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -394,10 +407,15 @@ fun MediaListScreen(
                     showUploadButton = selectedTab == 0,
                     showAddToAlbumButton = selectedTab != 0, // 后端源（已上传/网盘）才显示
                     showShareLinkButton = selectedTab != 0, // V7 §1.2：仅云端源显示分享链接按钮
+                    showBatchRenameButton = selectedTab != 0, // V8：仅云端源显示批量重命名
                     onCreateShareLink = {
                         // V7 §1.2：打开配置对话框（密码可选 + 有效期选择）
                         shareLinkError = null
                         showShareLinkConfig = true
+                    },
+                    onBatchRename = {
+                        // V8：打开批量重命名对话框
+                        showBatchRenameDialog = true
                     }
                 )
             } else {
@@ -2987,11 +3005,13 @@ fun SelectionBottomBar(
     onDeselectAll: () -> Unit,
     onAddToAlbum: () -> Unit = {},
     onCreateShareLink: () -> Unit = {},
+    onBatchRename: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
     showAddToAlbumButton: Boolean = false,
-    showShareLinkButton: Boolean = false
+    showShareLinkButton: Boolean = false,
+    showBatchRenameButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3041,6 +3061,16 @@ fun SelectionBottomBar(
                 Icon(
                     painterResource(Res.drawable.ic_link),
                     contentDescription = "生成分享链接"
+                )
+            }
+        }
+
+        // V8：批量重命名（仅云端源显示）
+        if (showBatchRenameButton) {
+            IconButton(onClick = onBatchRename) {
+                Icon(
+                    painterResource(Res.drawable.ic_edit),
+                    contentDescription = "批量重命名"
                 )
             }
         }
@@ -3588,6 +3618,75 @@ private fun ShareLinkConfigDialog(
             TextButton(onClick = { onCreate(password, selectedHours) }) {
                 Text("创建链接")
             }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+/**
+ * V8：批量重命名对话框 — 输入文件名模板，{seq} 占位符自动递增。
+ * 预览前几个结果。
+ */
+@Composable
+fun BatchRenameDialog(
+    selectedCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var pattern by remember { mutableStateOf("photo_{seq}") }
+    val hasSeq = pattern.contains("{seq}")
+    // 预览前 3 个文件名
+    val previews = if (hasSeq) {
+        (1..minOf(3, selectedCount)).map { i ->
+            val name = pattern.replace("{seq}", i.toString())
+            "$name.ext"
+        }
+    } else emptyList()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("批量重命名") },
+        text = {
+            Column {
+                Text("已选 $selectedCount 个文件", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = pattern,
+                    onValueChange = { pattern = it },
+                    label = { Text("文件名模板") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "使用 {seq} 作为序号占位符，序号从 1 开始",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+                if (hasSeq && previews.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("预览:", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    previews.forEach { p ->
+                        Text("  $p", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (!hasSeq) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "⚠ 模板必须包含 {seq}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(pattern) },
+                enabled = hasSeq && selectedCount > 0
+            ) { Text("重命名") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }

@@ -1320,9 +1320,63 @@ object MediaService {
     }
 
     /**
-     * V7：GET /api/media/storage-trend — 存储增长趋势
+     * V8：POST /api/media/batch-rename — 批量重命名，返回结果。
      */
-    suspend fun getStorageTrend(): List<TrendPoint>? {
+     suspend fun batchRename(
+         mediaIds: List<String>,
+         pattern: String,
+         startSeq: Int = 1
+     ): BatchRenameResult? {
+         return try {
+             val body = buildJsonObject {
+                 putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+                 put("pattern", pattern)
+                 put("start_seq", startSeq)
+             }.toString()
+             val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-rename") {
+                 header("Authorization", "Bearer ${getAuthToken()}")
+                 contentType(ContentType.Application.Json)
+                 setBody(body)
+             }
+             if (response.status == HttpStatusCode.OK) {
+                 val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                 BatchRenameResult(
+                     renamedCount = obj["renamed_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                     renamed = obj["renamed"]?.jsonArray?.mapNotNull { item ->
+                         val o = item.jsonObject
+                         BatchRenameItem(
+                             mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                             filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: ""
+                         )
+                     } ?: emptyList(),
+                     failed = obj["failed"]?.jsonArray?.mapNotNull { item ->
+                         val o = item.jsonObject
+                         BatchRenameFailure(
+                             id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                             reason = o["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+                         )
+                     } ?: emptyList()
+                 )
+             } else null
+         } catch (e: Exception) {
+             logger.error("MediaService", "batchRename FAILED: ${e::class.simpleName} ${e.message}")
+             null
+         }
+     }
+
+     /** V8：批量重命名结果 */
+     data class BatchRenameResult(
+         val renamedCount: Int,
+         val renamed: List<BatchRenameItem>,
+         val failed: List<BatchRenameFailure>
+     )
+     data class BatchRenameItem(val mediaId: String, val filename: String)
+     data class BatchRenameFailure(val id: String, val reason: String)
+
+     /**
+      * V7：GET /api/media/storage-trend — 存储增长趋势
+      */
+     suspend fun getStorageTrend(): List<TrendPoint>? {
         return try {
             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-trend") {
                 getAuthToken()?.let { header("Authorization", "Bearer $it") }

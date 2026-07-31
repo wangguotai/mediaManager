@@ -1222,6 +1222,24 @@ class MediaViewModel {
      *
      * 删除完成后发送 Snackbar 结果消息（"已删除 N 项"）。
      */
+    /**
+     * V8：批量重命名选中项——调后端 /api/media/batch-rename。
+     * 成功后刷新列表并退出选择模式。
+     */
+    fun batchRenameSelected(pattern: String) {
+        if (selectedMediaIds.isEmpty()) return
+        val ids = selectedMediaIds.toList()
+        viewModelScope.launch {
+            val result = MediaService.batchRename(ids, pattern)
+            if (result != null) {
+                // 刷新云端列表
+                loadCloudMediaList()
+                // 退出选择模式
+                deselectAll()
+            }
+        }
+    }
+
     fun deleteSelectedMedia() {
         if (selectedMediaIds.isEmpty() || isDeleting) return
 
