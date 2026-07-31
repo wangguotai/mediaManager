@@ -178,6 +178,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
 	// V7：设置相册封面
 	s.mux.HandleFunc("/api/media/album/cover", s.handleAlbumCover)
+	// V8：取消相册共享
+	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
 	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
@@ -1594,6 +1596,59 @@ func (s *Server) handleAlbumCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "cover_media_id": req.MediaID})
+}
+
+// handleAlbumUnshare V8：POST /api/media/album/unshare — 取消相册共享。
+// 请求体: { album_id, shared_with_user_id }
+// 仅相册 owner 可撤销共享。
+func (s *Server) handleAlbumUnshare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		AlbumID          string `json:"album_id"`
+		SharedWithUserID string `json:"shared_with_user_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || req.SharedWithUserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and shared_with_user_id required"})
+		return
+	}
+
+	// 校验：仅 owner 可撤销共享
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, req.AlbumID)
+	if album == nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not album owner"})
+		return
+	}
+
+	if err := s.store.DeleteAlbumShare(r.Context(), req.AlbumID, uid, req.SharedWithUserID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":             "success",
+		"album_id":           req.AlbumID,
+		"shared_with_user":   req.SharedWithUserID,
+	})
 }
 
 // handleAlbumResource 处理 /api/media/album/{id} 路径下的请求。
