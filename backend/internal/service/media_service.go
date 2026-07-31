@@ -633,6 +633,14 @@ func (s *MediaService) DeleteAlbum(uid, albumID string) error {
 	return s.albumStore.DeleteAlbum(uid, albumID)
 }
 
+// RenameAlbum V8：委托 AlbumStore 重命名相册。
+func (s *MediaService) RenameAlbum(uid, albumID, newName string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.RenameAlbum(uid, albumID, newName)
+}
+
 // favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。
 const favoriteFilterKey = "favorite=true"
 

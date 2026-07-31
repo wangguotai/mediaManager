@@ -324,3 +324,22 @@ func (as *AlbumStore) DeleteAlbum(uid, albumID string) error {
 	delete(pa.albums, albumID)
 	return pa.save()
 }
+
+// RenameAlbum V8：重命名相册。
+func (as *AlbumStore) RenameAlbum(uid, albumID, newName string) error {
+	if newName == "" {
+		return fmt.Errorf("album name cannot be empty")
+	}
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return fmt.Errorf("album not found")
+	}
+	album.Name = newName
+	return pa.save()
+}

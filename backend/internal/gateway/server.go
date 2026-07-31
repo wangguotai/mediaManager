@@ -182,6 +182,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
 	s.mux.HandleFunc("/api/media/album/shared-with", s.handleAlbumSharedWith)
+	// V8：重命名相册
+	s.mux.HandleFunc("/api/media/album/rename", s.handleAlbumRename)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
 	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
@@ -1343,6 +1345,7 @@ type albumStoreProvider interface {
 	ListAlbums(uid string) []*service.Album
 	GetAlbum(uid, albumID string) *service.Album
 	DeleteAlbum(uid, albumID string) error
+	RenameAlbum(uid, albumID, newName string) error
 }
 
 // handleAlbumCreate 处理 POST /api/media/album，创建新相册。
@@ -1697,9 +1700,49 @@ func (s *Server) handleAlbumSharedWith(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"album_id": albumID,
+		"album_id":    albumID,
 		"shared_with": items,
-		"count":      len(items),
+		"count":       len(items),
+	})
+}
+
+// handleAlbumRename V8：POST /api/media/album/rename — 重命名相册。
+// 请求体: { album_id, name }
+func (s *Server) handleAlbumRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and name required"})
+		return
+	}
+	if err := provider.RenameAlbum(uid, req.AlbumID, req.Name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "success",
+		"album_id": req.AlbumID,
+		"name":     req.Name,
 	})
 }
 
