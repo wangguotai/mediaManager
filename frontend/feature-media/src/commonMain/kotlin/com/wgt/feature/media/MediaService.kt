@@ -1419,6 +1419,28 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/album/delete-batch — 批量删除相册，返回成功数。 */
+    suspend fun deleteAlbumsBatch(albumIds: List<String>): Int {
+        if (albumIds.isEmpty()) return 0
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("album_ids") { albumIds.forEach { add(it) } }
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/delete-batch") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["deleted_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "deleteAlbumsBatch FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：POST /api/media/cleanup-orphan — 清理孤立记录，返回清理数。 */
     suspend fun cleanupOrphan(): Pair<Int, List<String>>? {
         return try {

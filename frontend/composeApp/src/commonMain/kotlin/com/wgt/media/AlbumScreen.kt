@@ -196,6 +196,11 @@ private fun AlbumListPage(
     val albums = viewModel.albumList
     val isLoading = viewModel.isAlbumLoading
     var sortByName by remember { mutableStateOf(false) }
+    // V8：批量选择模式
+    var selectionMode by remember { mutableStateOf(false) }
+    val selectedAlbumIds = remember { mutableStateListOf<String>() }
+    var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    val batchScope = rememberCoroutineScope()
 
     // 排序后的相册列表
     val sortedAlbums = remember(albums, sortByName) {
@@ -217,23 +222,38 @@ private fun AlbumListPage(
                     }
                 },
                 actions = {
-                    // V7：排序切换按钮
-                    IconButton(onClick = { sortByName = !sortByName }) {
-                        Icon(
-                            painterResource(Res.drawable.ic_sort),
-                            contentDescription = if (sortByName) "按名称排序" else "按时间排序",
-                            tint = if (sortByName) MaterialTheme.colorScheme.primary
-                                   else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                    IconButton(
-                        onClick = { viewModel.loadAlbums(forceRefresh = true) },
-                        enabled = !isLoading
-                    ) {
-                        Icon(
-                            painterResource(Res.drawable.ic_refresh),
-                            contentDescription = "刷新"
-                        )
+                    // V8：批量删除模式
+                    if (selectionMode) {
+                        TextButton(onClick = {
+                            if (selectedAlbumIds.isNotEmpty()) {
+                                showBatchDeleteConfirm = true
+                            }
+                        }) {
+                            Text("删除(${selectedAlbumIds.size})", color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(onClick = {
+                            selectionMode = false
+                            selectedAlbumIds.clear()
+                        }) { Text("取消") }
+                    } else {
+                        // V7：排序切换按钮
+                        IconButton(onClick = { sortByName = !sortByName }) {
+                            Icon(
+                                painterResource(Res.drawable.ic_sort),
+                                contentDescription = if (sortByName) "按名称排序" else "按时间排序",
+                                tint = if (sortByName) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.loadAlbums(forceRefresh = true) },
+                            enabled = !isLoading
+                        ) {
+                            Icon(
+                                painterResource(Res.drawable.ic_refresh),
+                                contentDescription = "刷新"
+                            )
+                        }
                     }
                 }
             )
@@ -320,8 +340,27 @@ private fun AlbumListPage(
                             ) { album ->
                                 AlbumCard(
                                     album = album,
-                                    onClick = { onAlbumClick(album) },
-                                onLongClick = { onAlbumLongClick(album) }
+                                    onClick = {
+                                        if (selectionMode) {
+                                            if (selectedAlbumIds.contains(album.id)) {
+                                                selectedAlbumIds.remove(album.id)
+                                            } else {
+                                                selectedAlbumIds.add(album.id)
+                                            }
+                                        } else {
+                                            onAlbumClick(album)
+                                        }
+                                    },
+                                onLongClick = {
+                                    if (!selectionMode) {
+                                        selectionMode = true
+                                    }
+                                    if (selectedAlbumIds.contains(album.id)) {
+                                        selectedAlbumIds.remove(album.id)
+                                    } else {
+                                        selectedAlbumIds.add(album.id)
+                                    }
+                                },
                             )
                         }
                     }
@@ -329,6 +368,32 @@ private fun AlbumListPage(
             }
         }
         }
+    }
+
+    // V8：批量删除确认对话框
+    if (showBatchDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteConfirm = false },
+            title = { Text("批量删除相册") },
+            text = { Text("确定删除选中的 ${selectedAlbumIds.size} 个相册？相册内的照片不会被删除。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val ids = selectedAlbumIds.toList()
+                    showBatchDeleteConfirm = false
+                    batchScope.launch {
+                        val count = MediaService.deleteAlbumsBatch(ids)
+                        if (count > 0) {
+                            selectionMode = false
+                            selectedAlbumIds.clear()
+                            viewModel.loadAlbums(forceRefresh = true)
+                        }
+                    }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteConfirm = false }) { Text("取消") }
+            }
+        )
     }
 }
 
