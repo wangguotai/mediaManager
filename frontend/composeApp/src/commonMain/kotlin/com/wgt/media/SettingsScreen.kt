@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1649,6 +1650,109 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         "合计 ${storageDeep!!.totalCount} 个 · ${formatBytesToMB(storageDeep!!.totalBytes.toDouble())} MB",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // V27：存储矩阵卡片 —— 调 /api/media/storage-breakdown-v2 显示 类型×年份 矩阵表格。
+            // 与上方"深度存储分析"互补：deep 是年份→类型逐行文字；本卡片做正式表格
+            // （行=年份，列=图片/视频/Live，格=count），矩阵方向相反（type→year），本地转置后渲染。
+            // 放在"深度存储分析"之后、"归档建议"之前。
+            var storageMatrix by remember { mutableStateOf<MediaService.StorageBreakdownV2?>(null) }
+            var storageMatrixLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                storageMatrix = MediaService.getStorageBreakdownV2()
+                storageMatrixLoading = false
+            }
+            SectionTitle("🧮 存储矩阵", iconRes = Res.drawable.ic_info)
+            if (storageMatrixLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageMatrix == null) {
+                Text(
+                    "无法获取存储矩阵",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageMatrix!!.matrix.isEmpty()) {
+                Text(
+                    "暂无媒体数据",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val m = storageMatrix!!
+                // 矩阵方向为 type→year；转置收集全部年份，取最近 3 年（字符串年份降序=字典序）。
+                val years = m.matrix.values.flatMap { it.keys }.toSet().sortedDescending().take(3)
+                // 类型→列映射（与后端归一 IMAGE/VIDEO/LIVE_PHOTO 对齐）。
+                fun cellCount(type: String, year: String): Int = m.matrix[type]?.get(year)?.count ?: 0
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    // 表头
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "年份",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            modifier = Modifier.width(52.dp)
+                        )
+                        Text("图片", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                        Text("视频", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                        Text("Live", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                    }
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    // 数据行：一行一年份，三列 count。
+                    years.forEach { year ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "$year",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.width(52.dp)
+                            )
+                            Text("${cellCount("IMAGE", year)}", fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                            Text("${cellCount("VIDEO", year)}", fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                            Text("${cellCount("LIVE_PHOTO", year)}", fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "合计 ${m.totalCount} 项 · ${formatBytesToMB(m.totalBytes.toDouble())} MB",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )

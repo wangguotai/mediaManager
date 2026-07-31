@@ -6549,6 +6549,66 @@ object MediaService {
     }
 
     /**
+     * V27：GET /api/media/storage-breakdown-v2 — 存储矩阵（类型×年份 二维交叉）。
+     *
+     * 与 [getStorageDeepAnalysis] 的 by_year_type（年份→类型）互补，本端点矩阵方向为
+     * **类型→年份**：`matrix[type][year] = {count, bytes}`。响应顶层扁平：
+     * ```
+     * { "matrix":      { "IMAGE":{"2024":{count,bytes}, "2025":{...}},
+     *                    "VIDEO":{...}, "LIVE_PHOTO":{...} },
+     *   "total_count": N,
+     *   "total_bytes": N }
+     * ```
+     * 复用既有 [TypeStat]（count + bytes，与 deep-analysis 同口径）。设置页\"存储矩阵\"
+     * 卡片消费：转置为年份→类型后取最近 3 年，按图片/视频/Live 列展示每格 count。
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理。鉴权头由 defaultRequest 注入。
+     */
+    suspend fun getStorageBreakdownV2(): StorageBreakdownV2? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-breakdown-v2") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // 解析 matrix: type → year → {count,bytes}，沿用 deep-analysis 的运行时解析风格。
+                val matrixEl = o["matrix"]?.jsonObject
+                val matrix = LinkedHashMap<String, MutableMap<String, TypeStat>>()
+                if (matrixEl != null) {
+                    for ((type, yearMapEl) in matrixEl) {
+                        val inner = LinkedHashMap<String, TypeStat>()
+                        for ((year, statEl) in yearMapEl.jsonObject) {
+                            val s = statEl.jsonObject
+                            inner[year] = TypeStat(
+                                count = s["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                                bytes = s["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                            )
+                        }
+                        matrix[type] = inner
+                    }
+                }
+                StorageBreakdownV2(
+                    matrix = matrix,
+                    totalCount = o["total_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else {
+                logger.info("MediaService", "getStorageBreakdownV2 status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageBreakdownV2 FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V27：storage-breakdown-v2 结果——类型×年份 矩阵 + 顶层汇总。复用 [TypeStat] 作格单元。 */
+    data class StorageBreakdownV2(
+        val matrix: Map<String, Map<String, TypeStat>>,
+        val totalCount: Int,
+        val totalBytes: Long
+    )
+
+    /**
      * V9：GET /api/media/stat-summary — 一站式统计汇总。
      *
      * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
