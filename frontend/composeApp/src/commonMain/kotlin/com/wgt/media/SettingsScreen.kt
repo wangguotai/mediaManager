@@ -819,6 +819,41 @@ fun SettingsScreen(
                     }
                 }
             }
+            // V8：操作历史统计卡片（GET /api/media/audit-log/stats）
+            var auditStats by remember { mutableStateOf<List<MediaService.AuditLogStat>?>(null) }
+            LaunchedEffect(Unit) { auditStats = MediaService.getAuditLogStats() }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("操作历史", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    when {
+                        auditStats == null -> "加载中..."
+                        auditStats!!.isEmpty() -> "暂无记录"
+                        else -> "${auditStats!!.sumOf { it.count }} 次操作"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            auditStats?.forEach { stat ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(stat.action, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "${stat.count}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }

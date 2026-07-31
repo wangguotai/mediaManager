@@ -266,6 +266,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/move-media", s.handleAlbumMoveMedia)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
+	// V8：审计日志——列表/统计/记录
+	s.mux.HandleFunc("/api/media/audit-log/list", s.handleAuditLogList)
+	s.mux.HandleFunc("/api/media/audit-log/stats", s.handleAuditLogStats)
+	s.mux.HandleFunc("/api/media/audit-log/record", s.handleAuditLogRecord)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V8：自动设置相册封面（用第一个 media）
@@ -4096,6 +4100,112 @@ func (s *Server) handleMediaAutoTag(w http.ResponseWriter, r *http.Request) {
 		"tagged_count": tagged,
 		"rules":        len(rules),
 	})
+}
+
+// handleAuditLogList V8：GET /api/media/audit-log/list?limit=50
+// 返回当前用户最近的审计日志（最近在前），limit<=0 默认 50。
+func (s *Server) handleAuditLogList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(logs))
+	for _, a := range logs {
+		out = append(out, map[string]any{
+			"id":         a.ID,
+			"action":     a.Action,
+			"media_id":   a.MediaID,
+			"detail":     a.Detail,
+			"created_at": a.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"logs":  out,
+		"total": len(out),
+	})
+}
+
+// handleAuditLogStats V8：GET /api/media/audit-log/stats
+// 按操作类型聚合当前用户的审计日志数量：{stats: [{action,count}], total: N}
+func (s *Server) handleAuditLogStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	stats, err := s.store.AuditLogStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stats": stats,
+		"total": len(stats),
+	})
+}
+
+// handleAuditLogRecord V8：POST /api/media/audit-log/record
+// 请求体: {action, media_id, detail}。调 AddAuditLog 写入一条审计日志。
+func (s *Server) handleAuditLogRecord(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		Action  string `json:"action"`
+		MediaID string `json:"media_id"`
+		Detail  string `json:"detail"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.Action == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "action required"})
+		return
+	}
+	if err := s.store.AddAuditLog(r.Context(), uid, req.Action, req.MediaID, req.Detail); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
 }
 
 // handleAlbumMerge V8：POST /api/media/album/merge — 合并两个相册。
