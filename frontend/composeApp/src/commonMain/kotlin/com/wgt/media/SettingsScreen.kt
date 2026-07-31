@@ -300,6 +300,12 @@ fun SettingsScreen(
     var showDuplicateReport by remember { mutableStateOf(false) }
     var duplicateReport by remember { mutableStateOf<MediaService.DupReport?>(null) }
 
+    // V21：数据导出（full-report）对话框状态
+    var showExportDialog by remember { mutableStateOf(false) }
+    var exportJson by remember { mutableStateOf<String?>(null) }   // null=未加载, ""=失败占位
+    var isExporting by remember { mutableStateOf(false) }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
@@ -339,6 +345,32 @@ fun SettingsScreen(
         DuplicateReportDialog(
             report = duplicateReport,
             onDismiss = { showDuplicateReport = false }
+        )
+    }
+
+    // V21：数据导出对话框——打开时加载 full-report JSON，展示后可复制到剪贴板
+    if (showExportDialog) {
+        LaunchedEffect(Unit) {
+            if (exportJson == null) {
+                isExporting = true
+                exportJson = MediaService.getFullReport(2026) ?: ""
+                isExporting = false
+            }
+        }
+        ExportReportDialog(
+            json = exportJson,
+            isExporting = isExporting,
+            onCopy = {
+                val text = exportJson
+                if (!text.isNullOrEmpty()) {
+                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
+                    scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
+                }
+            },
+            onDismiss = {
+                showExportDialog = false
+                exportJson = null  // 关闭时清空，下次重新拉取
+            }
         )
     }
 
@@ -968,6 +1000,38 @@ fun SettingsScreen(
                     showYearlyReview = true
                 }) {
                     Text("查看年度回顾")
+                }
+            }
+            // V21：数据导出——一键拉取 full-report 综合报告 JSON，弹窗展示供复制/分享
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("数据导出", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "导出年度综合报告（JSON）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                )
+            }
+            TextButton(
+                onClick = {
+                    exportJson = null  // 清空以触发重新拉取
+                    showExportDialog = true
+                },
+                enabled = !isExporting,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (isExporting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("导出中…")
+                } else {
+                    Text("导出报告")
                 }
             }
             // V8：操作历史统计卡片（GET /api/media/audit-log/stats）

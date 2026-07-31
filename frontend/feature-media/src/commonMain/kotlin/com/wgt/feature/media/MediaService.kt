@@ -4019,4 +4019,46 @@ object MediaService {
         val trash: Int,
         val recentUploads: List<RecentUpload>
     )
+
+    /**
+     * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
+     *
+     * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；
+     * 前端无需逐字段解析，仅在设置页\"导出报告\"以 JSON 文本展示，供用户复制/分享。
+     *
+     * 返回原始 JSON 字符串（已 pretty 化后端响应体）；非 200 或网络异常返回 null，
+     * UI 侧提示\"导出失败\"。与 [exportTags] 同款直返 body 字符串的处理方式。
+     *
+     * @param year 年度筛选（默认 2026，透传 query param；后端按年聚合 yearly 子块）
+     */
+    suspend fun getFullReport(year: Int = 2026): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/full-report") {
+                parameter("year", year)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                logger.info(
+                    "MediaService",
+                    "getFullReport year=$year status=${response.status} bytes=${body.length}"
+                )
+                // 尝试 pretty 化：后端返回紧凑 JSON，这里重新格式化便于阅读与复制。
+                // 解析失败（非合法 JSON）时原样返回，不阻断导出流程。
+                runCatching {
+                    val pretty = Json {
+                        prettyPrint = true
+                        indent = "  "
+                        ignoreUnknownKeys = true
+                    }
+                    pretty.encodeToString(pretty.parseToJsonElement(body))
+                }.getOrDefault(body)
+            } else {
+                logger.info("MediaService", "getFullReport status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getFullReport FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 }
