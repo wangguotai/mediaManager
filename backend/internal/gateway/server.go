@@ -4900,9 +4900,22 @@ func (s *Server) handleMediaBatchRotate(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleMediaBatchRename V8：POST /api/media/batch-rename
-// 批量重命名，支持模板模式：{prefix}_{seq} 格式。
-// 请求体: { media_ids: ["id1","id2"], pattern: "vacation_{seq}", start_seq: 1 }
+// handleMediaBatchRename 处理 POST /api/media/batch-rename，
+// 批量重命名媒体文件（prefix+序号模式，与 GET /api/media/media-batch-rename-suggest 配对）。
+//
+// 支持两种请求格式：
+//  1. prefix 模式（推荐，与 media-batch-rename-suggest 格式一致）：
+//     { media_ids: ["id1","id2"], prefix: "IMG_", start_index: 1 }
+//     生成名 = prefix + 三位零填充序号 + 原扩展名（如 IMG_001.jpg、IMG_002.jpg）。
+//  2. pattern 模式（V8 遗留，向后兼容旧前端）：
+//     { media_ids: [...], pattern: "vacation_{seq}", start_seq: 1 }
+//     pattern 必须含 {seq}，生成名 = ReplaceAll(pattern,"{seq}",seq) + 原扩展名。
+//
+// 鉴权：需有效 token（uid 取自 context）；store 未注入返回 503。
+// 防横向越权：逐条 GetMedia 校验 media.UserID == uid，非己有计入 failed/errors。
+// 审计日志记一条 "rename"（best-effort，失败不影响结果）。
+// 响应：{ renamed_count, renamed:[{media_id,filename}], failed:[{id,reason}], errors:[{id,reason}] }
+//   renamed/failed 为遗留字段（旧前端读取），errors 与 failed 内容相同（新前端读取）。
 func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -4919,31 +4932,44 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		MediaIDs []string `json:"media_ids"`
-		Pattern  string   `json:"pattern"`
-		StartSeq int      `json:"start_seq"`
+		MediaIDs   []string `json:"media_ids"`
+		Prefix     string   `json:"prefix"`      // prefix 模式前缀（如 IMG_）
+		StartIndex int      `json:"start_index"` // prefix 模式起始序号，默认 1
+		Pattern    string   `json:"pattern"`     // 遗留 pattern 模式模板，须含 {seq}
+		StartSeq   int      `json:"start_seq"`   // 遗留 pattern 模式起始序号，默认 1
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
 		return
 	}
-	if len(req.MediaIDs) == 0 || req.Pattern == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids and pattern required"})
+	if len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids required"})
 		return
 	}
-	if len(req.MediaIDs) > 100 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 100 files per batch"})
+	if len(req.MediaIDs) > maxBatchIDs {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too many media_ids in one request"})
 		return
 	}
-	if !strings.Contains(req.Pattern, "{seq}") {
+
+	// 确定命名模式：prefix 优先，否则回退 pattern。
+	prefixMode := req.Prefix != ""
+	if !prefixMode && req.Pattern == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "prefix or pattern required"})
+		return
+	}
+	if !prefixMode && !strings.Contains(req.Pattern, "{seq}") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "pattern must contain {seq}"})
 		return
 	}
 
-	seq := req.StartSeq
+	seq := req.StartIndex
+	if seq <= 0 {
+		seq = req.StartSeq
+	}
 	if seq <= 0 {
 		seq = 1
 	}
+
 	type renameResult struct {
 		ID       string `json:"media_id"`
 		Filename string `json:"filename"`
@@ -4960,12 +4986,18 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 			failed = append(failed, batchOpFailure{ID: mediaID, Reason: "not_owner"})
 			continue
 		}
-		// 保留文件扩展名
+		// 保留原文件扩展名（含点），无扩展名则为空串。
 		ext := ""
 		if i := strings.LastIndex(media.Filename, "."); i >= 0 {
 			ext = media.Filename[i:]
 		}
-		newName := strings.ReplaceAll(req.Pattern, "{seq}", fmt.Sprintf("%d", seq)) + ext
+		var newName string
+		if prefixMode {
+			// prefix + 三位零填充序号，与 media-batch-rename-suggest 格式一致。
+			newName = fmt.Sprintf("%s%03d%s", req.Prefix, seq, ext)
+		} else {
+			newName = strings.ReplaceAll(req.Pattern, "{seq}", fmt.Sprintf("%d", seq)) + ext
+		}
 		seq++
 
 		media.Filename = newName
@@ -4976,10 +5008,13 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 		succeeded = append(succeeded, renameResult{ID: mediaID, Filename: newName})
 	}
 
+	_ = s.store.AddAuditLog(r.Context(), uid, "rename", "", fmt.Sprintf("batch rename %d media", len(succeeded)))
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"renamed_count": len(succeeded),
 		"renamed":       succeeded,
 		"failed":        failed,
+		"errors":        failed,
 	})
 }
 
