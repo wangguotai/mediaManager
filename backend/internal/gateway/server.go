@@ -260,6 +260,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/cover-auto-pick", s.handleAlbumCoverAutoPick)
 	// 批量智能选封面：遍历用户所有无封面相册，对每个执行 cover-auto-pick 逻辑。
 	s.mux.HandleFunc("/api/media/album/batch-cover-auto-pick", s.handleAlbumBatchCoverAutoPick)
+	// 智能封面分析：GET ?album_id=xxx — 对比当前封面与相册内最优候选，给出是否应更换与推荐项。
+	// 只读分析，不落库（区别于 cover-auto-pick 会覆盖封面）。精确匹配优先于 /api/media/album/ 前缀。
+	s.mux.HandleFunc("/api/media/album-smart-cover", s.handleAlbumSmartCover)
 	// V8：取消相册共享
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
@@ -2330,6 +2333,231 @@ func (s *Server) handleAlbumBatchCoverAutoPick(w http.ResponseWriter, r *http.Re
 		"total":         total,
 		"details":       details,
 	})
+}
+
+// handleAlbumSmartCover 智能封面分析：GET /api/media/album-smart-cover?album_id=xxx。
+// 不落库，只做只读分析：取相册当前封面 media 与相册全部图片，按「图片类型 > 像素数(width*height)
+// > 上传新鲜度(created_at)」评分，对比当前封面与最优候选。若当前封面即最优则 should_change=false，
+// 否则给出推荐项与原因。返回:
+//
+//	{
+//	  "album_id": "...",
+//	  "current_cover": {"id":"...", "score": 0.0, "is_image": true, "pixels": 0, "reason": "..."},
+//	  "recommended":  {"id":"...", "score": 0.0, "is_image": true, "pixels": 0, "reason": "..."},
+//	  "should_change": false,
+//	  "analysis": {"total_media": 0, "image_count": 0, "best_pixels": 0}
+//	}
+//
+// 评分为 0-100 的相对分：图片类型基准 50 分，像素数与相册内最大像素数比值占 40 分，
+// 上传新鲜度（相对最新 created_at 的天数衰减）占 10 分。非图片类型得 0 分。
+func (s *Server) handleAlbumSmartCover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albumID := strings.TrimSpace(r.URL.Query().Get("album_id"))
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	album := provider.GetAlbum(uid, albumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	if len(album.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album is empty"})
+		return
+	}
+
+	// 拉取相册内所有 media 元数据，构建候选集（仅 IMAGE 计入打分，非图片作为 fallback 记录）。
+	type info struct {
+		ID       string
+		IsImage  bool
+		Pixels   int64
+		CreatedA time.Time
+	}
+	infos := make([]info, 0, len(album.MediaIDs))
+	imgCount := 0
+	var maxPixels int64
+	var newestCreated time.Time
+	for _, mid := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mid)
+		if err != nil || m == nil || m.Deleted {
+			continue
+		}
+		ii := info{ID: mid, IsImage: m.Type == "IMAGE", Pixels: int64(m.Width) * int64(m.Height), CreatedA: m.CreatedAt}
+		infos = append(infos, ii)
+		if ii.IsImage {
+			imgCount++
+			if ii.Pixels > maxPixels {
+				maxPixels = ii.Pixels
+			}
+		}
+		if ii.CreatedA.After(newestCreated) {
+			newestCreated = ii.CreatedA
+		}
+	}
+	if len(infos) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no media available"})
+		return
+	}
+
+	// 评分函数：图片 50 基准 + 像素占比 40 + 新鲜度 10。非图片得 0。
+	score := func(ii info) float64 {
+		if !ii.IsImage {
+			return 0
+		}
+		pixelPart := 0.0
+		if maxPixels > 0 {
+			pixelPart = 40.0 * float64(ii.Pixels) / float64(maxPixels)
+		}
+		recencyPart := 0.0
+		if !newestCreated.IsZero() && !ii.CreatedA.IsZero() {
+			days := newestCreated.Sub(ii.CreatedA).Hours() / 24
+			if days < 0 {
+				days = 0
+			}
+			// 30 天内线性衰减到 0；超过 30 天不计新鲜度分。
+			if days < 30 {
+				recencyPart = 10.0 * (1 - days/30)
+			}
+		}
+		return 50.0 + pixelPart + recencyPart
+	}
+
+	// 当前封面
+	curID := album.CoverMediaID
+	var curInfo *info
+	for i := range infos {
+		if infos[i].ID == curID {
+			curInfo = &infos[i]
+			break
+		}
+	}
+	// 当前封面不在相册内或为空：仍尝试从 store 取其元数据做评分展示。
+	if curInfo == nil {
+		if curID != "" {
+			m, err := s.store.GetMedia(r.Context(), curID)
+			if err == nil && m != nil && !m.Deleted {
+				ii := info{ID: curID, IsImage: m.Type == "IMAGE", Pixels: int64(m.Width) * int64(m.Height), CreatedA: m.CreatedAt}
+				if ii.IsImage && ii.Pixels > maxPixels {
+					maxPixels = ii.Pixels
+				}
+				if ii.CreatedA.After(newestCreated) {
+					newestCreated = ii.CreatedA
+				}
+				infos = append(infos, ii)
+				curInfo = &infos[len(infos)-1]
+			}
+		}
+	}
+
+	// 找出最优候选（评分最高；并列时优先图片，再优先像素大，再优先最新）。
+	var best *info
+	for i := range infos {
+		if best == nil {
+			best = &infos[i]
+			continue
+		}
+		sb, si := score(*best), score(infos[i])
+		if si > sb {
+			best = &infos[i]
+		} else if si == sb {
+			if infos[i].IsImage && !best.IsImage {
+				best = &infos[i]
+			} else if infos[i].IsImage == best.IsImage {
+				if infos[i].Pixels > best.Pixels {
+					best = &infos[i]
+				} else if infos[i].Pixels == best.Pixels && infos[i].CreatedA.After(best.CreatedA) {
+					best = &infos[i]
+				}
+			}
+		}
+	}
+
+	curScore := 0.0
+	curReason := "no_cover_set"
+	if curInfo != nil {
+		curScore = score(*curInfo)
+		if curInfo.IsImage {
+			curReason = "current_is_image"
+		} else {
+			curReason = "current_is_non_image"
+		}
+	} else if curID == "" {
+		curReason = "no_cover_set"
+	}
+
+	bestScore := 0.0
+	bestReason := "best_image_by_size_and_recency"
+	if best != nil {
+		bestScore = score(*best)
+		if !best.IsImage {
+			bestReason = "no_image_fallback_to_most_recent_media"
+		}
+	}
+
+	shouldChange := false
+	if best != nil && curInfo != nil {
+		// 当前封面非最优，或当前非图片但存在图片候选时建议更换。
+		if best.ID != curInfo.ID {
+			shouldChange = true
+		}
+	} else if curInfo == nil && best != nil {
+		shouldChange = true // 无当前封面
+	}
+
+	// 预先取出推荐/当前封面的标量值，避免在 map 字面量中内联 IIFE（gofmt 不友好）。
+	curPixels := int64(0)
+	if curInfo != nil {
+		curPixels = curInfo.Pixels
+	}
+	bestID := ""
+	bestPixels := int64(0)
+	if best != nil {
+		bestID = best.ID
+		bestPixels = best.Pixels
+	}
+
+	resp := map[string]any{
+		"album_id": albumID,
+		"current_cover": map[string]any{
+			"id":       curID,
+			"score":    curScore,
+			"is_image": curInfo != nil && curInfo.IsImage,
+			"pixels":   curPixels,
+			"reason":   curReason,
+		},
+		"recommended": map[string]any{
+			"id":       bestID,
+			"score":    bestScore,
+			"is_image": best != nil && best.IsImage,
+			"pixels":   bestPixels,
+			"reason":   bestReason,
+		},
+		"should_change": shouldChange,
+		"analysis": map[string]any{
+			"total_media": len(infos),
+			"image_count": imgCount,
+			"best_pixels": maxPixels,
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAlbumUnshare V8：POST /api/media/album/unshare — 取消相册共享。
