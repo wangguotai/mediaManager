@@ -2260,6 +2260,36 @@ object MediaService {
         }
     }
 
+    /**
+     * V9：POST /api/media/tag/rename — 重命名标签，返回是否成功。
+     *
+     * 后端按 `{ old_name, new_name }` 接收，将所有媒体的 `old_name` 标签替换为
+     * `new_name`（若 `new_name` 已存在则合并）。调用成功后需刷新 tagStats 以反映新名。
+     *
+     * @param oldName 旧标签名
+     * @param newName 新标签名
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun renameTag(oldName: String, newName: String): Boolean {
+        return try {
+            val body = buildJsonObject {
+                put("old_name", oldName)
+                put("new_name", newName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/rename") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "renameTag old=$oldName new=$newName status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "renameTag FAILED: ${e.message}")
+            false
+        }
+    }
+
     /** V8：GET /api/media/tag/stats — 标签统计。 */
     suspend fun getTagStats(): List<TagStat>? {
         return try {

@@ -136,6 +136,11 @@ fun MediaListScreen(
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
 
+    // V9：待应用的标签搜索——从"我的"标签云点击 chip 触发。切到媒体 Tab 时
+    // LaunchedEffect(selectedTab) 会 clearSearchAndFilter，故先记下标签名，
+    // 由下方 LaunchedEffect(pendingTagSearch) 在 Tab 切换完成后设入 searchQuery。
+    var pendingTagSearch by remember { mutableStateOf<String?>(null) }
+
     // 高级搜索对话框显隐：SearchBar 上的「高级搜索」图标触发，
     // AdvancedSearchDialog 回调 Map<String,String> 条件后由本 Screen 启协程调
     // MediaService.advancedSearch + applyAdvancedSearchResults 替换列表。
@@ -189,6 +194,19 @@ fun MediaListScreen(
             viewModel.loadCloudViewForTab(forceRefresh = false)
         } else if (selectedTab == 2) {
             viewModel.loadCloudMediaList(forceRefresh = false)
+        }
+    }
+
+    // V9：标签云 chip 点击搜索——从"我的"切到媒体 Tab 后，上面的 LaunchedEffect(selectedTab)
+    // 会先 clearSearchAndFilter。这里在 pendingTagSearch 变化时（Tab 已切完）把 query 设为 #tag，
+    // 并展开搜索栏让用户看见。延迟一帧避开 clear 的竞争。
+    LaunchedEffect(pendingTagSearch) {
+        val tag = pendingTagSearch ?: return@LaunchedEffect
+        pendingTagSearch = null
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            kotlinx.coroutines.delay(50)  // 等 selectedTab 的 clear 落定
+            viewModel.applySearchQuery("#$tag")
+            searchExpanded = true
         }
     }
 
@@ -582,7 +600,15 @@ fun MediaListScreen(
                 MyTabContent(
                     onNavigateToSettings = onNavigateToSettings,
                     onNavigateToAlbums = onNavigateToAlbums,
-                    onNavigateToFileManagement = onNavigateToFileManagement
+                    onNavigateToFileManagement = onNavigateToFileManagement,
+                    // V9：标签云 chip 点击搜索——切到"网盘图片" Tab 并把搜索 query 设为 #tag。
+                    // MyTabContent 在"我的" Tab 渲染，搜索栏仅 Tab 0-2 显示，故需切 Tab。
+                    // 因 LaunchedEffect(selectedTab) 会 clearSearchAndFilter，这里只切 Tab +
+                    // 记下待搜索标签，由下方 pendingTagSearch 的 LaunchedEffect 在 Tab 切换后应用。
+                    onTagSearch = { tag ->
+                        pendingTagSearch = tag
+                        selectedTab = 2
+                    }
                 )
                 return@Box
             }
@@ -810,7 +836,9 @@ fun MediaListScreen(
 private fun MyTabContent(
     onNavigateToSettings: () -> Unit,
     onNavigateToAlbums: () -> Unit,
-    onNavigateToFileManagement: () -> Unit
+    onNavigateToFileManagement: () -> Unit,
+    // V9：标签云 chip 点击搜索回调——传入标签名，由 Screen 切 Tab + 设 query
+    onTagSearch: (String) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     Column(
@@ -1687,7 +1715,7 @@ private fun MyTabContent(
             }
         }
 
-        // V8：标签云卡片
+        // V9：标签云卡片（V8 演进：chip 点击搜索 + 长按弹重命名/删除菜单）
         var tagStats by remember { mutableStateOf<List<MediaService.TagStat>?>(null) }
         LaunchedEffect(Unit) { tagStats = MediaService.getTagStats() }
         tagStats?.let { stats ->
@@ -1705,6 +1733,13 @@ private fun MyTabContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        // V9：长按 chip 弹出操作菜单的锚点标签 + 菜单展开态
+                        var tagMenuAnchor by remember { mutableStateOf<String?>(null) }
+                        var showTagMenu by remember { mutableStateOf(false) }
+                        // V9：重命名对话框目标 + 输入文本
+                        var renameTarget by remember { mutableStateOf<String?>(null) }
+                        var renameText by remember { mutableStateOf("") }
+                        // V8：删除确认对话框目标
                         var deleteTagTarget by remember { mutableStateOf<String?>(null) }
                         FlowRow(
                             modifier = Modifier.fillMaxWidth(),
@@ -1718,12 +1753,71 @@ private fun MyTabContent(
                                         containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
                                     ),
                                     modifier = Modifier.combinedClickable(
-                                        onClick = {},
-                                        onLongClick = { deleteTagTarget = s.tag }
+                                        // V9：点击 → 触发标签搜索（切 Tab + 设 query 为 #tag）
+                                        onClick = { onTagSearch(s.tag) },
+                                        // V9：长按 → 弹重命名/删除菜单（不再直接删除）
+                                        onLongClick = {
+                                            tagMenuAnchor = s.tag
+                                            showTagMenu = true
+                                        }
                                     )
                                 )
+                                // DropdownMenu 需附着在 composable 上，为当前 tag 锚定显示
+                                androidx.compose.material3.DropdownMenu(
+                                    expanded = showTagMenu && tagMenuAnchor == s.tag,
+                                    onDismissRequest = { if (tagMenuAnchor == s.tag) showTagMenu = false }
+                                ) {
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("重命名") },
+                                        onClick = {
+                                            showTagMenu = false
+                                            renameTarget = s.tag
+                                            renameText = s.tag
+                                        }
+                                    )
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("删除") },
+                                        onClick = {
+                                            showTagMenu = false
+                                            deleteTagTarget = s.tag
+                                        }
+                                    )
+                                }
                             }
                         }
+                        // V9：重命名对话框
+                        renameTarget?.let { oldName ->
+                            AlertDialog(
+                                onDismissRequest = { renameTarget = null },
+                                title = { Text("重命名标签") },
+                                text = {
+                                    OutlinedTextField(
+                                        value = renameText,
+                                        onValueChange = { renameText = it.trim() },
+                                        label = { Text("新标签名") },
+                                        singleLine = true
+                                    )
+                                },
+                                confirmButton = {
+                                    TextButton(
+                                        enabled = renameText.isNotBlank() && renameText != oldName,
+                                        onClick = {
+                                            val old = oldName
+                                            val new = renameText
+                                            renameTarget = null
+                                            scope.launch {
+                                                val ok = MediaService.renameTag(old, new)
+                                                if (ok) tagStats = MediaService.getTagStats()
+                                            }
+                                        }
+                                    ) { Text("确定") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { renameTarget = null }) { Text("取消") }
+                                }
+                            )
+                        }
+                        // V8：删除确认对话框
                         deleteTagTarget?.let { tag ->
                             AlertDialog(
                                 onDismissRequest = { deleteTagTarget = null },
@@ -1749,7 +1843,7 @@ private fun MyTabContent(
             }
         }
 
-        // V8：标签云卡片结束
+        // V9：标签云卡片结束
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
