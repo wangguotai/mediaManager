@@ -2558,4 +2558,58 @@ object MediaService {
             null
         }
     }
+
+    /**
+     * V8：GET /api/media/storage-breakdown — 按类型分组的存储统计。
+     *
+     * 后端响应：`{ "by_type": {"IMAGE":{count,bytes}, "VIDEO":{...}, "LIVE_PHOTO":{...}},
+     * "by_month": [...], "total":{count,bytes,mb} }`。前端只消费 by_type + total，
+     * 拍平为 [StorageBreakdown] 便于设置页逐行展示。失败返回 null，设置页按空状态展示。
+     */
+    suspend fun getStorageBreakdown(): StorageBreakdown? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-breakdown") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val byType = o["by_type"]?.jsonObject
+                fun pick(key: String): Pair<Int, Long> {
+                    val t = byType?.get(key)?.jsonObject
+                    val c = t?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    val b = t?.get("bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                    return c to b
+                }
+                val (ic, ib) = pick("IMAGE")
+                val (vc, vb) = pick("VIDEO")
+                val (lc, lb) = pick("LIVE_PHOTO")
+                val total = o["total"]?.jsonObject
+                StorageBreakdown(
+                    imageCount = ic,
+                    imageBytes = ib,
+                    videoCount = vc,
+                    videoBytes = vb,
+                    liveCount = lc,
+                    liveBytes = lb,
+                    totalCount = total?.get("count")?.jsonPrimitive?.intOrNull ?: (ic + vc + lc),
+                    totalBytes = total?.get("bytes")?.jsonPrimitive?.longOrNull ?: (ib + vb + lb)
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageBreakdown FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：存储分析结果（by_type 拍平 + total）。 */
+    data class StorageBreakdown(
+        val imageCount: Int,
+        val imageBytes: Long,
+        val videoCount: Int,
+        val videoBytes: Long,
+        val liveCount: Int,
+        val liveBytes: Long,
+        val totalCount: Int,
+        val totalBytes: Long
+    )
 }

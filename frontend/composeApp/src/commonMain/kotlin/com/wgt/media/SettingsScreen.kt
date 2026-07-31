@@ -38,6 +38,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,6 +46,9 @@ import com.wgt.platform.logger.logger
 import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
 import com.wgt.media.BackendImageLoader
 import com.wgt.feature.media.MediaService
 import mediamanager.composeapp.generated.resources.Res
@@ -854,6 +858,75 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V8：存储分析卡片（GET /api/media/storage-breakdown）
+            var storageBreakdown by remember { mutableStateOf<MediaService.StorageBreakdown?>(null) }
+            var storageLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                orphanScope.launch {
+                    storageBreakdown = MediaService.getStorageBreakdown()
+                    storageLoading = false
+                }
+            }
+            SectionTitle("存储分析", iconRes = Res.drawable.ic_photo)
+            if (storageLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (storageBreakdown == null) {
+                Text(
+                    "无法获取存储统计",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val b = storageBreakdown!!
+                // 图片 / 视频 / Live 三行：彩色小圆点 + 名称 + 数量与占用
+                StorageBreakdownRow(
+                    dotColor = MaterialTheme.colorScheme.primary,          // 蓝
+                    label = "图片",
+                    count = b.imageCount,
+                    bytes = b.imageBytes
+                )
+                StorageBreakdownRow(
+                    dotColor = MaterialTheme.colorScheme.error,            // 红
+                    label = "视频",
+                    count = b.videoCount,
+                    bytes = b.videoBytes
+                )
+                StorageBreakdownRow(
+                    dotColor = MaterialTheme.colorScheme.tertiary,         // 绿
+                    label = "Live",
+                    count = b.liveCount,
+                    bytes = b.liveBytes
+                )
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(vertical = 6.dp)
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "总计",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "${b.totalCount} 项 · ${formatBytesToMB(b.totalBytes)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }
@@ -965,6 +1038,43 @@ private fun SectionTitle(text: String, iconRes: DrawableResource? = null) {
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
+        )
+    }
+}
+
+/**
+ * 存储分析的单行：彩色小圆点 + 类型名 + 数量与 MB 占用（V8）。
+ *
+ * 纯展示行，无交互。圆点用 [Box] + [CircleShape] 着色，与 MaterialTheme 色板取色
+ * （图片蓝=primary，视频红=error，Live 绿=tertiary），便于主题切换时随色板联动。
+ */
+@Composable
+private fun StorageBreakdownRow(
+    dotColor: Color,
+    label: String,
+    count: Int,
+    bytes: Long
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(dotColor, CircleShape)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+        }
+        Text(
+            "$count 个 · ${formatBytesToMB(bytes)}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
     }
 }
