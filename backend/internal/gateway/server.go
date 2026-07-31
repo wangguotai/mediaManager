@@ -147,6 +147,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V24：多源增强搜索建议（文件名+标签+相册名合并去重）
 	s.mux.HandleFunc("/api/media/search-suggestions-enhanced", s.handleSearchSuggestionsEnhanced)
+	// V25：文件名前缀搜索补全（大小写不敏感前缀匹配，返回带 media_id 的建议）
+	s.mux.HandleFunc("/api/media/media-search-suggestions", s.handleMediaPrefixSearchSuggestions)
 	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
 	// V9：媒体旋转（更新 EXIF orientation / 旋转标记）
@@ -3772,6 +3774,85 @@ func (s *Server) handleSearchSuggestionsEnhanced(w http.ResponseWriter, r *http.
 		}
 	}
 
+	if suggestions == nil {
+		suggestions = []suggestion{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
+	})
+}
+
+// handleMediaPrefixSearchSuggestions V25：GET /api/media/media-search-suggestions?q=xxx&limit=5
+// 文件名前缀搜索补全：用户输入"IMG"时返回"IMG_001"、"IMG_2024" 等前缀匹配。
+// 与 search-suggestions-enhanced 的区别：本端点聚焦"补全"语义——
+//   - 仅做大小写不敏感前缀匹配（HasPrefix），不做子串匹配；
+//   - 保留完整文件名（不去扩展名），更接近输入补全自动完成场景；
+//   - 每条建议携带 media_id，便于前端直接跳转/预览。
+//
+// 返回: { suggestions: [{text, type: "filename", media_id?}], total }
+func (s *Server) handleMediaPrefixSearchSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if q == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"suggestions": []any{}, "total": 0})
+		return
+	}
+	limit := 5
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	type suggestion struct {
+		Text    string `json:"text"`
+		Type    string `json:"type"`
+		MediaID string `json:"media_id,omitempty"`
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	seen := make(map[string]bool)
+	var suggestions []suggestion
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		name := strings.ToLower(m.Filename)
+		if !strings.HasPrefix(name, q) {
+			continue
+		}
+		// 以完整文件名作为补全文本；按小写 key 去重，避免同名不同扩展名重复。
+		key := name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		suggestions = append(suggestions, suggestion{
+			Text:    m.Filename,
+			Type:    "filename",
+			MediaID: m.ID,
+		})
+		if len(suggestions) >= limit {
+			break
+		}
+	}
 	if suggestions == nil {
 		suggestions = []suggestion{}
 	}
