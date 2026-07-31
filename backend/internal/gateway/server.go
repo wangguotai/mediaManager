@@ -140,6 +140,9 @@ func (s *Server) registerRoutes() {
 	// 近似重复检测（SHA256 不同但同类型+大小相近<5%+同分辨率），
 	// 可能是不同格式/质量的同一照片，与 /duplicates（精确 SHA 去重）互补。
 	s.mux.HandleFunc("/api/media/media-duplicates-similar", s.handleMediaDuplicatesSimilar)
+	// V8：批量删除重复文件（每组保留最早一份，软删其余）。
+	// 注意：与 /duplicates（精确 SHA 分组）互补——后者只检测不删，本端点执行删除。
+	s.mux.HandleFunc("/api/media/media-duplicates-batch-delete", s.handleMediaDuplicatesBatchDelete)
 	// V7：媒体库综合摘要端点
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
 	// V7：按月份分组的时间轴端点
@@ -3277,11 +3280,11 @@ func (s *Server) handleTagPowerScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type tagPower struct {
-		TagName        string  `json:"tag_name"`
-		MediaCount     int     `json:"media_count"`
-		TotalBytes     int64   `json:"total_bytes"`
+		TagName         string  `json:"tag_name"`
+		MediaCount      int     `json:"media_count"`
+		TotalBytes      int64   `json:"total_bytes"`
 		CoveragePercent float64 `json:"coverage_percent"`
-		PowerScore     float64 `json:"power_score"`
+		PowerScore      float64 `json:"power_score"`
 	}
 
 	results := make([]tagPower, 0, len(tags))
@@ -3302,11 +3305,11 @@ func (s *Server) handleTagPowerScore(w http.ResponseWriter, r *http.Request) {
 			coverage = float64(count) / float64(totalMedia) * 100
 		}
 		results = append(results, tagPower{
-			TagName:        t,
-			MediaCount:     count,
-			TotalBytes:     totalBytes,
+			TagName:         t,
+			MediaCount:      count,
+			TotalBytes:      totalBytes,
 			CoveragePercent: coverage,
-			PowerScore:     float64(count)*2 + totalBytesMB*0.1,
+			PowerScore:      float64(count)*2 + totalBytesMB*0.1,
 		})
 	}
 
@@ -3407,6 +3410,111 @@ func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
 		"wasted_bytes": totalWasted,
 		"wasted_mb":    float64(totalWasted) / (1024 * 1024),
 		"user_id":      uid,
+	})
+}
+
+// handleMediaDuplicatesBatchDelete 处理 POST /api/media/media-duplicates-batch-delete，
+// 批量软删除重复文件：按 SHA256 分组，每组保留最早（created_at 最小）的一份，
+// 其余成员标记为软删除（deleted=1），不物理删文件。
+//
+// 设计权衡（与 handleMediaDuplicates 的"保留最新"不同）：
+//   - 本端点保留"最早上传的"（created_at 最小），即用户最初存入的那份。这与
+//     检测端点 handleMediaDuplicates 建议"保留最新"的口径相反，是有意为之——
+//     批量自动清理时，保留"第一份原始上传"更符合用户对"原件"的直觉，避免误删
+//     较早的真实原件而去重较晚的重复上传。如需切换为"保留最新"，改升序为降序即可。
+//
+// 安全：POST only（写操作，避免 GET 触发副作用/cache 误删）。鉴权由 authMiddleware
+// 保证 uid 非空；归属校验交给 MarkDeletedForUser（按 user_id 双键过滤，防横向越权）。
+// 审计：每个被删 media 写一条 delete 审计日志，detail 注明保留的 keep_id 便于追溯。
+//
+// 响应: {deleted_count, freed_bytes, groups_processed, errors:[{media_id,error}]}
+// 其中 deleted_count 为成功软删的行数；freed_bytes 为这些行 Size 之和（磁盘文件
+// 由后续清理任务回收，此处仅统计元数据层可回收字节数）；errors 列出失败项，不阻断
+// 其余删除（best-effort，与 handleMediaDelete 软删墓碑策略一致）。
+func (s *Server) handleMediaDuplicatesBatchDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 直接从 DB 获取全部媒体（含 SHA256），proto 层 MediaMetadata 无 SHA256 字段。
+	// ListMediaByUser 只返回 deleted=0 的行，故已软删的不会重复处理。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 SHA256 分组，仅统计有指纹且未删除的有效行（ListMediaByUser 已过滤 deleted，
+	// 这里再排除空 SHA256——秒传未算指纹或旧数据无指纹的行无法判定重复，跳过）。
+	type dupeItem struct {
+		ID        string
+		Size      int64
+		CreatedAt int64 // Unix 秒，用于"最早"排序
+	}
+	groups := make(map[string][]dupeItem)
+	for _, m := range mediaList {
+		if m.SHA256 == "" {
+			continue
+		}
+		groups[m.SHA256] = append(groups[m.SHA256], dupeItem{
+			ID:        m.ID,
+			Size:      m.Size,
+			CreatedAt: m.CreatedAt.Unix(),
+		})
+	}
+
+	groupsProcessed := 0
+	deletedCount := 0
+	freedBytes := int64(0)
+	errs := make([]map[string]any, 0)
+	for _, items := range groups {
+		if len(items) < 2 {
+			continue // 非重复组，无需处理
+		}
+		groupsProcessed++
+
+		// 保留"最早"一份（created_at 升序，sorted[0] 为最小=最早），删除其余。
+		// 拷贝后排序避免改原 slice；created_at 相同时顺序不敏感（均在重复组内）。
+		sorted := make([]dupeItem, len(items))
+		copy(sorted, items)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].CreatedAt < sorted[j].CreatedAt
+		})
+		keepID := sorted[0].ID
+		for _, m := range sorted[1:] {
+			// 归属校验：MarkDeletedForUser 按 (id, user_id) 双键过滤，防横向越权。
+			// best-effort：单条失败不阻断组内其余删除（与 handleMediaDelete 一致）。
+			if err := s.store.MarkDeletedForUser(r.Context(), uid, m.ID); err != nil {
+				errs = append(errs, map[string]any{
+					"media_id": m.ID,
+					"error":    err.Error(),
+				})
+				continue
+			}
+			// 审计日志：best-effort，失败仅忽略（不影响删除结果，与现有 delete 路径一致）。
+			_ = s.store.AddAuditLog(r.Context(), uid, "delete", m.ID,
+				fmt.Sprintf("batch delete duplicate (sha256 group), kept %s", keepID))
+			deletedCount++
+			freedBytes += m.Size
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted_count":    deletedCount,
+		"freed_bytes":      freedBytes,
+		"groups_processed": groupsProcessed,
+		"errors":           errs,
+		"user_id":          uid,
 	})
 }
 
@@ -4763,9 +4871,9 @@ func (s *Server) handleStorageTrendExtended(w http.ResponseWriter, r *http.Reque
 
 	// 3) 组装结果，计算环比 / 同比。
 	type monthRow struct {
-		Month    string  `json:"month"`
-		Count    int     `json:"count"`
-		Bytes    int64   `json:"bytes"`
+		Month     string   `json:"month"`
+		Count     int      `json:"count"`
+		Bytes     int64    `json:"bytes"`
 		MoMGrowth *float64 `json:"mom_growth"`
 		YoYGrowth *float64 `json:"yoy_growth"`
 	}
@@ -5005,7 +5113,8 @@ func (s *Server) handleMediaBatchRotate(w http.ResponseWriter, r *http.Request) 
 // 防横向越权：逐条 GetMedia 校验 media.UserID == uid，非己有计入 failed/errors。
 // 审计日志记一条 "rename"（best-effort，失败不影响结果）。
 // 响应：{ renamed_count, renamed:[{media_id,filename}], failed:[{id,reason}], errors:[{id,reason}] }
-//   renamed/failed 为遗留字段（旧前端读取），errors 与 failed 内容相同（新前端读取）。
+//
+//	renamed/failed 为遗留字段（旧前端读取），errors 与 failed 内容相同（新前端读取）。
 func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -5248,10 +5357,11 @@ func (s *Server) handleMediaInfo(w http.ResponseWriter, r *http.Request) {
 // GET /api/media/media-related/{id}?limit=10
 //
 // 推荐逻辑（优先级从高到低）：
-//  a) 相同标签的媒体（优先）：取该 media 的所有标签，对每个标签调
-//     SearchMediaByTag 收集关联 media_id，命中即加入候选（reason="shared_tag:<tag>"）。
-//  b) 相同类型 + 相近日期（±7天）：遍历用户未软删媒体，类型相同且 created_at
-//     落在 [target.CreatedAt ±7day] 区间内（reason="same_type_nearby_date"）。
+//
+//	a) 相同标签的媒体（优先）：取该 media 的所有标签，对每个标签调
+//	   SearchMediaByTag 收集关联 media_id，命中即加入候选（reason="shared_tag:<tag>"）。
+//	b) 相同类型 + 相近日期（±7天）：遍历用户未软删媒体，类型相同且 created_at
+//	   落在 [target.CreatedAt ±7day] 区间内（reason="same_type_nearby_date"）。
 //
 // 去掉自身、去重（已加入的不再重复），按 reason 优先级（标签 > 类型+日期）排序后
 // 截断到 limit（默认 10，上限 50）。鉴权：需有效 token，且 media.UserID 必须匹配
@@ -5315,16 +5425,16 @@ func (s *Server) handleMediaRelated(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type relatedItem struct {
-		MediaID   string `json:"media_id"`
-		Filename  string `json:"filename"`
-		Type      string `json:"type"`
-		Reason    string `json:"reason"`
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+		Type     string `json:"type"`
+		Reason   string `json:"reason"`
 	}
 
-	seen := make(map[string]bool)        // 已纳入结果的 media_id（去重）
-	seen[mediaID] = true                 // 排除自身
-	var tagHits []relatedItem            // a) 相同标签命中（优先级高）
-	var typeDateHits []relatedItem       // b) 相同类型+相近日期命中
+	seen := make(map[string]bool)  // 已纳入结果的 media_id（去重）
+	seen[mediaID] = true           // 排除自身
+	var tagHits []relatedItem      // a) 相同标签命中（优先级高）
+	var typeDateHits []relatedItem // b) 相同类型+相近日期命中
 
 	// a) 相同标签的媒体（优先）。
 	if tags, terr := s.store.ListMediaTags(r.Context(), uid, mediaID); terr == nil {
@@ -6396,9 +6506,9 @@ func (s *Server) handleMediaLifecycle(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"lifecycle":      lifecycle,
-		"total_actions":  total,
-		"total_stages":   len(lifecycle),
+		"lifecycle":     lifecycle,
+		"total_actions": total,
+		"total_stages":  len(lifecycle),
 	})
 }
 
@@ -7650,9 +7760,9 @@ func (s *Server) handleTagMostUsed(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tags":                out,
-		"total_tags":          totalTags,
-		"total_tagged_media":  len(taggedSet),
+		"tags":               out,
+		"total_tags":         totalTags,
+		"total_tagged_media": len(taggedSet),
 	})
 }
 
@@ -7696,11 +7806,11 @@ func (s *Server) handleTagStatByType(w http.ResponseWriter, r *http.Request) {
 		idx[m.ID] = m
 	}
 	type tagTypeStat struct {
-		TagName     string `json:"tag_name"`
-		Total       int    `json:"total"`
-		ImageCount  int    `json:"image_count"`
-		VideoCount  int    `json:"video_count"`
-		LiveCount   int    `json:"live_count"`
+		TagName    string `json:"tag_name"`
+		Total      int    `json:"total"`
+		ImageCount int    `json:"image_count"`
+		VideoCount int    `json:"video_count"`
+		LiveCount  int    `json:"live_count"`
 	}
 	out := make([]tagTypeStat, 0, len(tags))
 	for _, tagName := range tags {
@@ -7951,10 +8061,10 @@ func (s *Server) handleMediaTagCloudData(w http.ResponseWriter, r *http.Request)
 //  2. TagStats 取各标签关联媒体数，构建 tag→count 映射。
 //  3. 对每个标签，按 - / : 三种分隔符切分出前缀 parent + 后缀 suffix。
 //     - 若分隔符存在且 parent ∈ tagSet（父标签确实由用户独立使用），则视为
-//       父子关系；否则该标签作为顶层根。
+//     父子关系；否则该标签作为顶层根。
 //     - 优先级：- > / :（按出现顺序依次尝试，命中即停）。
 //     - 仅按第一个分隔符切分：a-b-c 的父为 a（若 a 独立存在），不做多层嵌套，
-//       保持单层父子、简单可预测。
+//     保持单层父子、简单可预测。
 //     count 取该标签自身关联媒体数（不含子标签的，避免重复统计口径混乱）。
 //
 // 注意：本端点只读，不落任何数据；推断纯基于标签名命名约定。
@@ -8042,9 +8152,9 @@ func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
 		hierarchy = append(hierarchy, node)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"hierarchy":    hierarchy,
-		"total_roots":  len(hierarchy),
-		"total_tags":   len(tags),
+		"hierarchy":   hierarchy,
+		"total_roots": len(hierarchy),
+		"total_tags":  len(tags),
 	})
 }
 
@@ -8372,11 +8482,11 @@ func (s *Server) handleTagCleanupUnused(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":             "ok",
-		"removed_count":      len(removed),
-		"removed_tags":       removed,
-		"total_tags_before":  totalBefore,
-		"total_tags_after":   totalBefore - len(removed),
+		"status":            "ok",
+		"removed_count":     len(removed),
+		"removed_tags":      removed,
+		"total_tags_before": totalBefore,
+		"total_tags_after":  totalBefore - len(removed),
 	})
 }
 
@@ -8638,9 +8748,11 @@ func (s *Server) handleMediaOrphanCheck(w http.ResponseWriter, r *http.Request) 
 
 // handleMediaErrorCheck GET /api/media/media-error-check — 媒体错误检查。
 // 检测损坏的媒体文件，三种错误类型逐条判定（按优先级，单条 media 至多记录一种）：
-//  a) zero_size   —— DB 记录 Size <= 0
-//  b) missing_file —— 磁盘文件不存在（uploads 目录下 m.ID.* glob 无命中，或 stat 失败）
-//  c) size_mismatch—— 磁盘文件大小与 DB 记录不符
+//
+//	a) zero_size   —— DB 记录 Size <= 0
+//	b) missing_file —— 磁盘文件不存在（uploads 目录下 m.ID.* glob 无命中，或 stat 失败）
+//	c) size_mismatch—— 磁盘文件大小与 DB 记录不符
+//
 // 查询参数 limit 控制最大扫描条数（默认 100，上限 1000）。仅扫描未软删（deleted=0）记录。
 // 返回 {errors:[{media_id,filename,error_type,db_size,disk_size?}], total_errors, total_checked}。
 // disk_size 仅在 size_mismatch 时携带。
@@ -9019,53 +9131,53 @@ var tagTradSimpMap = map[rune]rune{
 // tagCnEnMap 内置常见中文标签 <-> 英文标签对应表（双向）。
 // 仅收录媒体管理场景高频词，用户可后续扩展。键为小写英文，值为中文简体。
 var tagCnEnMap = map[string]string{
-	"travel":    "旅行",
-	"food":      "美食",
-	"photo":     "照片",
-	"video":     "视频",
-	"nature":    "自然",
-	"landscape": "风景",
-	"portrait":  "人像",
-	"family":    "家庭",
-	"friend":    "朋友",
-	"friends":   "朋友",
-	"wedding":   "婚礼",
-	"sunset":    "日落",
-	"sunrise":   "日出",
-	"night":     "夜景",
-	"city":      "城市",
-	"street":    "街拍",
-	"animal":    "动物",
-	"cat":       "猫",
-	"dog":       "狗",
-	"flower":    "花",
-	"beach":     "海滩",
-	"mountain":  "山",
-	"snow":      "雪",
-	"baby":      "宝宝",
-	"birthday":  "生日",
-	"party":     "聚会",
-	"festival":  "节日",
-	"holiday":   "假期",
-	"car":       "汽车",
+	"travel":       "旅行",
+	"food":         "美食",
+	"photo":        "照片",
+	"video":        "视频",
+	"nature":       "自然",
+	"landscape":    "风景",
+	"portrait":     "人像",
+	"family":       "家庭",
+	"friend":       "朋友",
+	"friends":      "朋友",
+	"wedding":      "婚礼",
+	"sunset":       "日落",
+	"sunrise":      "日出",
+	"night":        "夜景",
+	"city":         "城市",
+	"street":       "街拍",
+	"animal":       "动物",
+	"cat":          "猫",
+	"dog":          "狗",
+	"flower":       "花",
+	"beach":        "海滩",
+	"mountain":     "山",
+	"snow":         "雪",
+	"baby":         "宝宝",
+	"birthday":     "生日",
+	"party":        "聚会",
+	"festival":     "节日",
+	"holiday":      "假期",
+	"car":          "汽车",
 	"architecture": "建筑",
-	"sky":       "天空",
-	"sea":       "海",
-	"forest":    "森林",
-	"autumn":    "秋天",
-	"spring":    "春天",
-	"summer":    "夏天",
-	"winter":    "冬天",
-	"art":       "艺术",
-	"music":     "音乐",
-	"sport":     "运动",
-	"running":   "跑步",
-	"coffee":    "咖啡",
-	"dessert":   "甜点",
-	"garden":    "花园",
-	"park":      "公园",
-	"museum":    "博物馆",
-	"church":    "教堂",
+	"sky":          "天空",
+	"sea":          "海",
+	"forest":       "森林",
+	"autumn":       "秋天",
+	"spring":       "春天",
+	"summer":       "夏天",
+	"winter":       "冬天",
+	"art":          "艺术",
+	"music":        "音乐",
+	"sport":        "运动",
+	"running":      "跑步",
+	"coffee":       "咖啡",
+	"dessert":      "甜点",
+	"garden":       "花园",
+	"park":         "公园",
+	"museum":       "博物馆",
+	"church":       "教堂",
 }
 
 // tagVariantMap 把"繁体简化后得到另一个但同义的词"映射到规范词。
@@ -9079,6 +9191,7 @@ var tagVariantMap = map[string]string{
 //  1. 全小写 + 去首尾空白
 //  2. 繁体 -> 简体（按内置字符表逐字替换）
 //  3. 同义异形词 -> 规范词（tagVariantMap，如 旅游 -> 旅行）
+//
 // 同一规范形式的标签视为"相似"，将被合并。
 func tagNormalize(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
@@ -9118,9 +9231,11 @@ func tagCnOf(en string) string {
 
 // handleTagMergeSmart POST /api/media/tag/merge-smart — 智能合并相似标签。
 // 自动检测三类相似标签并合并（保留字典序较小者为目标，把后者 RenameTag 并入）：
-//  a) 大小写不同（"Travel" vs "travel"）
-//  b) 简繁不同（"旅行" vs "旅遊"）
-//  c) 中英对应（"travel" vs "旅行"，按内置常见映射表）
+//
+//	a) 大小写不同（"Travel" vs "travel"）
+//	b) 简繁不同（"旅行" vs "旅遊"）
+//	c) 中英对应（"travel" vs "旅行"，按内置常见映射表）
+//
 // 响应: { status, merged_count, merges: [{from, to, count, reason}], total_tags_before, total_tags_after }
 func (s *Server) handleTagMergeSmart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -9450,9 +9565,9 @@ func (s *Server) handleMediaResolutionDist(w http.ResponseWriter, r *http.Reques
 	o := orient{}
 
 	type resolution struct {
-		Width   int `json:"width"`
-		Height  int `json:"height"`
-		Pixels  int `json:"pixels"`
+		Width  int `json:"width"`
+		Height int `json:"height"`
+		Pixels int `json:"pixels"`
 	}
 	var maxRes, minRes *resolution
 
@@ -10358,6 +10473,7 @@ func (s *Server) handleShareAnalytics(w http.ResponseWriter, r *http.Request) {
 //   - expires_at : RFC3339（UTC）；
 //   - days_left  : 距过期剩余整天数，向上取整并钳制下界为 1（即过期当天也显示 1，避免 0 误导）；
 //   - media_id   : ShareToken.MediaIDs（JSON 数组字符串）的第一个元素；无媒体或解析失败时省略。
+//
 // 鉴权：/api/media/ 前缀由 authMiddleware 自动注入 user_id（与 share-analytics 同路径族）。
 func (s *Server) handleShareExpiring(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -13491,10 +13607,10 @@ func (s *Server) handleMediaDashboard(w http.ResponseWriter, r *http.Request) {
 		return round2(float64(c) / float64(totalMedia) * 100)
 	}
 	coverage := map[string]any{
-		"total":           totalMedia,
-		"tagged_count":    taggedCount,
-		"tagged_percent":  pct(taggedCount),
-		"fav_count":       favoritedCount,
+		"total":             totalMedia,
+		"tagged_count":      taggedCount,
+		"tagged_percent":    pct(taggedCount),
+		"fav_count":         favoritedCount,
 		"favorited_percent": pct(favoritedCount),
 	}
 
@@ -13569,7 +13685,7 @@ func (s *Server) handleUserDashboardV2(w http.ResponseWriter, r *http.Request) {
 		typeBytes       = map[string]int64{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
 		typeCounts      = map[string]int{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
 		periodCounts    = map[string]int{"早晨": 0, "下午": 0, "晚上": 0, "深夜": 0}
-		dupBySHA        = make(map[string]int)  // sha → 出现次数（仅 >1 的进 dupReclaimable 计算）
+		dupBySHA        = make(map[string]int)   // sha → 出现次数（仅 >1 的进 dupReclaimable 计算）
 		dupReclaimBytes = make(map[string]int64) // sha → 单文件 size
 	)
 	for _, m := range mediaList {
@@ -14201,13 +14317,14 @@ func (s *Server) handleStorageRecommendations(w http.ResponseWriter, r *http.Req
 //
 //   - orphans  : DB 有记录但磁盘文件缺失（uploads 目录下 m.ID.* glob 无命中）
 //   - errors   : size<=0（zero_size）或磁盘文件大小与 DB 记录不符（size_mismatch）。
-//                注意：磁盘缺失属于 orphan 范畴，不重复计入 error，error 专注 数据损坏。
+//     注意：磁盘缺失属于 orphan 范畴，不重复计入 error，error 专注 数据损坏。
 //   - duplicates: 按 SHA256 分组，组内 count>1 的部分全部计入重复。
 //
 // 评分模型：score = 100 - (orphan_rate*40 + error_rate*40 + duplicate_rate*20)
 //   - orphan_rate    = orphan_count / total_media
 //   - error_rate     = error_count / total_media
 //   - duplicate_rate = duplicate_count / total_media（同 SHA256 超出 1 份的份数）
+//
 // 各扣分项钳制到权重上限，score 钳制到 [0,100]。空库视为满分 100。
 //
 // 需认证，按 user_id 隔离；store 未注入返回 503。uploads 目录未配置时 orphan/error
@@ -14403,9 +14520,9 @@ func (s *Server) handleMediaIntegrityReport(w http.ResponseWriter, r *http.Reque
 		"total_media": totalMedia,
 		"disk_check":  diskCheck,
 		"rates": map[string]any{
-			"orphan":     round2(orphanRate),
-			"error":      round2(errorRate),
-			"duplicate":  round2(duplicateRate),
+			"orphan":    round2(orphanRate),
+			"error":     round2(errorRate),
+			"duplicate": round2(duplicateRate),
 		},
 		"user_id": uid,
 	})
@@ -15476,9 +15593,9 @@ func (s *Server) handleMediaInsights(w http.ResponseWriter, r *http.Request) {
 	}
 
 	insights = append(insights, insight{
-		Type:   "health",
-		Title:  fmt.Sprintf("你的存储健康度为%s级", healthGrade),
-		Detail: fmt.Sprintf("综合重复率（%s）、配额使用率（%s）、冷数据占比，存储健康度评分 %d/100，等级 %s。", fmtPercent(duplicateRate*100), fmtPercent(quotaUsage*100), int(score), healthGrade),
+		Type:      "health",
+		Title:     fmt.Sprintf("你的存储健康度为%s级", healthGrade),
+		Detail:    fmt.Sprintf("综合重复率（%s）、配额使用率（%s）、冷数据占比，存储健康度评分 %d/100，等级 %s。", fmtPercent(duplicateRate*100), fmtPercent(quotaUsage*100), int(score), healthGrade),
 		ActionURL: "/api/media/storage-health",
 	})
 
@@ -15597,12 +15714,12 @@ func (s *Server) handleArchiveSuggest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"should_archive":        shouldArchive,
-		"media_to_archive":      candidates,
-		"total_count":           len(candidates),
-		"potential_savings_mb":  round2(float64(totalBytes) / float64(mbBytes)),
-		"recommendation":        recommendation,
-		"user_id":               uid,
+		"should_archive":       shouldArchive,
+		"media_to_archive":     candidates,
+		"total_count":          len(candidates),
+		"potential_savings_mb": round2(float64(totalBytes) / float64(mbBytes)),
+		"recommendation":       recommendation,
+		"user_id":              uid,
 	})
 }
 
