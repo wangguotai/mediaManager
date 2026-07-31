@@ -398,6 +398,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
 	// V25：存储健康度评分（综合重复率/孤立率/配额使用率/冷数据占比给出 0-100 分+等级+建议）。
 	s.mux.HandleFunc("/api/media/storage-health", s.handleStorageHealth)
+	// 仪表盘（合并存储健康度+quick_stats+upload_streak+recent_activity+tag_top3+coverage 为一次请求），
+	// 供前端首页/我的Tab 一次拉取渲染全部关键卡片，区别于 stat-summary（偏数据概览）与 full-report（年度报告）。
+	s.mux.HandleFunc("/api/media/dashboard", s.handleMediaDashboard)
 	// V20：上传模式分析（最常上传的类型/大小范围/时段/星期，基于 created_at）。
 	s.mux.HandleFunc("/api/media/upload-pattern-analysis", s.handleUploadPatternAnalysis)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
@@ -9497,6 +9500,334 @@ func (s *Server) handleStorageHealth(w http.ResponseWriter, r *http.Request) {
 		"suggestions":     suggestions,
 		"user_id":         uid,
 	})
+}
+
+// handleMediaDashboard GET /api/media/dashboard — 仪表盘聚合端点。
+//
+// 一次请求合并首页/我的Tab 渲染所需的全部关键数据，避免前端并发拉 6 个端点：
+//
+//	storage_health_score + grade   ← 存储健康度评分（0-100）与等级（A/B/C/D）
+//	quick_stats                     ← 6 个核心计数（total_media/total_bytes/image/video/album/favorite）
+//	upload_streak                   ← 当前连续上传天数 + 最长连续 + 今日上传数
+//	recent_activity                 ← 最近活动 top 3（按时间倒序，合并 upload/share）
+//	tag_top3                        ← 标签使用数 top 3（TagStats 已按 count DESC 返回）
+//	coverage                        ← 覆盖率（已打标签% + 已收藏%，基于未软删媒体总数）
+//
+// 不同于 stat-summary（偏数据概览，含 quota/audit/trash 等多块）、quick-stats（仅 6 个数字）、
+// full-report（年度报告维度），dashboard 聚焦 UI 仪表盘首屏卡片：健康度+计数+streak+活动+标签+覆盖率。
+//
+// 实现策略：ListMediaByUser 一次拉全量未软删媒体，单次遍历派生 quick_stats /
+// streak / health / recent_activity（前 3）；TagStats 一次查询派生 tag_top3；
+// favoriteProvider.ListFavorites 一次派生 favorited 计数；ListAllTags + SearchMediaByTag
+// 计算已打标签集合。各派生步骤独立容错（单步失败记 warn 不阻断）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 handleStorageHealth / handleUserQuota 一致
+	now := time.Now()
+	nowUTC := now.UTC()
+	today := nowUTC.Format("2006-01-02")
+
+	// 1. 一次拉取全量未软删媒体（ListMediaByUser 已过滤 deleted 且按 created_at DESC 排序）。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 2. 单次遍历派生 quick_stats + streak + health + recent_activity。
+	var (
+		totalMedia        int
+		imgCount          int
+		vidCount          int
+		usedBytes         int64
+		coldCount         int
+		todayCount        int
+		duplicateCount    int
+		days              = make(map[string]bool)
+		shaCounts         = make(map[string]int)
+		recentActivities  []map[string]any
+		recentLimit       = 3
+		recentCollected   = 0
+		recentUploadLimit = 3 // 最近上传用于 activity（前 3 个）
+	)
+	for i, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalMedia++
+		usedBytes += m.Size
+		switch m.Type {
+		case "IMAGE":
+			imgCount++
+		case "VIDEO":
+			vidCount++
+		}
+		// streak 维度（UTC 日期，与 handleUploadStreak 一致避免时区错位）
+		day := m.CreatedAt.Format("2006-01-02")
+		days[day] = true
+		if day == today {
+			todayCount++
+		}
+		// health 维度
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+		// recent_activity 维度：mediaList 已按 created_at DESC，前 N 个即最近上传。
+		if recentCollected < recentUploadLimit {
+			recentActivities = append(recentActivities, map[string]any{
+				"type":      "upload",
+				"media_id":  m.ID,
+				"filename":  m.Filename,
+				"timestamp": m.CreatedAt.Unix(),
+				"detail":    "上传了 " + m.Filename,
+			})
+			recentCollected++
+		}
+		_ = i
+	}
+
+	// 3. quick_stats: album/favorite count 来自 mediaSvc provider 接口。
+	favoriteIDs := []string{}
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteIDs = fav.ListFavorites(uid)
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+	quickStats := map[string]any{
+		"total_media":    totalMedia,
+		"total_bytes":    usedBytes,
+		"image_count":    imgCount,
+		"video_count":    vidCount,
+		"album_count":    albumCount,
+		"favorite_count": len(favoriteIDs),
+	}
+
+	// 4. upload_streak：复用 handleUploadStreak 算法。
+	// longest_streak：遍历有序日期统计最长连续段。
+	sortedDays := make([]string, 0, len(days))
+	for d := range days {
+		sortedDays = append(sortedDays, d)
+	}
+	sort.Strings(sortedDays)
+	longestStreak := 0
+	curRun := 0
+	var prev time.Time
+	for _, d := range sortedDays {
+		t, perr := time.Parse("2006-01-02", d)
+		if perr != nil {
+			continue
+		}
+		if curRun == 0 || t.Sub(prev) == 24*time.Hour {
+			curRun++
+			if curRun > longestStreak {
+				longestStreak = curRun
+			}
+		} else {
+			curRun = 1
+		}
+		prev = t
+	}
+	// current_streak：从今天（或昨天）往前连续有上传的天数。
+	currentStreak := 0
+	cursor, _ := time.Parse("2006-01-02", today)
+	if !days[today] {
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	for days[cursor.Format("2006-01-02")] {
+		currentStreak++
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	lastUpload := ""
+	if len(sortedDays) > 0 {
+		lastUpload = sortedDays[len(sortedDays)-1]
+	}
+	uploadStreak := map[string]any{
+		"current_streak":    currentStreak,
+		"longest_streak":    longestStreak,
+		"total_active_days": len(days),
+		"last_upload_date":  lastUpload,
+		"today_count":       todayCount,
+	}
+
+	// 5. storage_health_score + grade：复用 handleStorageHealth 评分模型。
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateCount += c - 1
+		}
+	}
+	orphanCount := 0 // 孤立文件需磁盘扫描，本端点跳过避免 IO 放大（与 handleStorageHealth 一致）
+	duplicateRate := 0.0
+	ageScore := 1.0
+	quotaUsage := 0.0
+	if totalMedia > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+		ageScore = 1.0 - float64(coldCount)/float64(totalMedia)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(usedBytes) / float64(defaultQuotaBytes)
+	}
+	dupPenalty := min01(duplicateRate) * 30
+	orphanPenalty := min01(float64(orphanCount)/float64(max1(totalMedia))) * 20
+	quotaPenalty := min01(quotaUsage) * 30
+	agePenalty := (1.0 - min01(ageScore)) * 20
+	score := 100.0 - (dupPenalty + orphanPenalty + quotaPenalty + agePenalty)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	grade := "D"
+	switch {
+	case score >= 85:
+		grade = "A"
+	case score >= 70:
+		grade = "B"
+	case score >= 50:
+		grade = "C"
+	}
+	storageHealth := map[string]any{
+		"score":           int(score),
+		"grade":           grade,
+		"duplicate_rate":  round2(duplicateRate),
+		"quota_usage":     round2(quotaUsage),
+		"age_score":       round2(ageScore),
+		"duplicate_count": duplicateCount,
+		"cold_count":      coldCount,
+		"used_bytes":      usedBytes,
+		"quota_bytes":     defaultQuotaBytes,
+	}
+
+	// 6. recent_activity（top 3）：补充最近分享（按时间倒序合并），与 handleMediaRecentActivity 口径一致。
+	// mediaList 已按 created_at DESC，前 recentUploadLimit 条 upload 已收录；
+	// 再补最近分享，合并后按 timestamp 倒序取前 recentLimit。
+	if shares, serr := s.store.ListShareTokensByUser(r.Context(), uid); serr == nil {
+		for i, st := range shares {
+			if i >= 2 { // 仅取前 2 条分享，避免压过 upload
+				break
+			}
+			recentActivities = append(recentActivities, map[string]any{
+				"type":      "share",
+				"media_id":  st.Token,
+				"filename":  st.Token,
+				"timestamp": st.CreatedAt.Unix(),
+				"detail":    "创建了分享链接",
+			})
+		}
+	}
+	sort.Slice(recentActivities, func(i, j int) bool {
+		ti, _ := recentActivities[i]["timestamp"].(int64)
+		tj, _ := recentActivities[j]["timestamp"].(int64)
+		return ti > tj
+	})
+	if len(recentActivities) > recentLimit {
+		recentActivities = recentActivities[:recentLimit]
+	}
+
+	// 7. tag_top3：复用 TagStats（已按 count DESC 返回），取前 3。
+	var tagTop3 []map[string]any
+	if tagStats, terr := s.store.TagStats(r.Context(), uid); terr == nil {
+		n := len(tagStats)
+		if n > 3 {
+			n = 3
+		}
+		tagTop3 = make([]map[string]any, 0, n)
+		for i := 0; i < n; i++ {
+			tagTop3 = append(tagTop3, tagStats[i])
+		}
+	} else {
+		slog.Warn("dashboard: tag stats failed", "error", terr)
+		tagTop3 = []map[string]any{}
+	}
+
+	// 8. coverage：tagged% + favorited%（基于未软删媒体总数）。
+	// tagged：遍历用户所有标签，汇总关联的 media_id 集合（与 handleMediaCoverage 同口径）。
+	liveIDs := make(map[string]struct{}, totalMedia)
+	for _, m := range mediaList {
+		if !m.Deleted {
+			liveIDs[m.ID] = struct{}{}
+		}
+	}
+	taggedSet := make(map[string]struct{})
+	if totalMedia > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		} else {
+			slog.Warn("dashboard: list tags failed", "error", terr)
+		}
+	}
+	favSet := make(map[string]struct{})
+	for _, id := range favoriteIDs {
+		favSet[id] = struct{}{}
+	}
+	countInLive := func(set map[string]struct{}) int {
+		n := 0
+		for id := range set {
+			if _, ok := liveIDs[id]; ok {
+				n++
+			}
+		}
+		return n
+	}
+	taggedCount := countInLive(taggedSet)
+	favoritedCount := countInLive(favSet)
+	pct := func(c int) float64 {
+		if totalMedia == 0 {
+			return 0
+		}
+		return round2(float64(c) / float64(totalMedia) * 100)
+	}
+	coverage := map[string]any{
+		"total":           totalMedia,
+		"tagged_count":    taggedCount,
+		"tagged_percent":  pct(taggedCount),
+		"fav_count":       favoritedCount,
+		"favorited_percent": pct(favoritedCount),
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"storage_health":  storageHealth,
+		"quick_stats":     quickStats,
+		"upload_streak":   uploadStreak,
+		"recent_activity": recentActivities,
+		"tag_top3":        tagTop3,
+		"coverage":        coverage,
+		"user_id":         uid,
+	})
+}
+
+// max1 返回 n 与 1 的较大者，用于避免除零（与 min01 配套）。
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // min01 把浮点截断到 [0,1] 区间，用于评分项上限钳制。
