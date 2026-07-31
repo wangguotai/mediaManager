@@ -45,6 +45,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -676,6 +677,7 @@ private fun MyTabContent(
     onNavigateToAlbums: () -> Unit,
     onNavigateToFileManagement: () -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1005,6 +1007,7 @@ private fun MyTabContent(
                         )
                     } else {
                         shareList.forEach { share ->
+                            var showDeleteConfirm by remember { mutableStateOf(false) }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1032,12 +1035,39 @@ private fun MyTabContent(
                                         )
                                     }
                                 }
-                                if (share.hasPassword) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (share.hasPassword) {
+                                        Text("🔒", fontSize = 16.sp)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                    }
+                                    // V7：撤销分享按钮
                                     Text(
-                                        "🔒",
-                                        fontSize = 16.sp
+                                        "撤销",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.clickable { showDeleteConfirm = true }
                                     )
                                 }
+                            }
+                            if (showDeleteConfirm) {
+                                AlertDialog(
+                                    onDismissRequest = { showDeleteConfirm = false },
+                                    title = { Text("撤销分享") },
+                                    text = { Text("确定撤销此分享链接？撤销后链接将立即失效。") },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            showDeleteConfirm = false
+                                            scope.launch {
+                                                if (MediaService.deleteShare(share.token)) {
+                                                    shares = MediaService.listShares()
+                                                }
+                                            }
+                                        }) { Text("撤销", color = MaterialTheme.colorScheme.error) }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+                                    }
+                                )
                             }
                         }
                     }

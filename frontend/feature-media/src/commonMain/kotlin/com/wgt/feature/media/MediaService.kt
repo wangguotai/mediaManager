@@ -1298,6 +1298,21 @@ object MediaService {
         val detail: String
     )
 
+    /**
+     * V7：DELETE /api/share/{token} — 撤销分享链接。
+     */
+    suspend fun deleteShare(token: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.delete("${backendBaseUrl()}/api/share/$token") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "deleteShare FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
     // ---- 解析 ----
 
     /**
