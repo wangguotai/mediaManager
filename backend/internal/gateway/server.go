@@ -256,6 +256,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
 	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
+	// V8：批量删除相册
+	s.mux.HandleFunc("/api/media/album/delete-batch", s.handleAlbumDeleteBatch)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -3794,6 +3796,70 @@ func (s *Server) handleMediaCleanupOrphan(w http.ResponseWriter, r *http.Request
 		"checked":       checked,
 		"cleaned_count": cleaned,
 		"cleaned_ids":   cleanedIDs,
+	})
+}
+
+// handleAlbumDeleteBatch V8：POST /api/media/album/delete-batch — 批量删除相册。
+// 请求体: { album_ids: ["id1","id2"] }
+// 仅 owner 可删，返回成功/失败计数。
+func (s *Server) handleAlbumDeleteBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.AlbumIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids required"})
+		return
+	}
+	if len(req.AlbumIDs) > 50 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 50 albums per batch"})
+		return
+	}
+	type delResult struct {
+		ID    string `json:"album_id"`
+		Name  string `json:"name"`
+		Error string `json:"error,omitempty"`
+	}
+	succeeded := make([]delResult, 0)
+	failed := make([]batchOpFailure, 0)
+	for _, albumID := range req.AlbumIDs {
+		album := provider.GetAlbum(uid, albumID)
+		if album == nil {
+			failed = append(failed, batchOpFailure{ID: albumID, Reason: "not_found"})
+			continue
+		}
+		name := album.Name
+		if err := provider.DeleteAlbum(uid, albumID); err != nil {
+			failed = append(failed, batchOpFailure{ID: albumID, Reason: "error"})
+			continue
+		}
+		// 级联清理共享记录
+		if s.store != nil {
+			_ = s.store.DeleteAlbumShare(r.Context(), albumID, uid, "")
+		}
+		succeeded = append(succeeded, delResult{ID: albumID, Name: name})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted_count": len(succeeded),
+		"deleted":       succeeded,
+		"failed":        failed,
 	})
 }
 
