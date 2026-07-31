@@ -269,6 +269,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/batch-remove", s.handleMediaTagBatchRemove)
 	// V8：标签统计（每个标签关联的媒体数量）
 	s.mux.HandleFunc("/api/media/tag/stats", s.handleMediaTagStats)
+	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
+	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
 	// V8：批量重命名标签
@@ -4546,6 +4548,57 @@ func (s *Server) handleMediaTagStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":  stats,
 		"total": len(stats),
+	})
+}
+
+// handleMediaTagCloudData V8：GET /api/media/tag/cloud-data — 标签云数据。
+// 返回每个标签的 count 及关联的最近一个 media_id 对应的缩略图 URL，
+// 供前端渲染带封面的标签云。响应: { tags: [{tag_name, count, thumbnail_url}], total }。
+// 实现：先 TagStats 取全量标签计数（已按 count DESC 排序），再对每个标签调
+// SearchMediaByTag 取关联的第一个 media_id（按 media_id 升序，即字典序最小者），
+// 拼出 thumbnail_url = /api/media/thumbnail/{media_id}。
+func (s *Server) handleMediaTagCloudData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(stats))
+	for _, st := range stats {
+		tagName, _ := st["tag"].(string)
+		count, _ := st["count"].(int)
+		// 取该标签关联的第一个 media_id 作为封面。
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		thumbURL := ""
+		if len(ids) > 0 {
+			thumbURL = "/api/media/thumbnail/" + ids[0]
+		}
+		out = append(out, map[string]any{
+			"tag_name":      tagName,
+			"count":         count,
+			"thumbnail_url": thumbURL,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":  out,
+		"total": len(out),
 	})
 }
 
