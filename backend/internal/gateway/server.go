@@ -236,6 +236,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/extreme-media", s.handleMediaExtremeMedia)
 	// V8：按 MIME 类型统计
 	s.mux.HandleFunc("/api/media/file-types", s.handleMediaFileTypes)
+	// V8：孤立文件检查（DB 有记录但磁盘文件缺失）
+	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3239,6 +3241,55 @@ func (s *Server) handleMediaFileTypes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"types":  stats,
 		"total":  len(stats),
+	})
+}
+
+// handleMediaOrphanCheck V8：GET /api/media/orphan-check — 检查孤立文件（DB 有记录但磁盘文件缺失）。
+// 最多扫描 500 个文件，返回缺失文件的 media_id 列表。
+func (s *Server) handleMediaOrphanCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage not configured"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "uploads dir not configured"})
+		return
+	}
+	checked := 0
+	var orphans []map[string]any
+	for _, m := range mediaList {
+		if m.Deleted || checked >= 500 {
+			continue
+		}
+		checked++
+		pattern := filepath.Join(uploadsDir, m.ID+".*")
+		files, _ := filepath.Glob(pattern)
+		if len(files) == 0 {
+			orphans = append(orphans, map[string]any{
+				"media_id": m.ID,
+				"filename": m.Filename,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"checked":    checked,
+		"orphan_count": len(orphans),
+		"orphans":    orphans,
 	})
 }
 
