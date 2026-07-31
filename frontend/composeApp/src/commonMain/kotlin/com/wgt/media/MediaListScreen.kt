@@ -145,6 +145,8 @@ fun MediaListScreen(
     var shareLinkError by remember { mutableStateOf<String?>(null) }
     var showShareLinkConfig by remember { mutableStateOf(false) }
     var showBatchRenameDialog by remember { mutableStateOf(false) }
+    // V8：批量标签对话框
+    var showBatchTagDialog by remember { mutableStateOf(false) }
     // V8：媒体详情对话框
     var mediaInfoTarget by remember { mutableStateOf<String?>(null) }
 
@@ -372,6 +374,18 @@ fun MediaListScreen(
         )
     }
 
+    // V8：批量标签对话框
+    if (showBatchTagDialog) {
+        BatchTagDialog(
+            selectedCount = viewModel.selectedCount,
+            onDismiss = { showBatchTagDialog = false },
+            onConfirm = { tag ->
+                showBatchTagDialog = false
+                viewModel.batchAddTagToSelected(tag)
+            }
+        )
+    }
+
     // V8：媒体详情对话框
     mediaInfoTarget?.let { mediaId ->
         MediaInfoDialog(
@@ -419,6 +433,7 @@ fun MediaListScreen(
                     showAddToAlbumButton = selectedTab != 0, // 后端源（已上传/网盘）才显示
                     showShareLinkButton = selectedTab != 0, // V7 §1.2：仅云端源显示分享链接按钮
                     showBatchRenameButton = selectedTab != 0, // V8：仅云端源显示批量重命名
+                    showBatchTagButton = selectedTab != 0, // V8：仅云端源显示批量标签
                     onCreateShareLink = {
                         // V7 §1.2：打开配置对话框（密码可选 + 有效期选择）
                         shareLinkError = null
@@ -427,6 +442,10 @@ fun MediaListScreen(
                     onBatchRename = {
                         // V8：打开批量重命名对话框
                         showBatchRenameDialog = true
+                    },
+                    onBatchTag = {
+                        // V8：打开批量标签对话框
+                        showBatchTagDialog = true
                     }
                 )
             } else {
@@ -3023,12 +3042,14 @@ fun SelectionBottomBar(
     onAddToAlbum: () -> Unit = {},
     onCreateShareLink: () -> Unit = {},
     onBatchRename: () -> Unit = {},
+    onBatchTag: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
     showAddToAlbumButton: Boolean = false,
     showShareLinkButton: Boolean = false,
-    showBatchRenameButton: Boolean = false
+    showBatchRenameButton: Boolean = false,
+    showBatchTagButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3088,6 +3109,16 @@ fun SelectionBottomBar(
                 Icon(
                     painterResource(Res.drawable.ic_edit),
                     contentDescription = "批量重命名"
+                )
+            }
+        }
+
+        // V8：批量打标签（仅云端源显示）
+        if (showBatchTagButton) {
+            IconButton(onClick = onBatchTag) {
+                Icon(
+                    painterResource(Res.drawable.ic_tag),
+                    contentDescription = "批量打标签"
                 )
             }
         }
@@ -3834,4 +3865,42 @@ private fun InfoRow(label: String, value: String) {
             color = MaterialTheme.colorScheme.onSurface
         )
     }
+}
+
+/**
+ * V8：批量标签对话框 — 输入标签名，给选中媒体批量打标签。
+ */
+@Composable
+fun BatchTagDialog(
+    selectedCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var tag by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("批量打标签") },
+        text = {
+            Column {
+                Text("已选 $selectedCount 个文件", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = tag,
+                    onValueChange = { tag = it },
+                    label = { Text("标签名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(tag.trim()) },
+                enabled = tag.isNotBlank() && selectedCount > 0
+            ) { Text("添加标签") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }

@@ -1396,6 +1396,29 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/tag/batch-add — 批量打标签，返回成功数。 */
+    suspend fun batchAddTag(mediaIds: List<String>, tagName: String): Int {
+        if (mediaIds.isEmpty() || tagName.isBlank()) return 0
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+                put("tag_name", tagName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/batch-add") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tagged_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchAddTag FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：GET /api/media/tag/search?tag=xxx — 按标签搜索 media_id 列表。 */
     suspend fun searchByTag(tag: String): List<String>? {
         return try {

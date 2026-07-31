@@ -1223,6 +1223,20 @@ class MediaViewModel {
      * 删除完成后发送 Snackbar 结果消息（"已删除 N 项"）。
      */
     /**
+     * V8：批量给选中项打标签——调后端 /api/media/tag/batch-add。
+     */
+    fun batchAddTagToSelected(tagName: String) {
+        if (selectedMediaIds.isEmpty()) return
+        val ids = selectedMediaIds.toList()
+        viewModelScope.launch {
+            val count = MediaService.batchAddTag(ids, tagName)
+            if (count > 0) {
+                deselectAll()
+            }
+        }
+    }
+
+    /**
      * V8：批量重命名选中项——调后端 /api/media/batch-rename。
      * 成功后刷新列表并退出选择模式。
      */
