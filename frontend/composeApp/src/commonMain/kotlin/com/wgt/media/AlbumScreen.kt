@@ -644,6 +644,60 @@ private fun AlbumDetailPage(
                             }
                         )
                     }
+                    // V8：复制相册按钮
+                    var showCloneDialog by remember { mutableStateOf(false) }
+                    var cloneError by remember { mutableStateOf<String?>(null) }
+                    val cloneScope = rememberCoroutineScope()
+                    IconButton(onClick = { showCloneDialog = true }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_copy),
+                            contentDescription = "复制相册"
+                        )
+                    }
+                    if (showCloneDialog) {
+                        var cloneName by remember { mutableStateOf("$albumName (副本)") }
+                        AlertDialog(
+                            onDismissRequest = { showCloneDialog = false; cloneError = null },
+                            title = { Text("复制相册") },
+                            text = {
+                                Column {
+                                    Text("将创建一个新相册并复制所有照片")
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = cloneName,
+                                        onValueChange = { cloneName = it; cloneError = null },
+                                        label = { Text("新相册名称") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    cloneError?.let { e ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(e, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    if (cloneName.isBlank()) {
+                                        cloneError = "名称不能为空"
+                                        return@TextButton
+                                    }
+                                    cloneScope.launch {
+                                        val newId = MediaService.cloneAlbum(albumId, cloneName.trim())
+                                        if (newId != null) {
+                                            showCloneDialog = false
+                                            onBack()
+                                        } else {
+                                            cloneError = "复制失败"
+                                        }
+                                    }
+                                }) { Text("复制") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showCloneDialog = false; cloneError = null }) { Text("取消") }
+                            }
+                        )
+                    }
                     // V7 §2.3：分享相册按钮
                     var showShareDialog by remember { mutableStateOf(false) }
                     IconButton(onClick = { showShareDialog = true }) {

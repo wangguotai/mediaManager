@@ -1419,6 +1419,28 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/album/clone — 复制相册，返回新相册 ID。 */
+    suspend fun cloneAlbum(sourceAlbumId: String, newName: String): String? {
+        return try {
+            val body = buildJsonObject {
+                put("source_album_id", sourceAlbumId)
+                put("new_name", newName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/clone") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["new_album_id"]?.jsonPrimitive?.contentOrNull
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "cloneAlbum FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：POST /api/media/album/delete-batch — 批量删除相册，返回成功数。 */
     suspend fun deleteAlbumsBatch(albumIds: List<String>): Int {
         if (albumIds.isEmpty()) return 0
