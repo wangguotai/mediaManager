@@ -4174,6 +4174,72 @@ object MediaService {
     )
 
     /**
+     * POST /api/media/tag/merge-smart — 智能合并相似标签。
+     *
+     * 后端自动检测三类相似标签并合并（保留字典序较小/中文形式为目标，把后者
+     * RenameTag 并入）：a) 大小写不同（"Travel" vs "travel"）；b) 简繁不同
+     * （"旅行" vs "旅遊"）；c) 中英对应（"travel" vs "旅行"）。
+     *
+     * 后端返回 `{status, merged_count, merges:[{from,to,count,reason}],
+     * total_tags_before, total_tags_after}`。本方法返回封装的
+     * [MergeSmartResult]；HTTP 非 200 或异常时返回 null（与 [cleanupUnusedTags]
+     * 等统计方法一致的失败姿态，见 MediaService 约定 5）。
+     *
+     * @return 成功时为 [MergeSmartResult]；失败/端点缺失时返回 null。
+     */
+    suspend fun mergeSmartTags(): MergeSmartResult? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/merge-smart") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val merges = o["merges"]?.jsonArray?.mapNotNull { el ->
+                    val jo = el.jsonObject
+                    val from = jo["from"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val to = jo["to"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    MergePair(
+                        from = from,
+                        to = to,
+                        count = jo["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        reason = jo["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                } ?: emptyList()
+                val result = MergeSmartResult(
+                    mergedCount = o["merged_count"]?.jsonPrimitive?.intOrNull ?: merges.size,
+                    merges = merges,
+                    totalTagsBefore = o["total_tags_before"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalTagsAfter = o["total_tags_after"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+                logger.info("MediaService", "mergeSmartTags status=${response.status} merged=${result.mergedCount}")
+                result
+            } else {
+                logger.info("MediaService", "mergeSmartTags status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "mergeSmartTags FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** [mergeSmartTags] 返回结果。字段对齐后端 JSON：merged_count/merges/total_tags_before/total_tags_after。 */
+    data class MergeSmartResult(
+        val mergedCount: Int,
+        val merges: List<MergePair>,
+        val totalTagsBefore: Int,
+        val totalTagsAfter: Int
+    )
+
+    /** 单次合并记录。from 被并入 to，count 为受影响媒体数，reason 为合并原因（case_or_trad_simp / cn_en_mapping）。 */
+    data class MergePair(
+        val from: String,
+        val to: String,
+        val count: Int,
+        val reason: String
+    )
+
+    /**
      * V8：GET /api/media/info/{id} — 返回单个媒体详情。
      */
     suspend fun getMediaInfo(mediaId: String): MediaInfo? {

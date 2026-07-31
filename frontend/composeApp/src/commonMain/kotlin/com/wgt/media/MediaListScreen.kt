@@ -3282,6 +3282,83 @@ private fun MyTabContent(
                                             }
                                         )
                                     }
+                                    // 智能合并相似标签按钮 + 反馈——调 POST /api/media/tag/merge-smart。
+                                    // 自动检测大小写/简繁/中英对应相似标签并合并，成功后弹出合并详情 Dialog。
+                                    var isMerging by remember { mutableStateOf(false) }
+                                    var mergeMessage by remember { mutableStateOf<String?>(null) }
+                                    var mergeDetail by remember { mutableStateOf<MediaService.MergeSmartResult?>(null) }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    TextButton(
+                                        enabled = !isMerging && !tagCloud.isNullOrEmpty(),
+                                        onClick = {
+                                            isMerging = true
+                                            mergeMessage = null
+                                            scope.launch {
+                                                val result = MediaService.mergeSmartTags()
+                                                isMerging = false
+                                                if (result != null) {
+                                                    tagCloud = MediaService.getTagCloudData()
+                                                    val msg = if (result.mergedCount > 0) {
+                                                        "已合并 ${result.mergedCount} 组相似标签"
+                                                    } else {
+                                                        "没有相似标签可合并"
+                                                    }
+                                                    mergeMessage = msg
+                                                    if (result.mergedCount > 0) {
+                                                        mergeDetail = result
+                                                    }
+                                                    onShowSnackbar(msg)
+                                                } else {
+                                                    mergeMessage = "合并失败，请检查后端连接"
+                                                    onShowSnackbar("智能合并失败")
+                                                }
+                                            }
+                                        }
+                                    ) { Text(if (isMerging) "合并中…" else "智能合并相似标签") }
+                                    mergeMessage?.let { msg ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            msg,
+                                            fontSize = 12.sp,
+                                            color = if (msg.contains("失败")) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.tertiary
+                                            }
+                                        )
+                                    }
+                                    // 合并详情 Dialog：展示 from → to, N 项 + 前后总数。
+                                    mergeDetail?.let { detail ->
+                                        AlertDialog(
+                                            onDismissRequest = { mergeDetail = null },
+                                            title = { Text("合并详情") },
+                                            text = {
+                                                Column {
+                                                    Text(
+                                                        "共合并 ${detail.mergedCount} 组相似标签",
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        "标签数：${detail.totalTagsBefore} → ${detail.totalTagsAfter}",
+                                                        fontSize = 12.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    detail.merges.forEachIndexed { idx, pair ->
+                                                        Text(
+                                                            "${idx + 1}. ${pair.from} → ${pair.to}（${pair.count} 项）",
+                                                            fontSize = 13.sp,
+                                                            modifier = Modifier.padding(vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            confirmButton = {
+                                                TextButton(onClick = { mergeDetail = null }) { Text("知道了") }
+                                            }
+                                        )
+                                    }
                                 },
                                 confirmButton = {
                                     TextButton(onClick = { showTagManage = false }) { Text("关闭") }
