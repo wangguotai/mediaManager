@@ -641,6 +641,14 @@ func (s *MediaService) RenameAlbum(uid, albumID, newName string) error {
 	return s.albumStore.RenameAlbum(uid, albumID, newName)
 }
 
+// ReorderAlbumMedia V8：委托 AlbumStore 调整照片顺序。
+func (s *MediaService) ReorderAlbumMedia(uid, albumID string, newOrder []string) error {
+	if s.albumStore == nil {
+		return fmt.Errorf("album store is not configured")
+	}
+	return s.albumStore.ReorderAlbumMedia(uid, albumID, newOrder)
+}
+
 // favoriteFilterKey 是 searchQuery 中用于触发收藏过滤的关键字。
 const favoriteFilterKey = "favorite=true"
 

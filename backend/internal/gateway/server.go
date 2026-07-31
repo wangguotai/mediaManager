@@ -260,6 +260,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/delete-batch", s.handleAlbumDeleteBatch)
 	// V8：复制相册
 	s.mux.HandleFunc("/api/media/album/clone", s.handleAlbumClone)
+	// V8：调整相册内照片顺序
+	s.mux.HandleFunc("/api/media/album/reorder", s.handleAlbumReorder)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -1399,6 +1401,7 @@ type albumStoreProvider interface {
 	GetAlbum(uid, albumID string) *service.Album
 	DeleteAlbum(uid, albumID string) error
 	RenameAlbum(uid, albumID, newName string) error
+	ReorderAlbumMedia(uid, albumID string, newOrder []string) error
 }
 
 // handleAlbumCreate 处理 POST /api/media/album，创建新相册。
@@ -3925,6 +3928,46 @@ func (s *Server) handleAlbumClone(w http.ResponseWriter, r *http.Request) {
 		"new_album_id":    newAlbum.ID,
 		"new_album_name":  name,
 		"copied_count":    added,
+	})
+}
+
+// handleAlbumReorder V8：POST /api/media/album/reorder — 调整相册内照片顺序。
+// 请求体: { album_id, media_ids: ["id1","id2",...] }
+func (s *Server) handleAlbumReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID  string   `json:"album_id"`
+		MediaIDs []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_ids required"})
+		return
+	}
+	if err := provider.ReorderAlbumMedia(uid, req.AlbumID, req.MediaIDs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "success",
+		"album_id":  req.AlbumID,
+		"reordered": len(req.MediaIDs),
 	})
 }
 

@@ -343,3 +343,19 @@ func (as *AlbumStore) RenameAlbum(uid, albumID, newName string) error {
 	album.Name = newName
 	return pa.save()
 }
+
+// ReorderAlbumMedia V8：调整相册内照片顺序。
+func (as *AlbumStore) ReorderAlbumMedia(uid, albumID string, newOrder []string) error {
+	pa := as.forUser(uid)
+	if pa == nil {
+		return fmt.Errorf(errNoUserAlbumMsg)
+	}
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+	album, ok := pa.albums[albumID]
+	if !ok {
+		return fmt.Errorf("album not found")
+	}
+	album.MediaIDs = newOrder
+	return pa.save()
+}
