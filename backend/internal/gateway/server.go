@@ -225,6 +225,8 @@ func (s *Server) registerRoutes() {
 	// 数据来源：audit_log 操作统计（AuditLogStats）+ ListMediaByUser 取上传数 +
 	// favoriteProvider.ListFavorites 取当前收藏数（audit_log 仅记录 unfavorite）。
 	s.mux.HandleFunc("/api/media/user-activity-score", s.handleUserActivityScore)
+	// 标签影响力评分（综合媒体数+总大小+覆盖率，power_score 倒序）。
+	s.mux.HandleFunc("/api/media/tag-power-score", s.handleTagPowerScore)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
 	// 区别于 batch-download 的 zip 流式打包，不创建分享链接）
 	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
@@ -3228,6 +3230,94 @@ func (s *Server) handleMediaStorageStats(w http.ResponseWriter, r *http.Request)
 		"total_bytes": totalBytes,
 		"total_mb":    float64(totalBytes) / (1024 * 1024),
 		"user_id":     uid,
+	})
+}
+
+// handleTagPowerScore GET /api/media/tag-power-score — 标签影响力评分。
+// 对每个标签综合 media_count（关联媒体数）、total_bytes（关联媒体总大小）、
+// coverage_percent（覆盖用户总媒体的百分比），按 power_score 倒序返回。
+//
+// 评分公式：power_score = media_count * 2 + total_bytes_mb * 0.1
+//   - media_count 权重 2：标签关联的媒体数量是影响力的基础
+//   - total_bytes_mb 权重 0.1：存储体量作为辅助维度（MB 单位，避免字节量级压制计数）
+//
+// 实现：ListMediaByUser 一次拉全量媒体建 id→size 映射并得 total；
+// ListAllTags + SearchMediaByTag 逐标签累加关联媒体大小。
+func (s *Server) handleTagPowerScore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 一次拉全量媒体，建 id→size 映射，同时得用户媒体总数（覆盖率分母）。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	mediaSize := make(map[string]int64, len(mediaList))
+	for _, m := range mediaList {
+		mediaSize[m.ID] = m.Size
+	}
+	totalMedia := len(mediaList)
+
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type tagPower struct {
+		TagName        string  `json:"tag_name"`
+		MediaCount     int     `json:"media_count"`
+		TotalBytes     int64   `json:"total_bytes"`
+		CoveragePercent float64 `json:"coverage_percent"`
+		PowerScore     float64 `json:"power_score"`
+	}
+
+	results := make([]tagPower, 0, len(tags))
+	for _, t := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		var totalBytes int64
+		for _, id := range ids {
+			totalBytes += mediaSize[id] // 未命中（已软删/跨用户）视为 0
+		}
+		count := len(ids)
+		totalBytesMB := float64(totalBytes) / (1024 * 1024)
+		var coverage float64
+		if totalMedia > 0 {
+			coverage = float64(count) / float64(totalMedia) * 100
+		}
+		results = append(results, tagPower{
+			TagName:        t,
+			MediaCount:     count,
+			TotalBytes:     totalBytes,
+			CoveragePercent: coverage,
+			PowerScore:     float64(count)*2 + totalBytesMB*0.1,
+		})
+	}
+
+	// 按 power_score 倒序。
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].PowerScore > results[j].PowerScore
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       results,
+		"total_tags": len(results),
 	})
 }
 
