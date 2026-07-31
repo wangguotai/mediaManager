@@ -216,6 +216,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/remove", s.handleMediaTagRemove)
 	s.mux.HandleFunc("/api/media/tag/list", s.handleMediaTagList)
 	s.mux.HandleFunc("/api/media/tag/all", s.handleMediaTagAll)
+	// V8：按标签搜索媒体
+	s.mux.HandleFunc("/api/media/tag/search", s.handleMediaTagSearch)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -2795,6 +2797,34 @@ func (s *Server) handleMediaTagAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tags": tags, "count": len(tags)})
+}
+
+// handleMediaTagSearch V8：GET /api/media/tag/search?tag=xxx — 按标签搜索媒体 ID。
+func (s *Server) handleMediaTagSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	tagName := r.URL.Query().Get("tag")
+	if tagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tag required"})
+		return
+	}
+	mediaIDs, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tag":       tagName,
+		"media_ids": mediaIDs,
+		"count":     len(mediaIDs),
+	})
 }
 
 // handleMediaBatchDownload 处理 POST /api/media/batch-download，

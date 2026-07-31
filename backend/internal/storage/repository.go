@@ -477,6 +477,26 @@ func (s *Store) ListAllTags(ctx context.Context, userID string) ([]string, error
 	return tags, nil
 }
 
+// SearchMediaByTag V8：返回带有指定标签的 media_id 列表。
+func (s *Store) SearchMediaByTag(ctx context.Context, userID, tagName string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT media_id FROM media_tags WHERE user_id = ? AND tag_name = ? ORDER BY media_id`,
+		userID, tagName)
+	if err != nil {
+		return nil, fmt.Errorf("search media by tag: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan media_id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
