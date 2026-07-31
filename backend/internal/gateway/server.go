@@ -347,6 +347,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-clone", s.handleAlbumBatchClone)
 	// V14：相册媒体数量排行（按相册内媒体数倒序，返回哪些相册照片最多）。
 	s.mux.HandleFunc("/api/media/album/count-ranking", s.handleAlbumCountRanking)
+	// V15：存储清理建议（重复+大文件+旧文件+孤立文件分析，估算可回收空间）。
+	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
@@ -7107,4 +7109,152 @@ func diskUsage(path string) (*diskInfo, error) {
 		UsedBytes:      used,
 		UsagePercent:   usagePct,
 	}, nil
+}
+
+// handleStorageRecommendations V15：GET /api/media/storage-recommendations —
+// 存储清理建议。一次拉取用户全部媒体，从四个维度分析可回收空间：
+//
+//	a) 重复文件（SHA256 相同）：每组保留 1 份，其余可删，累加可回收字节数。
+//	b) 大文件（>100MB）：按大小倒序取 top 5。
+//	c) 旧文件（CreatedAt 距今 >365 天）：统计 count + bytes（Media 无独立访问时间，
+//	   以 CreatedAt 上传时间作为代理；旧上传且长期未更新的文件通常无保留价值）。
+//	d) 孤立文件（DB 有记录但磁盘文件缺失，复用 orphan-check 的 Glob 逻辑）。
+//
+// 响应:
+//
+//	{
+//	  "duplicates": {"count","reclaimable_bytes"},
+//	  "large_files": [{"media_id","filename","size"}],
+//	  "old_files": {"count","bytes"},
+//	  "orphans": {"count","bytes"},
+//	  "total_reclaimable_bytes": N,
+//	  "recommendation_count": N
+//	}
+func (s *Server) handleStorageRecommendations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// uploadsDir 可能为空（userDirs 未注入）；非空时才做孤立文件磁盘检查。
+	uploadsDir := s.userUploadsDir(uid)
+
+	const largeFileThreshold = 100 * 1024 * 1024 // 100MB
+	const oldFileThreshold = 365 * 24 * time.Hour
+
+	// (a) 重复文件：按 SHA256 分组，组内保留 1 份，其余计入可回收。
+	dupGroups := make(map[string][]*storage.Media)
+	for _, m := range mediaList {
+		if m.SHA256 == "" {
+			continue
+		}
+		dupGroups[m.SHA256] = append(dupGroups[m.SHA256], m)
+	}
+	dupCount := 0
+	var dupReclaimable int64
+	for _, items := range dupGroups {
+		if len(items) > 1 {
+			// 保留 1 份，其余可删；可回收 = (count-1) * size。
+			// 同一 SHA256 的文件 size 应一致，取第 0 个的 size 即可。
+			dupCount += len(items) - 1
+			dupReclaimable += int64(len(items)-1) * items[0].Size
+		}
+	}
+
+	// (b) 大文件：>100MB，按 size 倒序取 top 5。
+	type largeFile struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+	}
+	var larges = make([]largeFile, 0)
+	for _, m := range mediaList {
+		if m.Size > largeFileThreshold {
+			larges = append(larges, largeFile{
+				MediaID:  m.ID,
+				Filename: m.Filename,
+				Size:     m.Size,
+			})
+		}
+	}
+	sort.Slice(larges, func(i, j int) bool { return larges[i].Size > larges[j].Size })
+	if len(larges) > 5 {
+		larges = larges[:5]
+	}
+
+	// (c) 旧文件：CreatedAt 距今 >365 天。统计 count + bytes。
+	cutoff := time.Now().Add(-oldFileThreshold)
+	oldCount := 0
+	var oldBytes int64
+	for _, m := range mediaList {
+		if m.CreatedAt.Before(cutoff) {
+			oldCount++
+			oldBytes += m.Size
+		}
+	}
+
+	// (d) 孤立文件：DB 有记录但磁盘缺失（复用 orphan-check 逻辑）。
+	// uploadsDir 为空时跳过磁盘检查，orphans 计为 0。
+	orphanCount := 0
+	var orphanBytes int64
+	if uploadsDir != "" {
+		for _, m := range mediaList {
+			pattern := filepath.Join(uploadsDir, m.ID+".*")
+			files, _ := filepath.Glob(pattern)
+			if len(files) == 0 {
+				orphanCount++
+				orphanBytes += m.Size
+			}
+		}
+	}
+
+	totalReclaimable := dupReclaimable + oldBytes + orphanBytes
+
+	// recommendation_count：去重的建议条目数（重复组数 + 大文件数 + 旧文件类 + 孤立类）。
+	dupGroupCount := 0
+	for _, items := range dupGroups {
+		if len(items) > 1 {
+			dupGroupCount++
+		}
+	}
+	recommendationCount := dupGroupCount + len(larges)
+	if oldCount > 0 {
+		recommendationCount++
+	}
+	if orphanCount > 0 {
+		recommendationCount++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"duplicates": map[string]any{
+			"count":             dupCount,
+			"reclaimable_bytes": dupReclaimable,
+		},
+		"large_files": larges,
+		"old_files": map[string]any{
+			"count": oldCount,
+			"bytes": oldBytes,
+		},
+		"orphans": map[string]any{
+			"count": orphanCount,
+			"bytes": orphanBytes,
+		},
+		"total_reclaimable_bytes": totalReclaimable,
+		"recommendation_count":    recommendationCount,
+		"user_id":                 uid,
+	})
 }
