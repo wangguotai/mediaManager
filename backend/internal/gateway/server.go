@@ -168,6 +168,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/timeline-calendar", s.handleMediaTimelineCalendar)
 	// V9：按拍摄时间段（早晨/下午/晚上/深夜）统计分布，基于 taken_at 的 UTC 小时。
 	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
+	// V9：按月统计媒体数量（所有媒体 created_at 的 YYYY-MM 分布，不限时间范围）。
+	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
@@ -3455,6 +3457,74 @@ func (s *Server) handleMediaTimeDistribution(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{
 		"distribution": dist,
 		"total":        total,
+	})
+}
+
+// handleMediaCountByMonth GET /api/media/media-count-by-month — 按月统计媒体数量。
+//
+// 按 created_at 的 YYYY-MM 分组所有未软删媒体，返回每月 count + bytes，
+// 不限制时间范围（区别于 upload-calendar 只覆盖最近 30 天上传量）。
+//
+// 响应结构：
+//
+//	{
+//	  "months": [{"month":"2024-01","count":12,"bytes":3456789}, ...], // 按月份升序
+//	  "total_months": N, // 命中的独立月份数
+//	  "total_media":  N  // 所有月份 count 合计
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaCountByMonth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 月份桶：key=YYYY-MM → [2]int64{count, bytes}
+	buckets := make(map[string][2]int64)
+	var totalMedia int
+	for _, m := range mediaList {
+		month := m.CreatedAt.UTC().Format("2006-01")
+		b := buckets[month]
+		b[0]++
+		b[1] += m.Size
+		buckets[month] = b
+		totalMedia++
+	}
+
+	months := make([]map[string]any, 0, len(buckets))
+	for month, b := range buckets {
+		months = append(months, map[string]any{
+			"month": month,
+			"count": b[0],
+			"bytes": b[1],
+		})
+	}
+	// 按月份升序排列
+	sort.Slice(months, func(i, j int) bool {
+		mi, _ := months[i]["month"].(string)
+		mj, _ := months[j]["month"].(string)
+		return mi < mj
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"months":       months,
+		"total_months": len(months),
+		"total_media":  totalMedia,
 	})
 }
 
