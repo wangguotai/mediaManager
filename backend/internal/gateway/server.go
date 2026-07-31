@@ -301,6 +301,11 @@ func (s *Server) registerRoutes() {
 	// 每个标签占用的存储量与活跃度。实现：TagStats 取标签计数，ListMediaByUser 一次拉
 	// 全量 media 建索引，SearchMediaByTag 取每个标签关联的 media_id，汇总落 sum/max。
 	s.mux.HandleFunc("/api/media/tag-stat-detailed", s.handleMediaTagStatDetailed)
+	// 最常用标签排行（按 count DESC 取 top N，含每个标签关联媒体的总/平均字节数）。
+	// 与 tag-stat-detailed 的区别：后者返全量标签的 size/时间明细且不接受 limit；
+	// 本端点聚焦"排行"——只返 top N，并额外给出 total_tagged_media（被任意标签标记的
+	// 去重媒体总数），供前端"热门标签"卡片一次渲染。精确匹配优先于前缀匹配。
+	s.mux.HandleFunc("/api/media/tag/most-used", s.handleTagMostUsed)
 	// 按媒体类型统计标签使用：每个标签在 IMAGE/VIDEO/LIVE_PHOTO 中的分布。
 	// 区别于 tag/stats（仅 count）与 tag-stat-detailed（count+size+时间），本端点聚焦
 	// 类型维度，供前端展示"图片标签 vs 视频标签"分布。
@@ -6051,6 +6056,118 @@ func (s *Server) handleMediaTagStatDetailed(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":       out,
 		"total_tags": len(out),
+	})
+}
+
+// handleTagMostUsed GET /api/media/tag/most-used — 最常用标签排行。
+// 按 count DESC 取 top N（?limit=10，默认 10，上限 100），每个标签返回：
+//   - tag_name
+//   - count（关联媒体数，取自 media_tags 关系表口径）
+//   - total_bytes（关联未软删媒体 size 总和）
+//   - avg_bytes（total_bytes / count，整数除法，count=0 时为 0）
+//
+// 另返回 total_tags（该用户全部标签数）与 total_tagged_media（被任意标签标记的、
+// 未软删的去重媒体数）。
+//
+// 实现策略与 handleMediaTagStatDetailed 一致（避免 N+1）：
+//  1. TagStats 取全量标签计数（已按 count DESC 排序），截取前 limit 个。
+//  2. ListMediaByUser 一次拉该用户全量未软删 media，构造 id→*Media 索引。
+//  3. 对 top N 每个标签调 SearchMediaByTag 取关联 media_id，用索引汇总 size。
+//  4. total_tagged_media：对 top N 各标签命中的 media_id 取并集去重计数（仅统计
+//     未软删、能命中索引的 media；软删导致索引未命中者不计入，best-effort）。
+//
+// 注意：count 来自 media_tags 关系表，不随 media 软删联动清理，故 count 可能大于
+// 实际命中索引（未软删）的数量；total_bytes/avg_bytes 只统计未软删 media 的 size。
+func (s *Server) handleTagMostUsed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	// limit：默认 10，范围 [1,100]。
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 100 {
+				n = 100
+			}
+			limit = n
+		}
+	}
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalTags := len(stats)
+	if limit > len(stats) {
+		limit = len(stats)
+	}
+	top := stats[:limit]
+	// 一次拉全量 media 建索引，避免对每个 media_id 单独 GetMedia。
+	medias, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	idx := make(map[string]*storage.Media, len(medias))
+	for _, m := range medias {
+		idx[m.ID] = m
+	}
+	type tagRow struct {
+		TagName    string `json:"tag_name"`
+		Count      int    `json:"count"`
+		TotalBytes int64  `json:"total_bytes"`
+		AvgBytes   int64  `json:"avg_bytes"`
+	}
+	out := make([]tagRow, 0, len(top))
+	taggedSet := make(map[string]struct{})
+	for _, st := range top {
+		tagName, _ := st["tag"].(string)
+		count, _ := st["count"].(int)
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		var totalBytes int64
+		hit := 0
+		for _, id := range ids {
+			m, ok := idx[id]
+			if !ok {
+				// 软删或缺失，跳过 size 统计（best-effort）。
+				continue
+			}
+			totalBytes += m.Size
+			taggedSet[id] = struct{}{}
+			hit++
+		}
+		var avgBytes int64
+		if count > 0 {
+			avgBytes = totalBytes / int64(count)
+		}
+		_ = hit // hit 仅用于调试，不直接返回；avg 按 count 口径，与 count 字段一致。
+		out = append(out, tagRow{
+			TagName:    tagName,
+			Count:      count,
+			TotalBytes: totalBytes,
+			AvgBytes:   avgBytes,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":                out,
+		"total_tags":          totalTags,
+		"total_tagged_media":  len(taggedSet),
 	})
 }
 
