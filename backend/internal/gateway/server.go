@@ -166,6 +166,8 @@ func (s *Server) registerRoutes() {
 	// V9：按拍摄日期（taken_at）分组的日历视图，不限时间范围。区别于 upload-calendar
 	// （基于 created_at 的最近 30 天上传热力图）。供前端日历视图渲染每天照片/视频数量。
 	s.mux.HandleFunc("/api/media/timeline-calendar", s.handleMediaTimelineCalendar)
+	// V9：按拍摄时间段（早晨/下午/晚上/深夜）统计分布，基于 taken_at 的 UTC 小时。
+	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
@@ -3415,6 +3417,40 @@ func (s *Server) handleMediaTimelineCalendar(w http.ResponseWriter, r *http.Requ
 		"days":        rows,
 		"total_days":  totalDays,
 		"total_media": totalMedia,
+	})
+}
+
+// handleMediaTimeDistribution V9：GET /api/media/time-distribution — 按拍摄时间段
+// （早晨/下午/晚上/深夜）统计媒体分布，基于 taken_at 的 UTC 小时。
+//
+// 返回 {distribution: {"早晨":N,"下午":N,"晚上":N,"深夜":N}, total: N}。
+// total 为四段合计（即有拍摄时间的未软删媒体总数）。taken_at 缺失（=0）的记录不计入任何段，
+// 故 total 可能小于用户媒体总数——这是预期行为（无拍摄时间的媒体无法归类时段）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaTimeDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	dist, err := s.store.TimeDistribution(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	total := dist["早晨"] + dist["下午"] + dist["晚上"] + dist["深夜"]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"distribution": dist,
+		"total":        total,
 	})
 }
 

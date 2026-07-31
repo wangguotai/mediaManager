@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1397,7 +1398,66 @@ func boolToInt(b bool) int {
 // 后者基于 created_at（上传时间）且只看最近 30 天。
 //
 // taken_at 列为 INTEGER 毫秒时间戳，0 表未知；WHERE taken_at > 0 排除无拍摄时间的记录。
-// 日期提取用 strftime('%Y-%m-%d', taken_at/1000, 'unixepoch')：除 1000 转秒，
+// TimeDistribution 按拍摄时间（taken_at）的 UTC 小时分段统计媒体分布。分段与中文标签：
+//
+//	"深夜" 00:00–05:59   （小时 0–5）
+//	"早晨" 06:00–11:59   （小时 6–11）
+//	"下午" 12:00–17:59   （小时 12–17）
+//	"晚上" 18:00–23:59   （小时 18–23）
+//
+// taken_at 列为 INTEGER 毫秒时间戳（0 表未知），与 TimelineCalendar 同源；WHERE taken_at > 0
+// 排除无拍摄时间的记录，仅统计当前用户未软删（deleted=0）的媒体。
+//
+// 小时提取用 strftime('%H', taken_at/1000, 'unixepoch')：除 1000 转秒后按 Unix 时间戳解读，
+// strftime('%H') 返回 UTC 两位小时（00–23）。与 TimelineCalendar 一致使用 UTC，避免依赖
+// 服务器本地时区；前端如需本地时段可自行换算（此处保持与库内其他时间聚合端点同策略）。
+//
+// 返回 map 固定含四个中文键，值为对应段计数（无命中的段为 0）。调用方据此累加 total。
+func (s *Store) TimeDistribution(ctx context.Context, userID string) (map[string]int, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT strftime('%H', taken_at/1000, 'unixepoch') AS hour, COUNT(*) AS count
+FROM "media"
+WHERE user_id = ? AND deleted = 0 AND taken_at > 0
+GROUP BY hour`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("time distribution: %w", err)
+	}
+	defer rows.Close()
+
+	dist := map[string]int{"深夜": 0, "早晨": 0, "下午": 0, "晚上": 0}
+	for rows.Next() {
+		var hour string
+		var count int
+		if err := rows.Scan(&hour, &count); err != nil {
+			return nil, fmt.Errorf("scan time distribution: %w", err)
+		}
+		// hour 形如 "00".."23"（_STRFtime 保证两位）；atoi 后按 0–5/6–11/12–17/18–23 分段。
+		h, err := strconv.Atoi(hour)
+		if err != nil || h < 0 || h > 23 {
+			// 理论不会出现；防御性跳过异常行，不阻断整体统计。
+			continue
+		}
+		switch {
+		case h < 6:
+			dist["深夜"] += count
+		case h < 12:
+			dist["早晨"] += count
+		case h < 18:
+			dist["下午"] += count
+		default:
+			dist["晚上"] += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows time distribution: %w", err)
+	}
+	return dist, nil
+}
+
+// 时间提取用 strftime('%Y-%m-%d', taken_at/1000, 'unixepoch')：除 1000 转秒，
 // 'unixepoch' 修饰符把整列秒数当 Unix 时间戳解读，strftime 取 UTC 日期（与 DB 一致用 UTC，
 // 前端按本地时区渲染由调用方决定）。按 (date, type) 双维度分组，type 为 IMAGE/VIDEO/LIVE_PHOTO 等，
 // 供前端日历视图区分当天照片/视频数量。每行含 date、type、count；total 为当天全部类型合计
