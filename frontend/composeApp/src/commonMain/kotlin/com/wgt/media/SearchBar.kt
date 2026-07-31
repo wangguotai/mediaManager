@@ -33,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
@@ -246,6 +248,9 @@ fun SearchBar(
     var queryVisible by remember { mutableStateOf(false) }
     // 展开时聚焦输入框，自动唤起键盘，省去用户二次点击。
     val focusRequester = remember { FocusRequester() }
+    // 用于推荐标签点击采纳（POST /api/media/auto-tag 批量打标签）发起协程。
+    // SearchBar 自身无 ViewModel，故就地持有一个 scope 调 MediaService 挂起方法。
+    val tagScope = rememberCoroutineScope()
 
     // debounce：监听 queryText 变化，停顿 300ms 后上抛去抖后的查询。
     // distinctUntilChanged 避免相同值重复触发过滤重组。
@@ -548,6 +553,107 @@ fun SearchBar(
                             )
                         )
                     }
+                }
+            }
+        }
+        // V22：推荐标签区——展开态且输入为空时，调 GET /api/media/tag-recommendations
+        // 拉取智能标签推荐（按文件名模式 IMG_/VID_/Screenshot 等映射），在用户已有标签
+        // 快捷区下方展示。每个 chip 显示 #tag + "(N 项可标记)"；点击采纳 → 调
+        // POST /api/media/auto-tag 批量打标签（auto-tag 按 IMG_→照片 等前缀规则幂等标记，
+        // 语义上覆盖推荐区列出的全部匹配媒体）。
+        //
+        // 与并列展示的 [listAllTags] 快捷区互补：快捷区是"已有标签，点击搜索"，
+        // 推荐区是"还没打的标签，点击采纳"。采纳后该推荐会被后端跳过（用户已拥有该标签），
+        // 下次刷新自然消失。
+        if (expanded && queryText.isEmpty()) {
+            var recommendations by remember {
+                mutableStateOf<List<MediaService.TagRecommendation>>(emptyList())
+            }
+            // 推荐采纳后置 1：已采纳状态——点击后变灰禁用，避免重复打标签。
+            var adoptedTag by remember { mutableStateOf<String?>(null) }
+            // 推荐采纳后置 2：采纳结果提示（"已标记 N 项"或失败），短暂Toast式展示。
+            var adoptMsg by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(expanded) {
+                if (expanded) {
+                    recommendations = MediaService.getTagRecommendations() ?: emptyList()
+                }
+            }
+            if (recommendations.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                // 标题行："推荐标签"文案，标识此区与上方已有标签快捷区区分。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "推荐标签",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(recommendations.size) { index ->
+                        val rec = recommendations[index]
+                        val isAdopted = adoptedTag == rec.tagName
+                        // 用 AssistChip 采纳按钮：chip 标题显示 "#tag (N 可标记)"；
+                        // 辅助文本（reason）通过次行小字展示，受 chip 单行约束故以 maxLines=1 截断。
+                        // 点击 → tagScope.launch 调 MediaService.autoTag()，成功记 taggedCount。
+                        AssistChip(
+                            onClick = {
+                                if (isAdopted) return@AssistChip
+                                adoptedTag = rec.tagName
+                                tagScope.launch {
+                                    val tagged = MediaService.autoTag()
+                                    adoptMsg = if (tagged > 0) "已为 $tagged 项打标签" else "未发现可标记的媒体"
+                                }
+                            },
+                            label = {
+                                Column {
+                                    // 主行：#tag + (N 项可标记)
+                                    Text(
+                                        "#${rec.tagName} (${rec.suggestedMediaCount} 项可标记)",
+                                        fontSize = 13.sp
+                                    )
+                                    // 次行：推荐理由（后端 reason，如"文件名以 IMG_ 开头"）。
+                                    if (rec.reason.isNotEmpty()) {
+                                        Text(
+                                            rec.reason,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            },
+                            colors = AssistChipDefaults.assistChipColors(
+                                // 已采纳时降饱和度提示已完成；未采纳用 secondaryContainer 与上方
+                                // 标签快捷区（tertiaryContainer）区分色相。
+                                containerColor = if (isAdopted) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                                }
+                            )
+                        )
+                    }
+                }
+                // 采纳结果提示：非空时以小字展示在推荐区底部，点过后短暂可见。
+                adoptMsg?.let { msg ->
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        msg,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
                 }
             }
         }

@@ -2769,6 +2769,58 @@ object MediaService {
     }
 
     /**
+     * V22：智能标签推荐单项。后端 [tagRecommendation] JSON 对齐：
+     * `{tag_name, reason, suggested_media_count}`。
+     *
+     * - [tagName] 推荐的标签名（如"照片"/"截图"），由后端按文件名命名模式映射。
+     * - [reason] 推荐理由（如"文件名以 IMG_ 开头"），直接展示给用户。
+     * - [suggestedMediaCount] 命中该模式的可标记媒体数，供 UI 显示"(N 项可标记)"。
+     */
+    data class TagRecommendation(
+        val tagName: String = "",
+        val reason: String = "",
+        val suggestedMediaCount: Int = 0
+    )
+
+    /**
+     * V22：GET /api/media/tag-recommendations — 拉取智能标签推荐。
+     *
+     * 后端扫描用户所有未删除媒体的文件名，按常见命名模式（IMG_/VID_/Screenshot/
+     * WeChat/camera）映射到中文标签名；若用户已有该标签则跳过。返回命中该模式的
+     * 媒体数量，供前端"推荐标签"区展示并让用户一键采纳（点击调 [autoTag] 批量打标签）。
+     *
+     * 端点只读、不修改任何媒体；采纳动作走 [autoTag]（POST /api/media/auto-tag）。
+     *
+     * 响应：`{recommendations:[{tag_name,reason,suggested_media_count}], total}`
+     * 成功返回 [TagRecommendation] 列表（可能为空，表示无推荐）；失败/非 200 返回 null，
+     * 调用方按 null 降级（隐藏推荐区）。
+     */
+    suspend fun getTagRecommendations(): List<TagRecommendation>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-recommendations") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["recommendations"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    TagRecommendation(
+                        tagName = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        reason = o["reason"]?.jsonPrimitive?.contentOrNull ?: "",
+                        suggestedMediaCount = o["suggested_media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getTagRecommendations status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagRecommendations FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/tag/export — 导出标签数据。
      *
      * 返回后端原始 JSON 字符串（包含全部标签及其关联媒体），供前端复制到剪贴板
