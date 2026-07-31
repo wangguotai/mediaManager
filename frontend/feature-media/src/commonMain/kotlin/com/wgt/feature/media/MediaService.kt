@@ -1313,6 +1313,43 @@ object MediaService {
         }
     }
 
+    /**
+     * V7：GET /api/media/storage-trend — 存储增长趋势
+     */
+    suspend fun getStorageTrend(): List<TrendPoint>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-trend") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["trends"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TrendPoint(
+                        month = o["month"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        addedCount = o["added_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        addedBytes = o["added_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        cumBytes = o["cum_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageTrend FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V7：存储趋势数据点 */
+    data class TrendPoint(
+        val month: String,
+        val addedCount: Int,
+        val addedBytes: Long,
+        val cumBytes: Long
+    ) {
+        val cumMB: Double get() = cumBytes.toDouble() / (1024.0 * 1024.0)
+        val addedMB: Double get() = addedBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
     // ---- 解析 ----
 
     /**
