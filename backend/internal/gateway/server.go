@@ -299,6 +299,10 @@ func (s *Server) registerRoutes() {
 	// 与 tag-co-occurrence 互补：后者只返 co>=2 的标签对（列表视角），本端点返完整
 	// 图结构（nodes+edges），所有共现 >=1 均纳入以便前端按权重过滤渲染。
 	s.mux.HandleFunc("/api/media/tag-network", s.handleTagNetwork)
+	// 标签层级分析：自动分析标签名中的分隔符（- / : 等）推断父子关系，
+	// 如 "旅行-国内"、"旅行-国外" 的父节点为 "旅行"。无分隔符的标签作为顶层。
+	// 返回 {hierarchy: [{tag, count, children: [...]}], total_roots}，供前端树形展示。
+	s.mux.HandleFunc("/api/media/tag-hierarchy", s.handleTagHierarchy)
 	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
 	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
@@ -5967,6 +5971,112 @@ func (s *Server) handleMediaTagCloudData(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":  out,
 		"total": len(out),
+	})
+}
+
+// handleTagHierarchy GET /api/media/tag-hierarchy — 标签层级分析。
+// 自动分析标签名中的分隔符（- / : 等）推断父子关系：如 "旅行-国内"、"旅行-国外"
+// 的父节点为 "旅行"；没有分隔符的标签作为顶层根节点。
+// 响应: { hierarchy: [{tag, count, children: [{tag, count}]}], total_roots }。
+//
+// 推断算法：
+//  1. ListAllTags 取当前用户的全部标签集合 tagSet（含标签名）。
+//  2. TagStats 取各标签关联媒体数，构建 tag→count 映射。
+//  3. 对每个标签，按 - / : 三种分隔符切分出前缀 parent + 后缀 suffix。
+//     - 若分隔符存在且 parent ∈ tagSet（父标签确实由用户独立使用），则视为
+//       父子关系；否则该标签作为顶层根。
+//     - 优先级：- > / > :（按出现顺序依次尝试，命中即停）。
+//  4. 根节点 = 无父的标签；children = 以该标签为 parent 的后缀标签（按字母序）。
+//     count 取该标签自身关联媒体数（不含子标签的，避免重复统计口径混乱）。
+//
+// 注意：本端点只读，不落任何数据；推断纯基于标签名命名约定。
+func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// tag→count 映射。TagStats 返回 []map{tag,count}（按 count DESC）。
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	countOf := make(map[string]int, len(stats))
+	for _, st := range stats {
+		name, _ := st["tag"].(string)
+		cnt, _ := st["count"].(int)
+		countOf[name] = cnt
+	}
+	// tagSet 用于 O(1) 判断父标签是否独立存在。
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		tagSet[t] = struct{}{}
+	}
+	// splitParent 按 - / : 分隔符切分出 (parent, ok)。
+	// 命中即返回；分隔符优先级 - > / > :。仅按第一个分隔符切分
+	// （多级如 a-b-c 的父是 a-b，因 a-b 也需独立存在于 tagSet 才认父子）。
+	splitParent := func(name string) (parent string, ok bool) {
+		for _, sep := range []string{"-", "/", ":"} {
+			if idx := strings.Index(name, sep); idx > 0 && idx < len(name)-len(sep) {
+				p := name[:idx]
+				if _, exists := tagSet[p]; exists {
+					return p, true
+				}
+			}
+		}
+		return "", false
+	}
+	type childNode struct {
+		Tag   string `json:"tag"`
+		Count int    `json:"count"`
+	}
+	type rootNode struct {
+		Tag      string      `json:"tag"`
+		Count    int         `json:"count"`
+		Children []childNode `json:"children"`
+	}
+	// 按 parent 分组子标签。
+	childrenOf := make(map[string][]string)
+	for _, t := range tags {
+		if p, ok := splitParent(t); ok {
+			childrenOf[p] = append(childrenOf[p], t)
+		}
+	}
+	hierarchy := make([]rootNode, 0, len(tags))
+	for _, t := range tags {
+		// 根节点 = 自身不是任何现存标签的子标签。
+		if _, ok := splitParent(t); ok {
+			continue
+		}
+		node := rootNode{Tag: t, Count: countOf[t]}
+		kids := childrenOf[t]
+		// ListAllTags 已按 tag_name 升序，故 kids 亦升序，无需再排序。
+		for _, c := range kids {
+			node.Children = append(node.Children, childNode{Tag: c, Count: countOf[c]})
+		}
+		if node.Children == nil {
+			node.Children = []childNode{}
+		}
+		hierarchy = append(hierarchy, node)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hierarchy":    hierarchy,
+		"total_roots":  len(hierarchy),
+		"total_tags":   len(tags),
 	})
 }
 
