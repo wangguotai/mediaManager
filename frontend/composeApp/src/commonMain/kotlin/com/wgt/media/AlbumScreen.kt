@@ -18,12 +18,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
@@ -201,8 +198,6 @@ private fun AlbumListPage(
     val albums = viewModel.albumList
     val isLoading = viewModel.isAlbumLoading
     var sortByName by remember { mutableStateOf(false) }
-    // V10：视图切换 —— true=网格视图（LazyVerticalGrid），false=列表视图（LazyColumn，每行一个相册）
-    var gridView by remember { mutableStateOf(true) }
     // V8：批量选择模式
     var selectionMode by remember { mutableStateOf(false) }
     val selectedAlbumIds = remember { mutableStateListOf<String>() }
@@ -288,15 +283,6 @@ private fun AlbumListPage(
                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                             )
                         }
-                        // V10：网格 / 列表视图切换按钮。
-                        // 无 ic_grid/ic_list 资源（本任务只改本文件），以 Text 字形代替图标。
-                        IconButton(onClick = { gridView = !gridView }) {
-                            Text(
-                                if (gridView) "≣" else "▦",
-                                fontSize = 18.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
-                            )
-                        }
                         IconButton(
                             onClick = { viewModel.loadAlbums(forceRefresh = true) },
                             enabled = !isLoading
@@ -374,75 +360,46 @@ private fun AlbumListPage(
                         }
                     }
                     else -> {
-                        // V10：点击 / 长按行为在网格与列表两种视图间复用。
-                        val onAlbumItemClick: (MediaService.Album) -> Unit = { album ->
-                            if (selectionMode) {
-                                if (selectedAlbumIds.contains(album.id)) {
-                                    selectedAlbumIds.remove(album.id)
-                                } else {
-                                    selectedAlbumIds.add(album.id)
-                                }
-                            } else {
-                                onAlbumClick(album)
-                            }
-                        }
-                        val onAlbumItemLongClick: (MediaService.Album) -> Unit = { album ->
-                            if (selectionMode) {
-                                // 批量选择途中：保持原行为，切中选
-                                if (selectedAlbumIds.contains(album.id)) {
-                                    selectedAlbumIds.remove(album.id)
-                                } else {
-                                    selectedAlbumIds.add(album.id)
-                                }
-                            } else {
-                                // 非批量模式：弹动作菜单（置顶/取消置顶/删除/批量选择）
-                                pendingActionAlbum = album
-                            }
-                        }
-
-                        if (gridView) {
-                            // 网格视图（默认）：保持原 LazyVerticalGrid 卡片网格不变
-                            LazyVerticalGrid(
-                                columns = GridCells.Adaptive(minSize = 160.dp),
-                                contentPadding = PaddingValues(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(
-                                    items = displayAlbums,
-                                    key = { it.id },
-                                    contentType = { "album_card" }
-                                ) { album ->
-                                    AlbumCard(
-                                        album = album,
-                                        isPinned = album.id in pinnedIds,
-                                        onClick = { onAlbumItemClick(album) },
-                                        onLongClick = { onAlbumItemLongClick(album) },
-                                    )
-                                }
-                            }
-                        } else {
-                            // 列表视图：每行一个相册（48dp 封面 + 名称 + 数量 + 箭头）
-                            LazyColumn(
-                                contentPadding = PaddingValues(vertical = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(
-                                    items = displayAlbums,
-                                    key = { it.id },
-                                    contentType = { "album_row" }
-                                ) { album ->
-                                    AlbumListRow(
-                                        album = album,
-                                        isPinned = album.id in pinnedIds,
-                                        isSelected = album.id in selectedAlbumIds,
-                                        onClick = { onAlbumItemClick(album) },
-                                        onLongClick = { onAlbumItemLongClick(album) },
-                                    )
-                                }
-                            }
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 160.dp),
+                            contentPadding = PaddingValues(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(
+                                items = displayAlbums,
+                                key = { it.id },
+                                contentType = { "album_card" }
+                            ) { album ->
+                                AlbumCard(
+                                    album = album,
+                                    isPinned = album.id in pinnedIds,
+                                    onClick = {
+                                        if (selectionMode) {
+                                            if (selectedAlbumIds.contains(album.id)) {
+                                                selectedAlbumIds.remove(album.id)
+                                            } else {
+                                                selectedAlbumIds.add(album.id)
+                                            }
+                                        } else {
+                                            onAlbumClick(album)
+                                        }
+                                    },
+                                onLongClick = {
+                                    if (selectionMode) {
+                                        // 批量选择途中：保持原行为，切中选
+                                        if (selectedAlbumIds.contains(album.id)) {
+                                            selectedAlbumIds.remove(album.id)
+                                        } else {
+                                            selectedAlbumIds.add(album.id)
+                                        }
+                                    } else {
+                                        // 非批量模式：弹动作菜单（置顶/取消置顶/删除/批量选择）
+                                        pendingActionAlbum = album
+                                    }
+                                },
+                            )
                         }
                     }
                 }
@@ -677,141 +634,6 @@ private fun AlbumCard(
                 )
             }
         }
-    }
-}
-
-// ---- 相册列表行（列表视图） ----
-
-/**
- * 相册列表行（V10 列表视图）：左侧 48dp 方形封面缩略图，中间名称 + 数量，
- * 右侧箭头 [ic_arrow_forward]；置顶显示 📌，批量选择模式下选中显示 ✓。
- * 行为与 [AlbumCard] 一致（点击进入 / 切选；长按弹动作菜单）。
- */
-@OptIn(ExperimentalResourceApi::class)
-@Composable
-private fun AlbumListRow(
-    album: MediaService.Album,
-    isPinned: Boolean = false,
-    isSelected: Boolean = false,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
-) {
-    val hapticFeedback = LocalHapticFeedback.current
-    // 封面缩略图状态：优先 coverMediaId，否则 fallback 取相册首张媒体
-    var coverBitmap by remember(album.id) { mutableStateOf<ImageBitmap?>(null) }
-    var isLoadingCover by remember(album.id) { mutableStateOf(true) }
-    val scope = rememberCoroutineScope()
-
-    LaunchedEffect(album.id, album.coverMediaId) {
-        val coverId = album.coverMediaId
-        if (coverId != null) {
-            scope.launch(dispatchers.io) {
-                try {
-                    coverBitmap = BackendImageLoader.loadThumbnail(coverId)
-                } catch (e: Exception) {
-                    // 静默
-                } finally {
-                    isLoadingCover = false
-                }
-            }
-        } else if (album.mediaCount > 0) {
-            scope.launch(dispatchers.io) {
-                try {
-                    val media = MediaService.getMediaList(source = MediaSource.BACKEND)
-                    val first = media.firstOrNull()
-                    if (first != null) {
-                        coverBitmap = BackendImageLoader.loadThumbnail(first.id)
-                    }
-                } catch (e: Exception) {
-                    // 静默
-                } finally {
-                    isLoadingCover = false
-                }
-            }
-        } else {
-            isLoadingCover = false
-        }
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 64.dp)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = {
-                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onLongClick()
-                }
-            )
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 选中标记 / 封面缩略图：批量选择模式下选中时覆盖显示 ✓，否则显示封面
-        Box(
-            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            if (isSelected) {
-                Box(
-                    modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painterResource(Res.drawable.ic_check_circle),
-                        contentDescription = null,
-                        modifier = Modifier.size(28.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            } else if (coverBitmap != null) {
-                androidx.compose.foundation.Image(
-                    bitmap = coverBitmap!!,
-                    contentDescription = album.name,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Icon(
-                    painterResource(Res.drawable.ic_photo),
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        // 名称 + 数量
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isPinned) {
-                    Text("📌", fontSize = 13.sp)
-                    Spacer(modifier = Modifier.width(4.dp))
-                }
-                Text(
-                    album.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Text(
-                "${album.mediaCount} 项",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-            )
-        }
-
-        // 右侧箭头
-        Icon(
-            painterResource(Res.drawable.ic_arrow_forward),
-            contentDescription = "查看",
-            modifier = Modifier.size(20.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-        )
     }
 }
 
