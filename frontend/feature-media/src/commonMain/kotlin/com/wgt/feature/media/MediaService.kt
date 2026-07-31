@@ -3170,6 +3170,99 @@ object MediaService {
     /** V9：标签云条目（标签名 + 计数 + 封面缩略图相对 URL，可能为 null）。 */
     data class TagCloudItem(val tagName: String, val count: Int, val thumbnailUrl: String?)
 
+    /**
+     * V21：标签详情统计条目。
+     *
+     * 后端有两个相关端点，本端在前端合并：
+     * - GET /api/media/tag-stat-detailed → {tag_name, count, total_bytes, last_created_at}
+     * - GET /api/media/tag/stat-by-type  → {tag_name, total, image_count, video_count, live_count}
+     *
+     * [total] 沿用 tag-stat-detailed 的 count（标签关系表口径，含软删 media 关联）；
+     * [imageCount]/[videoCount]/[liveCount] 来自 stat-by-type（按未软删 media 的 type 分布），
+     * 故三者之和可能 <= total（差额为已被软删的关联 media），属正常口径差异，非 bug。
+     * [totalBytes] 为该标签关联未软删 media 的文件 size 求和。
+     * [lastCreatedAt] 为关联 media 中最近 created_at（RFC3339，无关联时为空串）。
+     */
+    data class TagDetailedStat(
+        val tagName: String,
+        val total: Int,
+        val imageCount: Int,
+        val videoCount: Int,
+        val liveCount: Int,
+        val totalBytes: Long,
+        val lastCreatedAt: String
+    ) {
+        /** 该标签关联文件总大小 MB（保留一位小数由 UI 文字截断处理）。 */
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /**
+     * V21：GET /api/media/tag-stat-detailed + tag/stat-by-type — 标签详情统计。
+     *
+     * 并发拉取两个端点：tag-stat-detailed 提供 count/size/时间，stat-by-type 提供
+     * 媒体类型分布（图片/视频/Live）。按 tag_name 合并为 [TagDetailedStat]，按 total
+     * 降序返回（与后端 TagStats 的 count DESC 口径一致）。
+     *
+     * 容错：若 stat-by-type 请求失败或非 200，仅用 tag-stat-detailed 数据，分布置 0；
+     * tag-stat-detailed 失败则整体返回 null（UI 静默跳过卡片，与其他统计卡片一致）。
+     * stat-by-type 中存在但 tag-stat-detailed 缺失的标签跳过，以 detailed 为权威源。
+     */
+    suspend fun getTagStatDetailed(): List<TagDetailedStat>? {
+        return try {
+            // 并发拉两端点；coroutineScope 保证任一异常冒泡到外层 catch 统一兜底。
+            // runCatching 包裹 stat-by-type 使其失败不致命——分布缺失仅置 0。
+            coroutineScope {
+                val detailedDeferred = async {
+                    val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-stat-detailed") {
+                        getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                    }
+                    if (response.status != HttpStatusCode.OK) return@async emptyList<Pair<String, JsonObject>>()
+                    val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                    obj["tags"]?.jsonArray?.mapNotNull { item ->
+                        val o = item.jsonObject
+                        val name = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        name to o
+                    } ?: emptyList()
+                }
+                val typeDeferred = async {
+                    runCatching {
+                        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/stat-by-type") {
+                            getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                        }
+                        if (response.status != HttpStatusCode.OK) return@runCatching emptyMap<String, JsonObject>()
+                        val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                        obj["tags"]?.jsonArray?.mapNotNull { item ->
+                            val o = item.jsonObject
+                            val name = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                            name to o
+                        }?.toMap() ?: emptyMap()
+                    }.getOrDefault(emptyMap())
+                }
+                val detailed = detailedDeferred.await()
+                val typeMap = typeDeferred.await()
+                if (detailed.isEmpty()) return@coroutineScope emptyList<TagDetailedStat>()
+                detailed.map { (name, o) ->
+                    val to = typeMap[name]
+                    TagDetailedStat(
+                        tagName = name,
+                        total = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        imageCount = to?.get("image_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        videoCount = to?.get("video_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        liveCount = to?.get("live_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        lastCreatedAt = o["last_created_at"]?.let {
+                            // 后端无关联 media 时该字段为 null（JsonNull），前端统一映射为空串。
+                            if (it is JsonNull) "" else it.jsonPrimitive?.contentOrNull ?: ""
+                        } ?: ""
+                    )
+                }.sortedByDescending { it.total }
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagStatDetailed FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/tag/search?tag=xxx — 按标签搜索 media_id 列表。 */
     suspend fun searchByTag(tag: String): List<String>? {
         return try {

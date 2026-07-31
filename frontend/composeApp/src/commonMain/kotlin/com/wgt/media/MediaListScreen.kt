@@ -1821,6 +1821,75 @@ private fun MyTabContent(
             }
         }
 
+        // V21：标签详情统计卡片——在数据温度之后，展示每个标签的媒体类型分布与占用大小。
+        // 调 GET /api/media/tag-stat-detailed（前端合并 tag/stat-by-type 取类型分布）。
+        // 后端返回 null（未铺量/异常）或空列表时静默跳过，与其他统计卡片一致。
+        // 仅展示 total 最高的前 5 个标签，避免长列表挤占仪表盘。
+        var tagDetailedStats by remember { mutableStateOf<List<MediaService.TagDetailedStat>?>(null) }
+        LaunchedEffect(Unit) { tagDetailedStats = MediaService.getTagStatDetailed() }
+        tagDetailedStats?.let { stats ->
+            if (stats.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签详情统计",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        stats.take(5).forEach { ts ->
+                            // 组装类型分布文本：仅展示 count>0 的类型，避免 "图片0 视频0" 噪音。
+                            // Live 若有则追加展示（Live Photo 较少见，有则点出）。
+                            val distParts = mutableListOf<String>()
+                            if (ts.imageCount > 0) distParts.add("图片${ts.imageCount}")
+                            if (ts.videoCount > 0) distParts.add("视频${ts.videoCount}")
+                            if (ts.liveCount > 0) distParts.add("Live${ts.liveCount}")
+                            val distText = if (distParts.isEmpty()) "无媒体" else distParts.joinToString(" ")
+                            // 大小：totalMB 取一位小数（commonMain 无 String.format，沿用 take 截断）。
+                            val mbStr = ts.totalMB.toString()
+                            val mbStr1 = mbStr.take(mbStr.indexOf('.') + 2)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    "#${ts.tagName}",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "${ts.total} 项 · $distText · $mbStr1 MB",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 ${stats.size} 个标签（按关联媒体数排序，展示前 5）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
         var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
         LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }
@@ -3113,6 +3182,42 @@ private fun StatItem(label: String, count: Int, bytes: Long) {
         Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("$count", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Text(formatBytesToMB(bytes), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+    }
+}
+
+/**
+ * V22：仪表盘概览单项——2x3 网格的一格。60dp 圆角方块，emoji + 大数字 + 小标签。
+ * 背景 primaryContainer 突出"概览"语义，与 surfaceVariant 区分层次。
+ */
+@Composable
+private fun DashboardMetricCell(
+    emoji: String,
+    value: String,
+    label: String,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(60.dp))
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .padding(vertical = 14.dp, horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(emoji, fontSize = 20.sp)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            value,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+        )
     }
 }
 
