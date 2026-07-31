@@ -251,6 +251,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/stats", s.handleMediaTagStats)
 	// V8：重命名标签
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
+	// V8：批量重命名标签
+	s.mux.HandleFunc("/api/media/tag/batch-rename", s.handleMediaTagBatchRename)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 	// V8：标签自动补全
@@ -3904,6 +3906,65 @@ func (s *Server) handleMediaTagRename(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMediaTagBatchRename V8：POST /api/media/tag/batch-rename — 批量重命名标签。
+// 请求体: { renames: [{old_name, new_name}, ...] }
+// 遍历调 Store.RenameTag(ctx, uid, old, new)；逐条记录成功与失败，互不中断。
+// 响应: { status, renamed_count, failed: [{old_name, reason}] }
+func (s *Server) handleMediaTagBatchRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		Renames []struct {
+			OldName string `json:"old_name"`
+			NewName string `json:"new_name"`
+		} `json:"renames"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.Renames) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "renames required"})
+		return
+	}
+	renamedCount := 0
+	failed := make([]map[string]string, 0, len(req.Renames))
+	for _, item := range req.Renames {
+		oldName := strings.TrimSpace(item.OldName)
+		newName := strings.TrimSpace(item.NewName)
+		if oldName == "" || newName == "" {
+			failed = append(failed, map[string]string{"old_name": item.OldName, "reason": "old_name and new_name required"})
+			continue
+		}
+		if _, err := s.store.RenameTag(r.Context(), uid, oldName, newName); err != nil {
+			failed = append(failed, map[string]string{"old_name": oldName, "reason": err.Error()})
+			continue
+		}
+		renamedCount++
+	}
+	status := "success"
+	if renamedCount == 0 {
+		status = "failed"
+	} else if len(failed) > 0 {
+		status = "partial"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        status,
+		"renamed_count": renamedCount,
+		"failed":        failed,
+	})
+}
 // handleMediaTagDelete V8：POST /api/media/tag/delete — 删除标签。
 // 请求体: { tag_name }
 func (s *Server) handleMediaTagDelete(w http.ResponseWriter, r *http.Request) {
