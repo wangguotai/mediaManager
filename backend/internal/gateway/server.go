@@ -252,6 +252,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/by-resolution", s.handleMediaByResolution)
 	// V8：按文件大小范围统计
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
+	// V8：同步状态摘要
+	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3655,6 +3657,54 @@ func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) 
 		"ranges":      ranges,
 		"range_bytes": rangeBytes,
 		"total":       len(mediaList),
+	})
+}
+
+// handleMediaSyncStatus V8：GET /api/media/sync-status — 返回用户同步状态摘要。
+func (s *Server) handleMediaSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalCount := 0
+	deletedCount := 0
+	var totalBytes int64
+	var lastUpdate time.Time
+	for _, m := range mediaList {
+		if m.Deleted {
+			deletedCount++
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+		if m.UpdatedAt.After(lastUpdate) {
+			lastUpdate = m.UpdatedAt
+		}
+	}
+	var lastUpdateStr string
+	if !lastUpdate.IsZero() {
+		lastUpdateStr = lastUpdate.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_media":      totalCount,
+		"deleted_media":    deletedCount,
+		"total_bytes":      totalBytes,
+		"last_update":      lastUpdateStr,
+		"server_time":      time.Now().Format(time.RFC3339),
 	})
 }
 
