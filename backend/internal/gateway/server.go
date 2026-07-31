@@ -234,6 +234,8 @@ func (s *Server) registerRoutes() {
 	// 区别于 auto-cover（仅取第一个 media 且只在封面为空时执行），本端点无论已有
 	// 封面与否都按尺寸/新鲜度重选并覆盖。精确匹配优先于 /api/media/album/ 前缀。
 	s.mux.HandleFunc("/api/media/album/cover-auto-pick", s.handleAlbumCoverAutoPick)
+	// 批量智能选封面：遍历用户所有无封面相册，对每个执行 cover-auto-pick 逻辑。
+	s.mux.HandleFunc("/api/media/album/batch-cover-auto-pick", s.handleAlbumBatchCoverAutoPick)
 	// V8：取消相册共享
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
@@ -2120,6 +2122,131 @@ func (s *Server) handleAlbumCoverAutoPick(w http.ResponseWriter, r *http.Request
 		"album_id":       req.AlbumID,
 		"cover_media_id": coverID,
 		"reason":         reason,
+	})
+}
+
+// pickAlbumCoverCore 是 handleAlbumCoverAutoPick 与 handleAlbumBatchCoverAutoPick
+// 共用的核心选封面逻辑：从相册所有 media 中按优先级「图片类型 > 最大尺寸 > 最近上传」
+// 挑选最佳封面，返回 (cover_media_id, reason, error)。error 非空时不可落库。
+func (s *Server) pickAlbumCoverCore(ctx context.Context, uid, albumID string, album *service.Album) (string, string, error) {
+	if len(album.MediaIDs) == 0 {
+		return "", "", fmt.Errorf("album is empty")
+	}
+	type candidate struct {
+		ID       string
+		Pixels   int64
+		CreatedA time.Time
+	}
+	var cands []candidate
+	type fallback struct {
+		ID       string
+		CreatedA time.Time
+	}
+	var fallbacks []fallback
+	for _, mid := range album.MediaIDs {
+		m, err := s.store.GetMedia(ctx, mid)
+		if err != nil || m == nil || m.Deleted {
+			continue
+		}
+		fallbacks = append(fallbacks, fallback{ID: mid, CreatedA: m.CreatedAt})
+		if m.Type == "IMAGE" {
+			cands = append(cands, candidate{
+				ID:       mid,
+				Pixels:   int64(m.Width) * int64(m.Height),
+				CreatedA: m.CreatedAt,
+			})
+		}
+	}
+	reason := ""
+	coverID := ""
+	if len(cands) > 0 {
+		sort.Slice(cands, func(i, j int) bool {
+			if cands[i].Pixels != cands[j].Pixels {
+				return cands[i].Pixels > cands[j].Pixels
+			}
+			return cands[i].CreatedA.After(cands[j].CreatedA)
+		})
+		coverID = cands[0].ID
+		reason = "best_image_by_size_and_recency"
+	} else {
+		sort.Slice(fallbacks, func(i, j int) bool {
+			return fallbacks[i].CreatedA.After(fallbacks[j].CreatedA)
+		})
+		if len(fallbacks) == 0 {
+			return "", "", fmt.Errorf("no media available")
+		}
+		coverID = fallbacks[0].ID
+		reason = "no_image_fallback_to_most_recent_media"
+	}
+	return coverID, reason, nil
+}
+
+// handleAlbumBatchCoverAutoPick 批量智能选封面：POST /api/media/album/batch-cover-auto-pick。
+// 遍历当前用户名下所有相册，筛选 cover_media_id 为空（无封面）的，对每个执行
+// cover-auto-pick 逻辑（图片类型优先 + 最大尺寸 + 最近上传）并落库。已有封面的相册跳过。
+// 返回 {status, updated_count, skipped_count, total, details}。
+func (s *Server) handleAlbumBatchCoverAutoPick(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+	total := len(albums)
+	updated := 0
+	skipped := 0
+	type detail struct {
+		AlbumID      string `json:"album_id"`
+		CoverMediaID string `json:"cover_media_id,omitempty"`
+		Reason       string `json:"reason,omitempty"`
+		Skipped      bool   `json:"skipped,omitempty"`
+		SkipReason   string `json:"skip_reason,omitempty"`
+	}
+	details := make([]detail, 0, total)
+	for _, album := range albums {
+		if album.CoverMediaID != "" {
+			skipped++
+			details = append(details, detail{AlbumID: album.ID, Skipped: true, SkipReason: "already_has_cover"})
+			continue
+		}
+		if len(album.MediaIDs) == 0 {
+			skipped++
+			details = append(details, detail{AlbumID: album.ID, Skipped: true, SkipReason: "album_empty"})
+			continue
+		}
+		coverID, reason, err := s.pickAlbumCoverCore(r.Context(), uid, album.ID, album)
+		if err != nil {
+			skipped++
+			details = append(details, detail{AlbumID: album.ID, Skipped: true, SkipReason: err.Error()})
+			continue
+		}
+		if err := provider.SetAlbumCover(uid, album.ID, coverID); err != nil {
+			skipped++
+			details = append(details, detail{AlbumID: album.ID, Skipped: true, SkipReason: err.Error()})
+			continue
+		}
+		updated++
+		details = append(details, detail{AlbumID: album.ID, CoverMediaID: coverID, Reason: reason})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"updated_count": updated,
+		"skipped_count": skipped,
+		"total":         total,
+		"details":       details,
 	})
 }
 
