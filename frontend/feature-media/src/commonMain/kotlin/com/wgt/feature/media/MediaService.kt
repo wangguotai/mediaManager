@@ -938,6 +938,41 @@ object MediaService {
         }
     }
 
+    /**
+     * V9：一键切换相册的公开共享状态。
+     *
+     * 与 [shareAlbum]（按用户名邀请特定人）不同，这是相册级的公开共享开关：
+     * 已共享 → 取消共享；未共享 → 开启共享并返回可分享的链接。后端端点
+     * `POST /api/media/album/share-toggle { album_id }` 幂等地翻转相册的
+     * `is_shared` 标记并返回新状态与 share_url（首次共享时生成）。
+     *
+     * @return `Pair(shared, shareUrl)`：
+     *   - `shared` 切换后的共享状态（true=已共享，false=已取消）
+     *   - `shareUrl` 共享链接（仅 shared=true 时非空）；网络/HTTP 错误时返回 null
+     */
+    suspend fun toggleAlbumShare(albumId: String): Pair<Boolean, String?>? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/share-toggle") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("album_id", albumId) })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val shared = obj["shared"]?.jsonPrimitive?.booleanOrNull ?: false
+                val url = obj["share_url"]?.jsonPrimitive?.contentOrNull
+                logger.info("MediaService", "toggleAlbumShare id=$albumId shared=$shared url=$url")
+                Pair(shared, url)
+            } else {
+                logger.info("MediaService", "toggleAlbumShare id=$albumId failed status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "toggleAlbumShare FAILED id=$albumId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /** 获取被共享给当前用户的相册列表。 */
     suspend fun getSharedAlbums(): List<Album> {
         return try {

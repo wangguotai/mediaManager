@@ -638,6 +638,13 @@ private fun AlbumDetailPage(
     var showAddMediaDialog by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<String?>(null) } // V7：长按移除目标 media id
 
+    // V9：一键公开共享状态。null=未知（首态，按"未共享"着色），true=已公开共享，false=未共享。
+    // share-toggle 为幂等翻转、无独立只读查询端点，故不在进入时探测（探测会副作用翻转状态），
+    // 首次点击后再据返回值精确化。
+    var isShared by remember { mutableStateOf<Boolean?>(null) }
+    var shareToggleLoading by remember { mutableStateOf(false) }
+    val shareToggleScope = rememberCoroutineScope()
+
     // V7：进入相册详情时预加载云端媒体列表（用于添加照片对话框）
     LaunchedEffect(albumId) {
         if (viewModel.cloudMedia.isEmpty() && viewModel.mediaList.isEmpty()) {
@@ -833,6 +840,42 @@ private fun AlbumDetailPage(
                                     }
                                 }
                             }
+                        )
+                    }
+                    // V9 §一键共享切换：一键翻转相册公开共享状态。
+                    // isShared==true 显示"取消共享"(primary tint)；否则显示"共享"(灰色)。
+                    // 点击调 MediaService.toggleAlbumShare，成功后刷新 isShared 并提示。
+                    val sharedNow = isShared == true
+                    IconButton(
+                        onClick = {
+                            if (shareToggleLoading) return@IconButton
+                            shareToggleLoading = true
+                            shareToggleScope.launch {
+                                val result = MediaService.toggleAlbumShare(albumId)
+                                shareToggleLoading = false
+                                if (result != null) {
+                                    val (shared, url) = result
+                                    isShared = shared
+                                    viewModel.showErrorMessage(
+                                        if (shared) {
+                                            if (!url.isNullOrEmpty()) "已开启共享：$url"
+                                            else "已开启共享"
+                                        } else {
+                                            "已取消共享"
+                                        }
+                                    )
+                                } else {
+                                    viewModel.showErrorMessage("共享切换失败")
+                                }
+                            }
+                        },
+                        enabled = !shareToggleLoading
+                    ) {
+                        Icon(
+                            painterResource(Res.drawable.ic_share),
+                            contentDescription = if (sharedNow) "取消共享" else "共享",
+                            tint = if (sharedNow) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                     }
                     // V7 §2.3：分享相册按钮

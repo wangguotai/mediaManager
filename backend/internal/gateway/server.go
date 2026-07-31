@@ -205,6 +205,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
 	s.mux.HandleFunc("/api/media/album/shared-with", s.handleAlbumSharedWith)
+	// V9：一键切换相册共享状态（已共享则取消，未共享则创建公开分享链接）。
+	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
+	s.mux.HandleFunc("/api/media/album/share-toggle", s.handleAlbumShareToggle)
 	// V8：相册内媒体完整 metadata
 	s.mux.HandleFunc("/api/media/album/media-list", s.handleAlbumMediaList)
 	// V8：重命名相册
@@ -1887,6 +1890,68 @@ func (s *Server) handleAlbumSharedWith(w http.ResponseWriter, r *http.Request) {
 		"shared_with": items,
 		"count":       len(items),
 	})
+}
+
+// handleAlbumShareToggle V8：POST /api/media/album/share-toggle — 一键切换相册共享状态。
+// 请求体: { album_id }
+func (s *Server) handleAlbumShareToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	// 检查是否已共享
+	shares, err := s.store.ListAlbumSharesByAlbum(r.Context(), req.AlbumID, uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(shares) > 0 {
+		// 取消共享
+		_ = s.store.DeleteAlbumShare(r.Context(), req.AlbumID, uid, "")
+		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "shared": false})
+	} else {
+		// 创建共享（生成 token + 7 天过期）
+		token := generateShareToken()
+		expiresAt := time.Now().Add(7 * 24 * time.Hour)
+		st := &storage.ShareToken{
+			Token:     token,
+			UserID:    uid,
+			ExpiresAt: expiresAt,
+			CreatedAt: time.Now(),
+		}
+		if err := s.store.CreateShareToken(r.Context(), st); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "success",
+			"shared":     true,
+			"share_url":  "/api/share/" + token,
+			"token":      token,
+			"expires_at": expiresAt.Format(time.RFC3339),
+		})
+	}
+	_ = s.store.AddAuditLog(r.Context(), uid, "share_toggle", "", "album "+req.AlbumID)
 }
 
 // handleAlbumMediaList V8：GET /api/media/album/media-list?album_id=xxx — 返回相册内媒体的完整 metadata。
