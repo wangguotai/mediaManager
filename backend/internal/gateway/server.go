@@ -329,6 +329,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/export", s.handleMediaTagExport)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
+	// 清理无关联媒体的空标签：遍历 ListAllTags 全量标签，对每个标签调
+	// SearchMediaByTag 检查是否有关联 media，count=0 则 DeleteTag 删除该标签。
+	// 返回 {status, removed_count, removed_tags, total_tags_before}。
+	s.mux.HandleFunc("/api/media/tag/cleanup-unused", s.handleTagCleanupUnused)
 	// V8：标签自动补全
 	s.mux.HandleFunc("/api/media/tag/autocomplete", s.handleMediaTagAutocomplete)
 	// V8：合并标签
@@ -6726,6 +6730,51 @@ func (s *Server) handleMediaTagDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tag":           req.TagName,
 		"deleted_count": count,
+	})
+}
+
+// handleTagCleanupUnused 清理无关联媒体的空标签。
+// POST /api/media/tag/cleanup-unused — 遍历当前用户全部标签（ListAllTags），
+// 对每个标签调 SearchMediaByTag 检查关联 media 数，count=0 则 DeleteTag 删除。
+// 返回 {status, removed_count, removed_tags, total_tags_before}。
+func (s *Server) handleTagCleanupUnused(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalBefore := len(tags)
+	removed := make([]string, 0)
+	for _, tag := range tags {
+		ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag)
+		if serr != nil {
+			continue
+		}
+		if len(ids) == 0 {
+			if _, derr := s.store.DeleteTag(r.Context(), uid, tag); derr == nil {
+				removed = append(removed, tag)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":             "ok",
+		"removed_count":      len(removed),
+		"removed_tags":       removed,
+		"total_tags_before":  totalBefore,
+		"total_tags_after":   totalBefore - len(removed),
 	})
 }
 
