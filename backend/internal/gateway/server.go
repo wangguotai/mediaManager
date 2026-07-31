@@ -145,6 +145,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
 	// V7：搜索建议（基于文件名前缀）
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
+	// V24：多源增强搜索建议（文件名+标签+相册名合并去重）
+	s.mux.HandleFunc("/api/media/search-suggestions-enhanced", s.handleSearchSuggestionsEnhanced)
 	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
 	// V9：媒体旋转（更新 EXIF orientation / 旋转标记）
@@ -3107,6 +3109,122 @@ func (s *Server) handleMediaSearchSuggestions(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"suggestions": suggestions,
 		"q":           q,
+	})
+}
+
+// handleSearchSuggestionsEnhanced V24：GET /api/media/search-suggestions-enhanced?q=xxx
+// 多源增强搜索建议：从文件名、标签、相册名三个来源各自做子串匹配，
+// 合并去重后返回带来源标记的建议列表。
+//
+// 返回: { suggestions: [{text, source}], total }
+//
+//	source ∈ {"filename","tag","album"}
+//	文件名建议最多 5 条、标签最多 3 条、相册名最多 3 条。
+func (s *Server) handleSearchSuggestionsEnhanced(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if q == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"suggestions": []any{}, "total": 0})
+		return
+	}
+
+	type suggestion struct {
+		Text   string `json:"text"`
+		Source string `json:"source"`
+	}
+	seen := make(map[string]bool)
+	var suggestions []suggestion
+
+	// a) 文件名子串匹配（最多 5 条）
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err == nil {
+		for _, m := range mediaList {
+			if m.Deleted {
+				continue
+			}
+			// 去掉扩展名作为建议，与 handleMediaSearchSuggestions 一致
+			base := m.Filename
+			if idx := strings.LastIndex(base, "."); idx > 0 {
+				base = base[:idx]
+			}
+			key := strings.ToLower(base)
+			if !strings.Contains(key, q) {
+				continue
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			suggestions = append(suggestions, suggestion{Text: base, Source: "filename"})
+			if len(suggestions) >= 5 {
+				break
+			}
+		}
+	}
+
+	// b) 标签名子串匹配（最多 3 条）
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err == nil {
+		tagCount := 0
+		for _, t := range tags {
+			if !strings.Contains(strings.ToLower(t), q) {
+				continue
+			}
+			key := strings.ToLower(t)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			suggestions = append(suggestions, suggestion{Text: t, Source: "tag"})
+			tagCount++
+			if tagCount >= 3 {
+				break
+			}
+		}
+	}
+
+	// c) 相册名子串匹配（最多 3 条）
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albums := provider.ListAlbums(uid)
+		albumCount := 0
+		for _, a := range albums {
+			if a == nil {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(a.Name), q) {
+				continue
+			}
+			key := strings.ToLower(a.Name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			suggestions = append(suggestions, suggestion{Text: a.Name, Source: "album"})
+			albumCount++
+			if albumCount >= 3 {
+				break
+			}
+		}
+	}
+
+	if suggestions == nil {
+		suggestions = []suggestion{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
 	})
 }
 
