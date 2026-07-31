@@ -3099,6 +3099,54 @@ object MediaService {
     data class UploadDay(val date: String, val count: Int, val bytes: Long)
 
     /**
+     * V9：整年日历的一天数据（与后端 [handleMediaCalendarYear] 的 dayStat JSON 对齐）。
+     *
+     * 后端按 media.created_at 的 UTC 日期（YYYY-MM-DD）分组，仅返回有数据的天；
+     * 前端按需补 count=0 的空天。结构与 [UploadDay] 同形（date/count/bytes），
+     * 但语义为"整年内某天"而非"最近30天内的某天"。
+     */
+    data class CalendarDayData(val date: String, val count: Int, val bytes: Long)
+
+    /**
+     * V9：GET /api/media/media-calendar-year?year=N — 整年日历热力数据。
+     *
+     * 后端返回 `{year, days:[{date,count,bytes}], total_count, total_bytes}`，
+     * 仅包含有上传记录的天（按 date 升序）。本方法解析 [days] 列表，
+     * year/total_* 字段由调用方自行渲染（当前前端固定取 2026，暂不消费 total）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getUploadCalendar] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param year 目标年份；后端对非法值回退当年，故前端不做事前校验。
+     * @return 该年每天的上传统计列表（仅含非零天）；失败返回 null
+     */
+    suspend fun getMediaCalendarYear(year: Int): List<CalendarDayData>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-calendar-year") {
+                parameter("year", year)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["days"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    CalendarDayData(
+                        date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaCalendarYear year=$year status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaCalendarYear FAILED year=$year: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：连续上传天数信息——配合"我的"Tab 上传日历热力图后展示，激励用户保持上传习惯。
      *
      * 后端 GET /api/media/upload-streak 返回：

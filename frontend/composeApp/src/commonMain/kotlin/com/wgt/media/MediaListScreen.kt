@@ -25,6 +25,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -1486,6 +1487,81 @@ private fun MyTabContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
                     }
+                }
+            }
+        }
+
+        // V9：整年热力图卡片——在上传日历热力图之后展示全年上传活动（GitHub 贡献图风格）。
+        // 调 GET /api/media/media-calendar-year?year=2026，渲染 12 个月 × 天的方块矩阵，
+        // 颜色深浅按 count：0=灰、1-3=浅、4+=深。后端只返回非零天，前端按月补 0。
+        var yearCalendar by remember { mutableStateOf<List<MediaService.CalendarDayData>?>(null) }
+        LaunchedEffect(Unit) { yearCalendar = MediaService.getMediaCalendarYear(2026) }
+        yearCalendar?.let { days ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("整年热力图 · 2026", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 按日期建索引，便于按月补 0。
+                    val countByDate = remember(days) {
+                        days.associate { it.date to it.count }
+                    }
+                    val yearTotal = days.size
+                    val yearItemCount = days.sumOf { it.count }
+                    // 12 个月逐月渲染，每月一列（横向 Row），31 天逐行（纵向 Column）。
+                    val monthLabels = listOf("1","2","3","4","5","6","7","8","9","10","11","12")
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        monthLabels.forEachIndexed { monthIdx, label ->
+                            // 月份从 1 开始；后端日期格式 YYYY-MM-DD。
+                            val monthNum = monthIdx + 1
+                            val daysInMonth = remember(monthNum) {
+                                when (monthNum) {
+                                    1, 3, 5, 7, 8, 10, 12 -> 31
+                                    4, 6, 9, 11 -> 30
+                                    2 -> 29 // 2026 非闰年应为 28，取 29 容错；多出的方块 count=0 显示为灰，无害
+                                    else -> 30
+                                }
+                            }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    label,
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                                Spacer(modifier = Modifier.height(1.dp))
+                                for (day in 1..daysInMonth) {
+                                    val dateStr = "2026-%02d-%02d".format(monthNum, day)
+                                    val count = countByDate[dateStr] ?: 0
+                                    // 颜色深浅：0=灰，1-3=浅，4+=深。
+                                    val cellColor = when {
+                                        count == 0 -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
+                                        count in 1..3 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                                        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(RoundedCornerShape(2.dp))
+                                            .background(cellColor)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "全年 $yearItemCount 项 · 活跃 $yearTotal 天",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
                 }
             }
         }
