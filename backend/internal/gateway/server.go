@@ -1982,6 +1982,20 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 
 	// 收藏数和相册数通过 service 层获取（store 层无对应方法）
 	// 这里只返回媒体统计，收藏/相册数前端 separately 获取
+	// V7：扩展统计——收藏数/相册数/分享数
+	favCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favCount = len(fav.ListFavorites(uid))
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+	shareCount := 0
+	if tokens, err := s.store.ListShareTokensByUser(r.Context(), uid); err == nil {
+		shareCount = len(tokens)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"total_count":  totalCount,
 		"total_bytes":  totalBytes,
@@ -1989,6 +2003,9 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 		"image_count":  imageCount,
 		"video_count":  videoCount,
 		"live_count":   liveCount,
+		"favorite_count": favCount,
+		"album_count":    albumCount,
+		"share_count":    shareCount,
 		"earliest_ts":  earliest,
 		"latest_ts":    latest,
 		"user_id":      uid,
