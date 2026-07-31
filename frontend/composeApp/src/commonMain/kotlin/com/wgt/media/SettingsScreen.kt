@@ -1710,6 +1710,85 @@ private fun DuplicateReportDialog(
     )
 }
 
+/**
+ * V21：数据导出对话框——展示 full-report 综合报告的 JSON 文本，可滚动，带"复制到剪贴板"按钮。
+ *
+ * - [json] 为 null：加载中（CircularProgressIndicator）
+ * - [json] 为空串 ""：拉取失败，显示错误提示
+ * - [json] 非空：左侧 monospace 文本纵向滚动展示，用户可全选手动复制或点按钮一键复制
+ *
+ * 用 [AlertDialog] 而非自定义 Dialog，保持与 [YearlyReviewDialog]/[DuplicateReportDialog] 同款。
+ * 确认按钮为"复制到剪贴板"，取消按钮为"关闭"。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ExportReportDialog(
+    json: String?,
+    isExporting: Boolean,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("数据导出", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            when {
+                isExporting || json == null -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("加载综合报告…", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                json.isEmpty() -> {
+                    Text(
+                        "导出失败，请检查后端连接后重试。",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+                else -> {
+                    // JSON 文本区：限定高度 + 纵向滚动，monospace 字体便于阅读键值
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(4.dp)
+                    ) {
+                        Text(
+                            text = json,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onCopy,
+                enabled = !json.isNullOrEmpty()
+            ) { Text("复制到剪贴板") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
 /** 一天对应的毫秒数（UTC）。 */
 private const val MILLIS_PER_DAY = 86_400_000L
 

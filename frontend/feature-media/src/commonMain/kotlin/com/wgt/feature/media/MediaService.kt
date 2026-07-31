@@ -4024,10 +4024,10 @@ object MediaService {
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；
-     * 前端无需逐字段解析，仅在设置页\"导出报告\"以 JSON 文本展示，供用户复制/分享。
+     * 前端无需逐字段解析，仅在设置页"导出报告"以 JSON 文本展示，供用户复制/分享。
      *
-     * 返回原始 JSON 字符串（已 pretty 化后端响应体）；非 200 或网络异常返回 null，
-     * UI 侧提示\"导出失败\"。与 [exportTags] 同款直返 body 字符串的处理方式。
+     * 返回 pretty 化后的 JSON 字符串（2 空格缩进，便于阅读）；非 200 或网络异常返回 null，
+     * UI 侧提示"导出失败"。与 [exportTags] 同款直返 body 字符串，额外做一次格式化。
      *
      * @param year 年度筛选（默认 2026，透传 query param；后端按年聚合 yearly 子块）
      */
@@ -4042,15 +4042,16 @@ object MediaService {
                     "MediaService",
                     "getFullReport year=$year status=${response.status} bytes=${body.length}"
                 )
-                // 尝试 pretty 化：后端返回紧凑 JSON，这里重新格式化便于阅读与复制。
-                // 解析失败（非合法 JSON）时原样返回，不阻断导出流程。
+                // pretty 化：重新格式化便于阅读与复制。解析失败（非合法 JSON）原样返回。
+                // kotlinx-serialization-json 1.7.x 的 JsonBuilder 属性名为 prettyPrintIndent。
                 runCatching {
                     val pretty = Json {
                         prettyPrint = true
-                        indent = "  "
+                        prettyPrintIndent = "  "
                         ignoreUnknownKeys = true
                     }
-                    pretty.encodeToString(pretty.parseToJsonElement(body))
+                    val element = pretty.parseToJsonElement(body)
+                    pretty.encodeToString(JsonElement.serializer(), element)
                 }.getOrDefault(body)
             } else {
                 logger.info("MediaService", "getFullReport status=${response.status} (non-200)")
