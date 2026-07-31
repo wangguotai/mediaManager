@@ -1419,6 +1419,42 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/extreme-media — 最老和最大媒体。 */
+    suspend fun getExtremeMedia(): ExtremeMedia? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/extreme-media") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                fun parseItem(key: String): ExtremeItem? {
+                    val item = o[key]?.jsonObject ?: return null
+                    return ExtremeItem(
+                        id = item["id"]?.jsonPrimitive?.contentOrNull ?: return null,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = item["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = item["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        createdAt = item["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+                ExtremeMedia(oldest = parseItem("oldest"), largest = parseItem("largest"))
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getExtremeMedia FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：极端媒体 */
+    data class ExtremeMedia(val oldest: ExtremeItem?, val largest: ExtremeItem?)
+    data class ExtremeItem(
+        val id: String,
+        val filename: String,
+        val type: String,
+        val size: Long,
+        val createdAt: String
+    )
+
     /** V8：GET /api/media/recent-uploads — 最近上传的媒体。 */
     suspend fun getRecentUploads(): List<RecentUpload>? {
         return try {

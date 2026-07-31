@@ -947,6 +947,48 @@ private fun MyTabContent(
             }
         }
 
+        // V8：存储洞察卡片（最老+最大）
+        var extreme by remember { mutableStateOf<MediaService.ExtremeMedia?>(null) }
+        LaunchedEffect(Unit) { extreme = MediaService.getExtremeMedia() }
+        extreme?.let { ex ->
+            if (ex.oldest != null || ex.largest != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "存储洞察",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        ex.oldest?.let { o ->
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("📅 最早", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${o.filename} (${o.createdAt.take(10)})",
+                                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        ex.largest?.let { l ->
+                            val sizeStr = (l.size.toDouble() / (1024.0 * 1024.0)).toString().let { it.take(it.indexOf('.') + 2) }
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("📦 最大", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${l.filename} ($sizeStr MB)",
+                                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：收藏快速统计（复用 summary.favoriteCount，无需单独请求）
         mediaSummary?.let { summary ->
             Card(
