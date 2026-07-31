@@ -145,6 +145,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
 	// V7：搜索建议（基于文件名前缀）
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
+	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
+	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
 	// V7：最近活动（合并最近上传/收藏/分享）
 	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
 	// V7：存储增长趋势（按月份累计）
@@ -2647,6 +2649,75 @@ func (s *Server) handleMediaSearchSuggestions(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"suggestions": suggestions,
 		"q":           q,
+	})
+}
+
+// handleMediaAdvancedSearch V8：GET /api/media/advanced-search
+// 多条件组合搜索当前用户的媒体。所有参数可选，未给则该条件不施加。
+//
+//	Query 参数:
+//	  type       — IMAGE / VIDEO / LIVE_PHOTO
+//	  mime       — 如 image/jpeg
+//	  min_size   — 字节数（整数）
+//	  max_size   — 字节数（整数）
+//	  date_from  — RFC3339，created_at >=
+//	  date_to    — RFC3339，created_at <=
+//	  tag        — 精确标签名
+//	  limit      — 返回上限，默认 100，最大 500
+//
+//	返回: { "media": [...], "total": N }
+func (s *Server) handleMediaAdvancedSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := r.URL.Query()
+	opts := storage.AdvancedSearchOpts{
+		Type:     strings.TrimSpace(q.Get("type")),
+		MIMEType: strings.TrimSpace(q.Get("mime")),
+		Tag:      strings.TrimSpace(q.Get("tag")),
+		DateFrom: strings.TrimSpace(q.Get("date_from")),
+		DateTo:   strings.TrimSpace(q.Get("date_to")),
+	}
+	if v := strings.TrimSpace(q.Get("min_size")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil && n > 0 {
+			opts.MinSize = n
+		}
+	}
+	if v := strings.TrimSpace(q.Get("max_size")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil && n > 0 {
+			opts.MaxSize = n
+		}
+	}
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil && n > 0 {
+			opts.Limit = n
+		}
+	}
+	if opts.Limit <= 0 || opts.Limit > 500 {
+		opts.Limit = 100
+	}
+
+	mediaList, err := s.store.AdvancedSearchMedia(r.Context(), uid, opts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"media": mediaList,
+		"total": len(mediaList),
 	})
 }
 

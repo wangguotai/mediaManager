@@ -203,6 +203,88 @@ SELECT `+mediaColumns+` FROM "media" WHERE user_id = ? AND deleted = 0 ORDER BY 
 	return scanMediaRows(rows)
 }
 
+// AdvancedSearchOpts 是 AdvancedSearchMedia 的多条件搜索参数。各字段为零值时
+// 表示不施加该条件（与 ListMediaByUser 的"全列出"行为对齐）。Limit<=0 默认 100。
+//
+// 字段对应的 query 参数（server.go handler 解析）：
+//
+//	Type     ← type       (IMAGE / VIDEO / LIVE_PHOTO)
+//	MIMEType ← mime       (如 image/jpeg)
+//	MinSize  ← min_size   (字节)
+//	MaxSize  ← max_size   (字节)
+//	DateFrom ← date_from  (RFC3339，按 created_at >= ? 过滤)
+//	DateTo   ← date_to    (RFC3339，按 created_at <= ? 过滤)
+//	Tag      ← tag        (精确匹配 media_tags.tag_name，用 EXISTS 子查询)
+type AdvancedSearchOpts struct {
+	Type     string
+	MIMEType string
+	MinSize  int64
+	MaxSize  int64
+	DateFrom string // RFC3339
+	DateTo   string // RFC3339
+	Tag      string
+	Limit    int
+}
+
+// AdvancedSearchMedia 按多条件组合搜索当前用户未软删的媒体，按 created_at 降序，
+// 与 ListMediaByUser 排序一致。所有条件均可选（零值跳过），至少按 user_id + deleted=0
+// 过滤。
+//
+// SQL 构建用 strings.Builder 动态拼 WHERE 子句，参数逐个以 ? 绑定（args []any），
+// 不拼接用户输入进 SQL 文本——type/mime/date/tag 均作为参数传入，防注入。
+//
+// tag 条件用 EXISTS 子查询而非 JOIN：保持 media 行不因多标签而重复（DISTINCT 可省），
+// 且未打标签的 media 仍可被其他条件命中（JOIN 会过滤掉无标签行）。子查询引用外表
+// 用 "media".id 限定，user_id 双键绑定为当前用户，防跨用户标签串扰。
+func (s *Store) AdvancedSearchMedia(ctx context.Context, userID string, opts AdvancedSearchOpts) ([]*Media, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	var sb strings.Builder
+	args := make([]any, 0, 8)
+	args = append(args, userID) // user_id = ?
+	sb.WriteString(`SELECT ` + mediaColumns + ` FROM "media" WHERE user_id = ? AND deleted = 0`)
+	if opts.Type != "" {
+		sb.WriteString(` AND "type" = ?`)
+		args = append(args, opts.Type)
+	}
+	if opts.MIMEType != "" {
+		sb.WriteString(` AND mime = ?`)
+		args = append(args, opts.MIMEType)
+	}
+	if opts.MinSize > 0 {
+		sb.WriteString(` AND size >= ?`)
+		args = append(args, opts.MinSize)
+	}
+	if opts.MaxSize > 0 {
+		sb.WriteString(` AND size <= ?`)
+		args = append(args, opts.MaxSize)
+	}
+	if opts.DateFrom != "" {
+		sb.WriteString(` AND created_at >= ?`)
+		args = append(args, opts.DateFrom)
+	}
+	if opts.DateTo != "" {
+		sb.WriteString(` AND created_at <= ?`)
+		args = append(args, opts.DateTo)
+	}
+	if opts.Tag != "" {
+		sb.WriteString(` AND EXISTS (SELECT 1 FROM media_tags WHERE media_id = "media".id AND user_id = ? AND tag_name = ?)`)
+		args = append(args, userID, opts.Tag)
+	}
+	sb.WriteString(` ORDER BY created_at DESC LIMIT ?`)
+	args = append(args, opts.Limit)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("advanced search media: %w", err)
+	}
+	return scanMediaRows(rows)
+}
+
 // UpdateMedia 更新一行 media 的可变元数据字段（filename/type/size/mime/width/height/sha256）。
 //   - UpdatedAt 强制刷新为当前时间。
 //   - 不触动 deleted 列：软删除状态由 MarkDeleted 专属管理，元数据更新不得复活
