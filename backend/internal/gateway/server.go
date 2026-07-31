@@ -238,6 +238,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/file-types", s.handleMediaFileTypes)
 	// V8：孤立文件检查（DB 有记录但磁盘文件缺失）
 	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
+	// V8：按天统计上传量（日历热力图）
+	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3287,9 +3289,64 @@ func (s *Server) handleMediaOrphanCheck(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"checked":    checked,
+		"checked":      checked,
 		"orphan_count": len(orphans),
-		"orphans":    orphans,
+		"orphans":      orphans,
+	})
+}
+
+// handleMediaUploadCalendar V8：GET /api/media/upload-calendar — 按天统计上传量。
+// 返回最近 30 天每天的上传文件数+总大小，按日期正序。
+func (s *Server) handleMediaUploadCalendar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	type dayStat struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	byDay := make(map[string]*dayStat)
+	cutoff := time.Now().AddDate(0, 0, -30)
+	for _, m := range mediaList {
+		if m.Deleted || m.CreatedAt.Before(cutoff) {
+			continue
+		}
+		day := m.CreatedAt.Format("2006-01-02")
+		if _, ok := byDay[day]; !ok {
+			byDay[day] = &dayStat{Date: day}
+		}
+		byDay[day].Count++
+		byDay[day].Bytes += m.Size
+	}
+	// 按日期正序
+	days := make([]string, 0, len(byDay))
+	for d := range byDay {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+	stats := make([]dayStat, 0, len(days))
+	for _, d := range days {
+		stats = append(stats, *byDay[d])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days":  stats,
+		"total": len(stats),
 	})
 }
 
