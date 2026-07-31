@@ -2709,6 +2709,115 @@ private fun MyTabContent(
             }
         }
 
+        // V23：照片组织建议卡片（GET /api/media/album-organize-suggest）
+        // 在相册排行后展示后端按月份/类型分组产出的"可一键创建"相册建议，
+        // 每条携带完整 media_ids，点"创建"即调 createAlbum + batchAddMediaToAlbum 落地。
+        // 后端未铺量/异常返回 null 时静默跳过（与同级统计卡片同款 null 容错）。
+        var organizeSuggestions by remember { mutableStateOf<List<MediaService.AlbumOrganizeSuggestion>?>(null) }
+        // 已创建成功的建议名集合——创建后从列表移除该条，避免重复创建。
+        var createdSuggestionNames by remember { mutableStateOf<Set<String>>(emptySet()) }
+        LaunchedEffect(Unit) { organizeSuggestions = MediaService.getAlbumOrganizeSuggest() }
+        organizeSuggestions?.let { allSuggestions ->
+            // 过滤掉已创建的，最多展示 3 条
+            val visible = allSuggestions.filter { it.name !in createdSuggestionNames }.take(3)
+            // type → 短标签 icon 映射，便于用户一眼分辨建议来源。
+            fun typeLabel(t: String): String = when (t) {
+                "by_month" -> "📅 按月份"
+                "by_type" -> "🎞️ 按类型"
+                else -> "📁 分组"
+            }
+            if (visible.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "照片组织建议",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        visible.forEach { suggestion ->
+                            // 每条创建按钮的独立 loading 态，避免一个建议创建时禁用全部按钮。
+                            var isCreating by remember(suggestion.name) { mutableStateOf(false) }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("📁", fontSize = 16.sp)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        "${suggestion.name.ifEmpty { "未命名分组" }}（${suggestion.mediaIds.size} 项）",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    // 创建按钮：调 createAlbum + batchAddMediaToAlbum。
+                                    // 禁用态：创建中或该条无 media_ids（后端不应给空，防御式禁用）。
+                                    TextButton(
+                                        enabled = !isCreating && suggestion.mediaIds.isNotEmpty(),
+                                        onClick = {
+                                            if (isCreating) return@TextButton
+                                            isCreating = true
+                                            scope.launch {
+                                                val album = MediaService.createAlbum(suggestion.name)
+                                                if (album != null && album.id.isNotEmpty()) {
+                                                    val added = MediaService.batchAddMediaToAlbum(
+                                                        album.id, suggestion.mediaIds
+                                                    )
+                                                    if (added != null) {
+                                                        // 标记已创建并从可视列表移除，刷新相册概览/排行。
+                                                        createdSuggestionNames =
+                                                            createdSuggestionNames + suggestion.name
+                                                        onShowSnackbar("已创建相册「${suggestion.name}」，添加 $added 项")
+                                                    } else {
+                                                        onShowSnackbar("相册已创建，但批量添加失败")
+                                                    }
+                                                } else {
+                                                    onShowSnackbar("创建相册失败")
+                                                }
+                                                isCreating = false
+                                            }
+                                        }
+                                    ) {
+                                        Text(if (isCreating) "创建中…" else "创建")
+                                    }
+                                }
+                                if (suggestion.reason.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        suggestion.reason,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    typeLabel(suggestion.type),
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                                )
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // V19：相册统计卡片（GET /api/media/album/stats-summary）
         // 在相册排行后展示聚合统计：总相册数/平均项数/最多最少相册。
         var albumStats by remember { mutableStateOf<MediaService.AlbumStatsSummary?>(null) }
