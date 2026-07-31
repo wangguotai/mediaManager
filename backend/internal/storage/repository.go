@@ -621,6 +621,40 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID string, limit int) ([]
 	return out, nil
 }
 
+// ListAuditLogsByMedia 返回某用户指定媒体的操作历史，按 created_at 降序（最近在前）。
+// userID 或 mediaID 为空时直接返回空切片（不查库），避免无意义全表/空值扫描。
+// 与 ListAuditLogs 行扫描逻辑一致：media_id 为 NULL 列用 sql.NullString 接住。
+func (s *Store) ListAuditLogsByMedia(ctx context.Context, userID, mediaID string) ([]*AuditLog, error) {
+	if userID == "" || mediaID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, action, media_id, detail, created_at FROM audit_logs WHERE user_id = ? AND media_id = ? ORDER BY created_at DESC`,
+		userID, mediaID)
+	if err != nil {
+		return nil, fmt.Errorf("list audit logs by media: %w", err)
+	}
+	defer rows.Close()
+	var out []*AuditLog
+	for rows.Next() {
+		var a AuditLog
+		var createdAt string
+		var mid sql.NullString
+		if err := rows.Scan(&a.ID, &a.UserID, &a.Action, &mid, &a.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan audit log by media: %w", err)
+		}
+		if mid.Valid {
+			a.MediaID = mid.String
+		}
+		a.CreatedAt = timeFromVal(createdAt)
+		out = append(out, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows audit logs by media: %w", err)
+	}
+	return out, nil
+}
+
 // AuditLogStats 按操作类型聚合某用户的审计日志数量，返回 [{action, count}]，
 // 按 count 降序（与 TagStats 模式一致）。空 userID 直接返回空切片。
 func (s *Store) AuditLogStats(ctx context.Context, userID string) ([]map[string]any, error) {

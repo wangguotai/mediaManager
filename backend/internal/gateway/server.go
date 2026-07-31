@@ -276,6 +276,7 @@ func (s *Server) registerRoutes() {
 	// V8：审计日志——列表/统计/记录
 	s.mux.HandleFunc("/api/media/audit-log/list", s.handleAuditLogList)
 	s.mux.HandleFunc("/api/media/audit-log/stats", s.handleAuditLogStats)
+	s.mux.HandleFunc("/api/media/audit-log/by-media", s.handleAuditLogByMedia)
 	s.mux.HandleFunc("/api/media/audit-log/record", s.handleAuditLogRecord)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
@@ -4342,6 +4343,49 @@ func (s *Server) handleAuditLogRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
+}
+
+// handleAuditLogByMedia GET /api/media/audit-log/by-media?media_id=xxx
+// 返回指定媒体的操作历史（最近在前）。响应: {logs: [...], total: N}。
+// media_id 缺失返回 400；未登录返回 401；store 不可用返回 503。
+func (s *Server) handleAuditLogByMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaID := r.URL.Query().Get("media_id")
+	if mediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+		return
+	}
+	logs, err := s.store.ListAuditLogsByMedia(r.Context(), uid, mediaID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(logs))
+	for _, a := range logs {
+		out = append(out, map[string]any{
+			"id":         a.ID,
+			"action":     a.Action,
+			"media_id":   a.MediaID,
+			"detail":     a.Detail,
+			"created_at": a.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"logs":  out,
+		"total": len(out),
+	})
 }
 
 // handleAlbumMerge V8：POST /api/media/album/merge — 合并两个相册。
