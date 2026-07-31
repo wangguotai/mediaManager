@@ -3936,6 +3936,59 @@ object MediaService {
     )
 
     /**
+     * V9：GET /api/media/exif/{id} — 返回单个媒体的完整 EXIF/metadata。
+     *
+     * 后端合并两个数据源（见 gateway.handleMediaExif）：
+     *   1. SQLite 持久化字段（taken_at、orientation、sha256、width/height 等）；
+     *   2. 实时从磁盘文件解析出的 EXIF 标签 map（Make/Model/DateTimeOriginal/
+     *      ExifImageWidth/Height/Orientation 等，由 service 层 parseTIFFExif 提取）。
+     *
+     * 响应结构：`{ media_id, exif: {DateTimeOriginal: "...", ...}, source, filename,
+     * taken_at, orientation, ... }`。本方法仅取前端需要的字段；exif map 原样保留，
+     * 供 UI 按需读取各条目（当前 UI 用 [dateTimeOriginal] 显示"原始拍摄时间"）。
+     *
+     * 失败（网络异常/非 200）返回 null，UI 静默跳过相关行——与 [getVideoInfo] 同款降级。
+     */
+    suspend fun getExifData(mediaId: String): ExifData? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/exif/$mediaId")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val exifMap = o["exif"]?.jsonObject
+                ExifData(
+                    dateTimeOriginal = exifMap?.get("DateTimeOriginal")?.jsonPrimitive?.contentOrNull,
+                    make = exifMap?.get("Make")?.jsonPrimitive?.contentOrNull,
+                    model = exifMap?.get("Model")?.jsonPrimitive?.contentOrNull,
+                    orientation = exifMap?.get("Orientation")?.jsonPrimitive?.contentOrNull,
+                    exifWidth = exifMap?.get("ExifImageWidth")?.jsonPrimitive?.contentOrNull,
+                    exifHeight = exifMap?.get("ExifImageHeight")?.jsonPrimitive?.contentOrNull,
+                    source = o["source"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getExifData FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V9：EXIF/metadata 详情（GET /api/media/exif/{id} 响应解析结果）。
+     *
+     * 各字段可能为 null（对应 EXIF 条目缺失或后端未解析到）。[dateTimeOriginal] 为
+     * EXIF DateTimeOriginal（格式通常为 "YYYY:MM:DD HH:MM:SS"），UI 用作"原始拍摄时间"。
+     * 其余字段（相机厂商/型号等）当前 UI 未展示，预留以便扩展。
+     */
+    data class ExifData(
+        val dateTimeOriginal: String?,
+        val make: String?,
+        val model: String?,
+        val orientation: String?,
+        val exifWidth: String?,
+        val exifHeight: String?,
+        val source: String
+    )
+
+    /**
      * V8：POST /api/media/batch-rename — 批量重命名，返回结果。
      */
      suspend fun batchRename(

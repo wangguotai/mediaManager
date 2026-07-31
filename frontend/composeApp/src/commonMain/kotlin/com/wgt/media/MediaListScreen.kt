@@ -6337,7 +6337,11 @@ fun MediaInfoDialog(
     // V8：视频时长由独立 ffprobe 端点提供（/api/media/info/{id} 不含 duration），
     // 仅对 VIDEO 类型并发拉取，失败/非视频时为 null，时长行静默跳过。
     var videoInfo by remember { mutableStateOf<MediaService.VideoInfo?>(null) }
+    // V9：EXIF 详情（GET /api/media/exif/{id}），含原始拍摄时间 DateTimeOriginal。
+    // 与 info 并发拉取；失败/无 EXIF 时为 null，"原始拍摄时间"行静默跳过。
+    var exifData by remember { mutableStateOf<MediaService.ExifData?>(null) }
     LaunchedEffect(mediaId) { info = MediaService.getMediaInfo(mediaId) }
+    LaunchedEffect(mediaId) { exifData = MediaService.getExifData(mediaId) }
     LaunchedEffect(mediaId, info?.type) {
         if (info?.type?.equals("VIDEO", ignoreCase = true) == true) {
             videoInfo = MediaService.getVideoInfo(mediaId)
@@ -6375,6 +6379,20 @@ fun MediaInfoDialog(
                     InfoRow("上传时间", i.createdAt)
                     if (i.takenAt > 0) {
                         InfoRow("拍摄时间", formatPreviewDate(i.takenAt * 1000))
+                    }
+                    // V9：原始拍摄时间 — 来自 EXIF DateTimeOriginal（GET /api/media/exif/{id}）。
+                    // 后端 parseTIFFExif 提取的格式通常为 "YYYY:MM:DD HH:MM:SS"，
+                    // 此处把日期部分的冒号归一化为 "-" 便于阅读；缺失时不显示该行。
+                    exifData?.dateTimeOriginal?.let { raw ->
+                        val display = raw.trim().let { s ->
+                            // 仅转换日期段前 10 个字符的冒号（YYYY:MM:DD → YYYY-MM-DD），时间段保持原样。
+                            if (s.length >= 10) {
+                                s.substring(0, 10).replace(":", "-") + s.substring(10)
+                            } else s
+                        }
+                        if (display.isNotEmpty()) {
+                            InfoRow("原始拍摄时间", display)
+                        }
                     }
                     // V8：标签区域
                     Spacer(modifier = Modifier.height(8.dp))
