@@ -182,6 +182,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
 	s.mux.HandleFunc("/api/media/album/shared-with", s.handleAlbumSharedWith)
+	// V8：相册内媒体完整 metadata
+	s.mux.HandleFunc("/api/media/album/media-list", s.handleAlbumMediaList)
 	// V8：重命名相册
 	s.mux.HandleFunc("/api/media/album/rename", s.handleAlbumRename)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
@@ -1734,6 +1736,65 @@ func (s *Server) handleAlbumSharedWith(w http.ResponseWriter, r *http.Request) {
 		"album_id":    albumID,
 		"shared_with": items,
 		"count":       len(items),
+	})
+}
+
+// handleAlbumMediaList V8：GET /api/media/album/media-list?album_id=xxx — 返回相册内媒体的完整 metadata。
+func (s *Server) handleAlbumMediaList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	albumID := r.URL.Query().Get("album_id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	// 校验 owner
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, albumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	// 获取每个 media 的 metadata
+	items := make([]map[string]any, 0, len(album.MediaIDs))
+	for _, mediaID := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || m == nil || m.UserID != uid {
+			continue
+		}
+		if m.Deleted {
+			continue
+		}
+		items = append(items, map[string]any{
+			"id":         m.ID,
+			"filename":   m.Filename,
+			"type":       m.Type,
+			"size":       m.Size,
+			"mime":       m.Mime,
+			"width":      m.Width,
+			"height":     m.Height,
+			"created_at": m.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"album_id": albumID,
+		"items":    items,
+		"count":    len(items),
 	})
 }
 
