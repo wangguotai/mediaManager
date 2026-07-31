@@ -2683,6 +2683,79 @@ object MediaService {
         val predictedMB: Double get() = predictedBytes.toDouble() / (1024.0 * 1024.0)
     }
 
+    /**
+     * V9：GET /api/media/growth-report — 媒体增长报告。
+     *
+     * 后端基于 created_at（上传时间）在 Go 侧按 ISO-8601 周边界 / 自然月边界分桶，
+     * 返回本周/上周/本月/上月/本年的上传统计（count+bytes）及周环比/月环比增长率。
+     * 周边界：本周 = 本周一 00:00 UTC ~ 当前；上周 = 上周一 ~ 本周一。
+     * 月边界：本月 = 本月 1 日 00:00 UTC；上月 = 上月 1 日 ~ 本月 1 日。
+     * 环比增长率 = (本期-上期)/上期*100；上期为 0 时后端返回 null（避免除零），
+     * 前端映射为 [Double.NaN] 以保持非空 Double 类型便于 UI 判断。
+     *
+     * 字段对齐后端 handleMediaGrowthReport 响应：
+     * this_week/last_week/week_change_percent/this_month/last_month/
+     * month_change_percent/this_year，每个周期为 {count,bytes}。
+     *
+     * 非 200 或异常返回 null，UI 侧静默跳过卡片。
+     */
+    suspend fun getGrowthReport(): GrowthReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/growth-report") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                GrowthReport(
+                    thisWeek = parsePeriod(o["this_week"]?.jsonObject),
+                    lastWeek = parsePeriod(o["last_week"]?.jsonObject),
+                    weekChangePercent = parseNullablePercent(o["week_change_percent"]),
+                    thisMonth = parsePeriod(o["this_month"]?.jsonObject),
+                    lastMonth = parsePeriod(o["last_month"]?.jsonObject),
+                    monthChangePercent = parseNullablePercent(o["month_change_percent"]),
+                    thisYear = parsePeriod(o["this_year"]?.jsonObject)
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getGrowthReport FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 解析单个周期统计 {count,bytes}，缺失字段回退 0。 */
+    private fun parsePeriod(o: JsonObject?): PeriodStats =
+        PeriodStats(
+            count = o?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+            bytes = o?.get("bytes")?.jsonPrimitive?.longOrNull ?: 0L
+        )
+
+    /**
+     * 解析环比百分比：后端 null（上期为 0，无法计算）映射为 [Double.NaN]，
+     * 其余取 double 值。NaN 在 UI 侧按"无对比数据"处理，不显示箭头。
+     */
+    private fun parseNullablePercent(el: JsonElement?): Double =
+        if (el == null || el is JsonNull) Double.NaN
+        else el.jsonPrimitive?.doubleOrNull ?: Double.NaN
+
+    /** V9：媒体增长报告（周/月环比 + 本年累计）。 */
+    data class GrowthReport(
+        val thisWeek: PeriodStats,
+        val lastWeek: PeriodStats,
+        val weekChangePercent: Double,
+        val thisMonth: PeriodStats,
+        val lastMonth: PeriodStats,
+        val monthChangePercent: Double,
+        val thisYear: PeriodStats
+    )
+
+    /** V9：单个周期的上传统计。 */
+    data class PeriodStats(
+        val count: Int,
+        val bytes: Long
+    ) {
+        val mb: Double get() = bytes.toDouble() / (1024.0 * 1024.0)
+    }
+
     // ---- 解析 ----
 
     /**

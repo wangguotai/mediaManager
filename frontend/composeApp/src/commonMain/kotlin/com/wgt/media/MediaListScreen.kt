@@ -1016,6 +1016,51 @@ private fun MyTabContent(
             }
         }
 
+        // V9：增长报告卡片——在存储预测之后，展示周/月环比与本年累计。
+        // 后端 GET /api/media/growth-report 返回 null（未铺量/异常）时静默跳过。
+        var growthReport by remember { mutableStateOf<MediaService.GrowthReport?>(null) }
+        LaunchedEffect(Unit) { growthReport = MediaService.getGrowthReport() }
+        growthReport?.let { gr ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "增长报告",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 本周环比
+                    GrowthReportRow(
+                        label = "本周",
+                        count = gr.thisWeek.count,
+                        changePercent = gr.weekChangePercent
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 本月环比
+                    GrowthReportRow(
+                        label = "本月",
+                        count = gr.thisMonth.count,
+                        changePercent = gr.monthChangePercent
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 本年累计
+                    val yearMb = gr.thisYear.mb
+                    val yearMbStr = yearMb.toString()
+                    Text(
+                        "本年累计 ${gr.thisYear.count} 项 · " +
+                            "${yearMbStr.take(yearMbStr.indexOf('.') + 2)} MB",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+
         // V7：媒体库综合摘要（时间跨度）
         var mediaSummary by remember { mutableStateOf<MediaService.MediaSummary?>(null) }
         LaunchedEffect(Unit) { mediaSummary = MediaService.getMediaSummary() }
@@ -2129,6 +2174,43 @@ private fun MyTabContent(
             subtitle = "后端地址、主题、OpenClaw 等",
             onClick = onNavigateToSettings
         )
+    }
+}
+
+/**
+ * V9：增长报告单行——"本周/本月 N 项 (↑环比%)"。
+ *
+ * 环比正数绿色↑、负数红色↓；[Double.NaN]（后端上期为 0 无法计算）时不显示箭头，
+ * 仅展示数量。百分比一位小数（commonMain 无 String.format，沿用 take 截断约定）。
+ */
+@Composable
+private fun GrowthReportRow(
+    label: String,
+    count: Int,
+    changePercent: Double
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "$label $count 项",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (!changePercent.isNaN()) {
+            val isUp = changePercent >= 0
+            // 一位小数截断（与存储预测卡片同款 take 约定）
+            val pctStr = changePercent.toString()
+            val pct1 = pctStr.take(pctStr.indexOf('.') + 2)
+            val arrow = if (isUp) "↑" else "↓"
+            val sign = if (isUp) "+" else ""
+            Text(
+                "  ($arrow$sign$pct1%)",
+                fontSize = 12.sp,
+                color = if (isUp) Color(0xFF2E7D32) else Color(0xFFC62828)
+            )
+        }
     }
 }
 
