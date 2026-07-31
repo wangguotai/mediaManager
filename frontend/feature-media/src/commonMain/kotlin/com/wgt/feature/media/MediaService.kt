@@ -1419,6 +1419,36 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
+    suspend fun orphanCheck(): OrphanCheckResult? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/orphan-check") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                OrphanCheckResult(
+                    checked = o["checked"]?.jsonPrimitive?.intOrNull ?: 0,
+                    orphanCount = o["orphan_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    orphans = o["orphans"]?.jsonArray?.mapNotNull { item ->
+                        val inst = item.jsonObject
+                        OrphanItem(
+                            mediaId = inst["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                            filename = inst["filename"]?.jsonPrimitive?.contentOrNull ?: ""
+                        )
+                    } ?: emptyList()
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "orphanCheck FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：孤立文件检查结果 */
+    data class OrphanCheckResult(val checked: Int, val orphanCount: Int, val orphans: List<OrphanItem>)
+    data class OrphanItem(val mediaId: String, val filename: String)
+
     /** V8：GET /api/media/file-types — 按 MIME 统计。 */
     suspend fun getFileTypes(): List<FileTypeStat>? {
         return try {

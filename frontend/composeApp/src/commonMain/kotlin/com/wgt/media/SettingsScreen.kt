@@ -624,6 +624,40 @@ fun SettingsScreen(
                 }
             }
 
+            // V8：孤立文件检查
+            var orphanResult by remember { mutableStateOf<MediaService.OrphanCheckResult?>(null) }
+            var orphanChecking by remember { mutableStateOf(false) }
+            val orphanScope = rememberCoroutineScope()
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("孤立文件检查", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = {
+                    orphanChecking = true
+                    orphanScope.launch {
+                        orphanResult = MediaService.orphanCheck()
+                        orphanChecking = false
+                    }
+                }) {
+                    if (orphanChecking) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("检查")
+                    }
+                }
+            }
+            orphanResult?.let { r ->
+                Text(
+                    "检查 ${r.checked} 个文件，发现 ${r.orphanCount} 个孤立文件",
+                    fontSize = 12.sp,
+                    color = if (r.orphanCount > 0) MaterialTheme.colorScheme.error
+                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                )
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
