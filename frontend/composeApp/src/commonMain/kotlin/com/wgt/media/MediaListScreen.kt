@@ -608,6 +608,9 @@ fun MediaListScreen(
                     onTagSearch = { tag ->
                         pendingTagSearch = tag
                         selectedTab = 2
+                    },
+                    onShowSnackbar = { msg ->
+                        advancedSearchScope.launch { snackbarHostState.showSnackbar(msg) }
                     }
                 )
                 return@Box
@@ -838,7 +841,9 @@ private fun MyTabContent(
     onNavigateToAlbums: () -> Unit,
     onNavigateToFileManagement: () -> Unit,
     // V9：标签云 chip 点击搜索回调——传入标签名，由 Screen 切 Tab + 设 query
-    onTagSearch: (String) -> Unit = {}
+    onTagSearch: (String) -> Unit = {},
+    // 清理空标签等操作成功后的 Snackbar 提示回调（Screen 层的 snackbarHostState 不可达 MyTabContent）
+    onShowSnackbar: (String) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     Column(
@@ -3186,6 +3191,47 @@ private fun MyTabContent(
                                             msg,
                                             fontSize = 12.sp,
                                             color = if (msg.startsWith("导出失败")) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.tertiary
+                                            }
+                                        )
+                                    }
+                                    // 清理空标签按钮 + 反馈——调 POST /api/media/tag/cleanup-unused。
+                                    // 后端端点可能尚未部署，失败时返回 null → 提示"清理失败"。
+                                    var isCleaning by remember { mutableStateOf(false) }
+                                    var cleanupMessage by remember { mutableStateOf<String?>(null) }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    TextButton(
+                                        enabled = !isCleaning && !tagCloud.isNullOrEmpty(),
+                                        onClick = {
+                                            isCleaning = true
+                                            cleanupMessage = null
+                                            scope.launch {
+                                                val result = MediaService.cleanupUnusedTags()
+                                                isCleaning = false
+                                                if (result != null) {
+                                                    tagCloud = MediaService.getTagCloudData()
+                                                    val msg = if (result.removedCount > 0) {
+                                                        "已清理 ${result.removedCount} 个空标签"
+                                                    } else {
+                                                        "没有空标签可清理"
+                                                    }
+                                                    cleanupMessage = msg
+                                                    onShowSnackbar(msg)
+                                                } else {
+                                                    cleanupMessage = "清理失败，请检查后端连接"
+                                                    onShowSnackbar("清理空标签失败")
+                                                }
+                                            }
+                                        }
+                                    ) { Text(if (isCleaning) "清理中…" else "清理空标签") }
+                                    cleanupMessage?.let { msg ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            msg,
+                                            fontSize = 12.sp,
+                                            color = if (msg.contains("失败")) {
                                                 MaterialTheme.colorScheme.error
                                             } else {
                                                 MaterialTheme.colorScheme.tertiary

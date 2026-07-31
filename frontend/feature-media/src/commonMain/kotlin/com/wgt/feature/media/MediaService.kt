@@ -3932,6 +3932,52 @@ object MediaService {
     }
 
     /**
+     * POST /api/media/tag/cleanup-unused — 清理未被任何媒体使用的空标签。
+     *
+     * 后端返回 `{status, removed_count, removed_tags:[...], total_tags_before}`。
+     * 本方法返回封装的 [CleanupResult]；HTTP 非 200 或异常时返回 null（与
+     * [exportTags] 等统计方法一致的失败姿态，见 MediaService 约定 5）。
+     *
+     * 后端端点可能尚未部署（complementary sibling collision 场景）——本方法
+     * 先前端先行：端点缺失时返回 null，UI 静默降级提示失败。
+     *
+     * @return 成功时为 [CleanupResult]；失败/端点缺失时返回 null。
+     */
+    suspend fun cleanupUnusedTags(): CleanupResult? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/cleanup-unused") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val removedTags = o["removed_tags"]?.jsonArray?.mapNotNull { el ->
+                    el.jsonPrimitive.contentOrNull
+                } ?: emptyList()
+                val result = CleanupResult(
+                    removedCount = o["removed_count"]?.jsonPrimitive?.intOrNull ?: removedTags.size,
+                    removedTags = removedTags,
+                    totalTagsBefore = o["total_tags_before"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+                logger.info("MediaService", "cleanupUnusedTags status=${response.status} removed=${result.removedCount}")
+                result
+            } else {
+                logger.info("MediaService", "cleanupUnusedTags status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "cleanupUnusedTags FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** [cleanupUnusedTags] 返回结果。字段对齐后端 JSON：removed_count/removed_tags/total_tags_before。 */
+    data class CleanupResult(
+        val removedCount: Int,
+        val removedTags: List<String>,
+        val totalTagsBefore: Int
+    )
+
+    /**
      * V8：GET /api/media/info/{id} — 返回单个媒体详情。
      */
     suspend fun getMediaInfo(mediaId: String): MediaInfo? {
