@@ -214,6 +214,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/share-toggle", s.handleAlbumShareToggle)
 	// V12：批量强制设置相册封面（覆盖已有封面，区别于 auto-cover-all 仅处理空封面）。
 	s.mux.HandleFunc("/api/media/album/batch-set-cover", s.handleAlbumBatchSetCover)
+	// V12：列出相册带封面缩略图 URL（在 all-summary 基础上额外返回 cover_thumbnail_url，
+	// 方便前端一次渲染相册网格，无需为每个相册再发一次请求取封面）。
+	s.mux.HandleFunc("/api/media/album/list-with-cover", s.handleAlbumListWithCover)
 	// V8：相册内媒体完整 metadata
 	s.mux.HandleFunc("/api/media/album/media-list", s.handleAlbumMediaList)
 	// V8：重命名相册
@@ -6100,6 +6103,48 @@ func (s *Server) handleAlbumBatchSetCover(w http.ResponseWriter, r *http.Request
 		"status":         "success",
 		"updated_count":  updated,
 		"skipped_count":  skipped,
+	})
+}
+
+// handleAlbumListWithCover V12：GET /api/media/album/list-with-cover — 列出当前用户所有相册，
+// 在 all-summary 基础上额外返回 cover_thumbnail_url，方便前端一次渲染相册网格。
+// 对每个有 cover_media_id 的相册，生成缩略图 URL：/api/media/thumbnail/{cover_media_id}。
+// 返回 { albums: [{id,name,media_count,cover_media_id,cover_thumbnail_url,pinned,created_at}], total }。
+func (s *Server) handleAlbumListWithCover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+	items := make([]map[string]any, 0, len(albums))
+	for _, a := range albums {
+		coverThumb := ""
+		if a.CoverMediaID != "" {
+			coverThumb = "/api/media/thumbnail/" + a.CoverMediaID
+		}
+		items = append(items, map[string]any{
+			"id":                  a.ID,
+			"name":                a.Name,
+			"media_count":         len(a.MediaIDs),
+			"cover_media_id":      a.CoverMediaID,
+			"cover_thumbnail_url": coverThumb,
+			"pinned":              a.Pinned,
+			"created_at":          a.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"albums": items,
+		"total":  len(items),
 	})
 }
 
