@@ -149,6 +149,37 @@ func (fs *FavoriteStore) IsFavorite(uid, mediaId string) bool {
 	return pf.favorites[mediaId]
 }
 
+// BatchRemoveFavorites 批量取消 uid 名下 mediaIDs 的收藏，单次加锁 + 单次落盘
+// （区别于循环调 RemoveFavorite 每条都 save 一次，避免大批量时 IO 放大）。
+// 返回实际被移除的条数——即 mediaIDs 中原本就在收藏集里的数量；不在收藏集里的
+// id 静默跳过（幂等，不报错）。uid 非法或 FavoriteStore 未配置返回 (0, nil)，
+// 与 RemoveFavorite 的 forUser==nil 语义对齐（后者会报错，但批量场景为便于前端
+// 统计 removed_count，这里降级为 0 而非报错——调用方 handler 仍会在 favStore
+// 不支持时整体 501，不会走到这里）。
+//
+// 安全：仅操作 uid 自己的 perUserFav（forUser 按 uid 隔离），不触及他人收藏。
+func (fs *FavoriteStore) BatchRemoveFavorites(uid string, mediaIDs []string) int {
+	pf := fs.forUser(uid)
+	if pf == nil || len(mediaIDs) == 0 {
+		return 0
+	}
+	pf.mu.Lock()
+	defer pf.mu.Unlock()
+	removed := 0
+	for _, id := range mediaIDs {
+		if pf.favorites[id] {
+			delete(pf.favorites, id)
+			removed++
+		}
+	}
+	if removed == 0 {
+		// 没有任何变化则不触发落盘，避免无谓 IO。
+		return 0
+	}
+	_ = pf.save()
+	return removed
+}
+
 // ListFavorites 返回 uid 的全部收藏 mediaId 列表（无序）。
 func (fs *FavoriteStore) ListFavorites(uid string) []string {
 	pf := fs.forUser(uid)

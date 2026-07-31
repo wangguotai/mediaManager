@@ -167,6 +167,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/favorite", s.handleMediaFavorite)
 	s.mux.HandleFunc("/api/media/favorites", s.handleMediaFavorites)
 	s.mux.HandleFunc("/api/media/favorite-batch", s.handleMediaFavoriteBatch)
+	// V9：批量取消收藏（单次落盘，返回实际移除条数）
+	s.mux.HandleFunc("/api/media/batch-favorite-remove", s.handleMediaBatchFavoriteRemove)
 
 	// 相册：创建、列表、加入/移除媒体、删除。
 	s.mux.HandleFunc("/api/media/album", s.handleAlbumCreate)
@@ -1288,6 +1290,7 @@ type favoriteProvider interface {
 	ListFavorites(uid string) []string
 	AddFavorite(uid, mediaId string) error
 	RemoveFavorite(uid, mediaId string) error
+	BatchRemoveFavorites(uid string, mediaIDs []string) int
 	TotalFavorites() int
 }
 
@@ -1416,6 +1419,62 @@ func (s *Server) handleMediaFavoriteBatch(w http.ResponseWriter, r *http.Request
 		"succeeded": succeeded,
 		"failed":    failed,
 		"favorite":  req.Favorite,
+	})
+}
+
+// handleMediaBatchFavoriteRemove 处理 POST /api/media/batch-favorite-remove，
+// 批量取消收藏。请求体: {"media_ids":["a","b",...]}。
+//
+// 与 /api/media/favorite-batch（favorite=false）的差异：
+//   - favorite-batch 逐条调 RemoveFavorite，每条都加锁+落盘 IO（N 次 save）；
+//   - 本端点走 favoriteProvider.BatchRemoveFavorites，单次加锁 + 单次落盘，
+//     大批量取消时 IO 放大显著降低。
+//
+// 返回 {"status":"success","removed_count":N}。removed_count 为实际被移除的
+// 条数（请求中本就在收藏集里的 id 数）；不在收藏集里的 id 幂等跳过，不计入。
+// 收藏功能未配置（mediaSvc 未实现 favoriteProvider）时返回 501；store 未注入时
+// 仅跳过审计日志，不影响收藏功能本身（收藏走文件系统，不依赖 SQL store）。
+func (s *Server) handleMediaBatchFavoriteRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		MediaIds []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.MediaIds) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids must not be empty"})
+		return
+	}
+	// 媒体 id 安全校验：与 handleMediaFavoriteBatch 一致，禁空/禁路径穿越字符。
+	for _, id := range req.MediaIds {
+		if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id in list"})
+			return
+		}
+	}
+
+	fav, ok := s.mediaSvc.(favoriteProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "favorite is not supported by the configured media service"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+
+	removed := fav.BatchRemoveFavorites(uid, req.MediaIds)
+
+	// 审计日志：store 未注入时跳过（收藏本身不依赖 store）。detail 标注批量移除条数。
+	if s.store != nil {
+		_ = s.store.AddAuditLog(r.Context(), uid, "unfavorite", "", fmt.Sprintf("batch remove %d favorites", removed))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"removed_count": removed,
 	})
 }
 

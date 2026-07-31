@@ -561,6 +561,16 @@ func (s *MediaService) RemoveFavorite(uid, mediaId string) error {
 	return s.favStore.RemoveFavorite(uid, mediaId)
 }
 
+// BatchRemoveFavorites 批量取消收藏。favStore 未配置时返回 0（功能禁用语义，
+// 与 ListFavorites/TotalFavorites 返回零值的策略一致，而非像单条 RemoveFavorite
+// 那样报错——批量场景下调用方只关心 removed_count，零值即表示"无收藏被移除"）。
+func (s *MediaService) BatchRemoveFavorites(uid string, mediaIDs []string) int {
+	if s.favStore == nil {
+		return 0
+	}
+	return s.favStore.BatchRemoveFavorites(uid, mediaIDs)
+}
+
 // CreateAlbum 在 user_id 名下创建新相册。
 func (s *MediaService) CreateAlbum(uid, name string) (*Album, error) {
 	if s.albumStore == nil {
