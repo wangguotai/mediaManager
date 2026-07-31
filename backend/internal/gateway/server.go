@@ -343,6 +343,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-pin", s.handleAlbumBatchPin)
 	// V9：批量取消置顶多个相册（遍历 UnpinAlbum，返回实际取消计数）。
 	s.mux.HandleFunc("/api/media/album/batch-unpin", s.handleAlbumBatchUnpin)
+	// V9：批量克隆多个相册（逐个 GetAlbum + CreateAlbum + BatchAddToAlbum，返回新相册 id 列表）。
+	s.mux.HandleFunc("/api/media/album/batch-clone", s.handleAlbumBatchClone)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
@@ -6503,6 +6505,78 @@ func (s *Server) handleAlbumBatchUnpin(w http.ResponseWriter, r *http.Request) {
 		"status":          "success",
 		"unpinned_count":  unpinned,
 		"skipped_count":   skipped,
+	})
+}
+
+// handleAlbumBatchClone V9：POST /api/media/album/batch-clone — 批量克隆多个相册。
+// 请求体: { "album_ids": ["id1","id2",...], "suffix": "(副本)"（可选，默认 "(副本)"） }
+// 逐个 GetAlbum（校验归属，跳过不存在的）+ CreateAlbum + BatchAddToAlbum 复制 media +
+// SetAlbumCover 复制封面。返回 { "status","cloned_count","skipped_count","new_album_ids" }。
+// 单个相册克隆出错不中断整体流程，记录到 failed_album_ids 并继续。
+func (s *Server) handleAlbumBatchClone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+		Suffix   string   `json:"suffix"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.AlbumIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids is required"})
+		return
+	}
+	suffix := req.Suffix
+	if suffix == "" {
+		suffix = "(副本)"
+	}
+	cloned, skipped := 0, 0
+	newIDs := make([]string, 0, len(req.AlbumIDs))
+	failed := make([]string, 0)
+	for _, albumID := range req.AlbumIDs {
+		// 获取源相册并校验归属；不存在/非当前用户所有则跳过，不中断整体流程。
+		source := provider.GetAlbum(uid, albumID)
+		if source == nil {
+			skipped++
+			continue
+		}
+		name := source.Name + " " + suffix
+		newAlbum, err := provider.CreateAlbum(uid, name)
+		if err != nil {
+			failed = append(failed, albumID)
+			continue
+		}
+		// 批量复制 media_ids（错误不计入失败，仅影响 copied 计数；新相册已创建成功）。
+		if len(source.MediaIDs) > 0 {
+			_, _ = provider.BatchAddToAlbum(uid, newAlbum.ID, source.MediaIDs)
+		}
+		// 复制封面（可选，忽略错误）。
+		if source.CoverMediaID != "" {
+			_ = provider.SetAlbumCover(uid, newAlbum.ID, source.CoverMediaID)
+		}
+		newIDs = append(newIDs, newAlbum.ID)
+		cloned++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "success",
+		"cloned_count":    cloned,
+		"skipped_count":   skipped,
+		"new_album_ids":   newIDs,
+		"failed_album_ids": failed,
 	})
 }
 
