@@ -220,6 +220,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-calendar-year", s.handleMediaCalendarYear)
 	// 按 24 小时分布统计上传习惯（created_at 的 UTC 小时，0-23 全槽位返回）。
 	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
+	// 媒体时间分析：拍摄时间(exif) vs 上传时间对比，按延迟分桶统计。
+	// 仅基于 taken_at 已知（≠0）的媒体；taken_at 为毫秒时间戳，created_at 为 UTC。
+	s.mux.HandleFunc("/api/media/media-time-analysis", s.handleMediaTimeAnalysis)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
@@ -6176,6 +6179,122 @@ func (s *Server) handleMediaByHour(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMediaTimeAnalysis GET /api/media/media-time-analysis — 拍摄时间 vs 上传时间延迟分析。
+//
+// 对当前用户全部未软删媒体，比较 taken_at（EXIF/客户端声明的拍摄时间，毫秒时间戳，
+// 0 表示未知，跳过）与 created_at（上传时间，UTC time.Time），统计上传相对拍摄的延迟分布。
+//
+// 响应结构：
+//
+//	{
+//	  "total":            N,     // 参与统计的有效媒体数（taken_at≠0）
+//	  "skipped_unknown":  N,     // taken_at=0（拍摄时间未知）被跳过的媒体数
+//	  "avg_delay_seconds": 12.3, // 平均延迟秒数；total=0 时为 0
+//	  "max_delay_seconds": 3600, // 最大延迟秒数（取延迟>=0 的样本，排除拍摄时间晚于上传的异常值）；total=0 时为 0
+//	  "delay_buckets": {         // 按延迟范围分桶计数
+//	    "lt_1h":    N,
+//	    "1h_24h":   N,
+//	    "1d_7d":    N,
+//	    "gt_7d":    N
+//	  },
+//	  "same_day_count": N,       // 拍摄与上传落在同一 UTC 日期的数量
+//	  "same_day_ratio": 0.42     // same_day_count / total，total=0 时为 0
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。时间口径统一用 UTC（与 created_at 一致）。
+func (s *Server) handleMediaTimeAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	var (
+		total    int64
+		skipped  int64
+		sumDelay float64
+		maxDelay float64
+		sameDay  int64
+		lt1h     int64
+		b1h24h   int64
+		b1d7d    int64
+		gt7d     int64
+		hour     = float64(time.Hour.Seconds())
+		day      = 24 * hour
+		week     = 7 * day
+	)
+	for _, m := range mediaList {
+		if m.TakenAt == 0 {
+			skipped++
+			continue
+		}
+		taken := time.UnixMilli(m.TakenAt).UTC()
+		created := m.CreatedAt.UTC()
+		delaySec := created.Sub(taken).Seconds()
+		total++
+		if delaySec < 0 {
+			// 拍摄时间晚于上传时间（时钟/时区异常），不计入 avg/max，
+			// 但仍计入 total 并归入最小桶，保持 total 与各桶合计一致可解释。
+			lt1h++
+			continue
+		}
+		sumDelay += delaySec
+		if delaySec > maxDelay {
+			maxDelay = delaySec
+		}
+		switch {
+		case delaySec < hour:
+			lt1h++
+		case delaySec < day:
+			b1h24h++
+		case delaySec < week:
+			b1d7d++
+		default:
+			gt7d++
+		}
+		if taken.Format("2006-01-02") == created.Format("2006-01-02") {
+			sameDay++
+		}
+	}
+
+	avgDelay := float64(0)
+	if total > 0 {
+		avgDelay = sumDelay / float64(total)
+	}
+	sameRatio := float64(0)
+	if total > 0 {
+		sameRatio = float64(sameDay) / float64(total)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":             total,
+		"skipped_unknown":   skipped,
+		"avg_delay_seconds": avgDelay,
+		"max_delay_seconds": maxDelay,
+		"delay_buckets": map[string]int64{
+			"lt_1h":  lt1h,
+			"1h_24h": b1h24h,
+			"1d_7d":  b1d7d,
+			"gt_7d":  gt7d,
+		},
+		"same_day_count": sameDay,
+		"same_day_ratio": sameRatio,
+	})
+}
+
 // handleStorageForecast V9：GET /api/media/storage-forecast — 存储用量预测。
 //
 // 基于最近 6 个月的上传趋势（created_at 的 YYYY-MM 分组累计 bytes），计算月均
@@ -6953,10 +7072,10 @@ func (s *Server) handleMediaYearStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"year":         year,
-		"total_count":  totalCount,
-		"total_bytes":  totalBytes,
-		"by_month":     byMonth,
+		"year":        year,
+		"total_count": totalCount,
+		"total_bytes": totalBytes,
+		"by_month":    byMonth,
 		"by_type": map[string]any{
 			"IMAGE": imageCount,
 			"VIDEO": videoCount,
