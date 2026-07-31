@@ -136,6 +136,12 @@ fun MediaListScreen(
     // 由 Screen 持有而非 ViewModel，便于与筛选条布局联动且不影响列表缓存。
     var searchExpanded by remember { mutableStateOf(false) }
 
+    // 高级搜索对话框显隐：SearchBar 上的「高级搜索」图标触发，
+    // AdvancedSearchDialog 回调 Map<String,String> 条件后由本 Screen 启协程调
+    // MediaService.advancedSearch + applyAdvancedSearchResults 替换列表。
+    var showAdvancedSearch by remember { mutableStateOf(false) }
+    val advancedSearchScope = rememberCoroutineScope()
+
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
 
@@ -396,6 +402,30 @@ fun MediaListScreen(
         )
     }
 
+    // V8：高级搜索对话框——条件确权后启协程调后端 /api/media/advanced-search，
+    // 命中结果灌入 ViewModel.replace 列表并关对话框；空结果给 Snackbar 提示。
+    // 不走 ViewModel 方法（ViewModel 仅暴露 applyAdvancedSearchResults 结果灌入），
+    // 故网络调用在本 Screen 内用 advancedSearchScope.launch 发起。
+    if (showAdvancedSearch) {
+        AdvancedSearchDialog(
+            onDismiss = { showAdvancedSearch = false },
+            onSearch = { opts ->
+                showAdvancedSearch = false
+                advancedSearchScope.launch {
+                    val results = com.wgt.feature.media.MediaService.advancedSearch(opts)
+                    if (results == null) {
+                        snackbarHostState.showSnackbar("高级搜索失败，请稍后重试")
+                    } else if (results.isEmpty()) {
+                        viewModel.applyAdvancedSearchResults(results)
+                        snackbarHostState.showSnackbar("未找到匹配的媒体")
+                    } else {
+                        viewModel.applyAdvancedSearchResults(results)
+                    }
+                }
+            }
+        )
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -563,7 +593,8 @@ fun MediaListScreen(
                         viewModel.applySearchQuery(query)
                         if (query.isNotBlank()) SearchHistory.add(query)
                     },
-                    onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ }
+                    onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ },
+                    onAdvancedSearch = { showAdvancedSearch = true }
                 )
 
                     // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效
