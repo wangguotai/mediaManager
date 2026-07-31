@@ -1397,6 +1397,72 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V22：归档建议卡片 —— 调 /api/media/archive-suggest 显示冷数据 + 大视频归档候选，
+            // 列出每项文件名 / 大小 / 归档年龄，并给出可释放空间汇总。
+            // 放在"完整性报告"之后、\"数据概览\"之前。
+            var archiveSuggest by remember { mutableStateOf<MediaService.ArchiveSuggest?>(null) }
+            var archiveSuggestLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                archiveSuggest = MediaService.getArchiveSuggest()
+                archiveSuggestLoading = false
+            }
+            SectionTitle("📦 归档建议", iconRes = Res.drawable.ic_info)
+            if (archiveSuggestLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (archiveSuggest == null) {
+                Text(
+                    "无法获取归档建议",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (archiveSuggest!!.shouldArchive.not()) {
+                Text(
+                    "暂无需归档的冷数据",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val sug = archiveSuggest!!
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Text(
+                        "📦 建议归档 ${sug.totalCount} 项冷数据（可释放 ${formatDouble2(sug.potentialSavingsMb)} MB）",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    sug.mediaToArchive.forEach { item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                item.filename.ifEmpty { item.mediaId },
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                "${formatBytesToMB(item.size)} MB · ${item.ageDays} 天",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
             // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
             // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。
@@ -2470,6 +2536,17 @@ private fun formatBackupTime(timeMs: Long): String {
 
 /** 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。 */
 private fun Int.pad2(): String = if (this < 10) "0$this" else this.toString()
+
+/**
+ * Double 保留 2 位小数（用于后端返回的 MB 数）。commonMain 无 `String.format`/`%.2f`，
+ * 用 toString + take 截断实现（NaN/Infinity 原样返回）。
+ */
+private fun formatDouble2(v: Double): String {
+    if (v.isNaN() || v.isInfinite()) return v.toString()
+    val s = v.toString()
+    val dot = s.indexOf('.')
+    return if (dot < 0) s else s.take(dot + 3)
+}
 
 /**
  * Howard Hinnant civil_from_days：自 1970-01-01 起的天数 → (年, 月, 日)。

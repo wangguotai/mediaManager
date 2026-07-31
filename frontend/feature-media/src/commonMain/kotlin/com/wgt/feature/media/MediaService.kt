@@ -3081,6 +3081,62 @@ object MediaService {
     )
 
     /**
+     * V22：GET /api/media/archive-suggest — 智能归档建议。
+     *
+     * 后端扫描当前用户全部未软删媒体，挑出同时满足"冷数据（上传 >180 天）+ 大视频
+     * （>50MB）"的条目作为归档候选，按大小倒序排列，给出累计可释放空间。
+     *
+     * 响应：`{should_archive, media_to_archive:[{media_id,filename,size,age_days,type}],
+     * total_count, potential_savings_mb}`。请求失败（非 200 / 异常）返回 null，调用方
+     * 静默跳过卡片渲染（非阻塞式设置项）。
+     */
+    suspend fun getArchiveSuggest(): ArchiveSuggest? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/archive-suggest") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val items = obj["media_to_archive"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val mid = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    ArchiveItem(
+                        mediaId = mid,
+                        filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = o["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        ageDays = o["age_days"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                ArchiveSuggest(
+                    shouldArchive = obj["should_archive"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    mediaToArchive = items,
+                    totalCount = obj["total_count"]?.jsonPrimitive?.intOrNull ?: items.size,
+                    potentialSavingsMb = obj["potential_savings_mb"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getArchiveSuggest FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V22：智能归档建议中的单个候选项（冷数据 + 大视频，后端已按 size 倒序）。 */
+    data class ArchiveItem(
+        val mediaId: String,
+        val filename: String,
+        val size: Long,
+        val ageDays: Int
+    )
+
+    /** V22：智能归档建议响应（是否需归档 + 候选列表 + 总数 + 可释放空间 MB）。 */
+    data class ArchiveSuggest(
+        val shouldArchive: Boolean,
+        val mediaToArchive: List<ArchiveItem>,
+        val totalCount: Int,
+        val potentialSavingsMb: Double
+    )
+
+    /**
      * V20：GET /api/media/upload-pattern-analysis — 上传模式分析。
      *
      * 后端基于当前用户全部未删除媒体的 created_at/size/type 统计最常上传的：
