@@ -2993,6 +2993,98 @@ object MediaService {
     }
 
     /**
+     * V21：GET /api/media/media-resolution-distribution — 增强版分辨率分布。
+     *
+     * 与 [getByResolution]（按最大边 maxDim 粗分 4K/2K/1080p/720p/其他，仅返 count）不同，
+     * 本端点按 width*height 像素总量分四档（低清 / 标清·高清 / 超清 / 4K+），并补充：
+     *   - 每档 count + bytes（累计该档媒体 Size）
+     *   - 方向统计（横向 landscape / 纵向 portrait / 正方形 square）
+     *   - 极值分辨率（max/min，按像素总量比较；无有效分辨率媒体时为 null）
+     *
+     * 响应结构（与 [handleMediaResolutionDist] 对齐）：
+     *   `{tiers:[{tier,count,bytes}], orientation:{landscape,portrait,square},
+     *     max_resolution:{width,height,pixels}|null, min_resolution:..., total:N}`
+     *
+     * count/bytes/tier 均为后端 int64/string（永不为 JSON null），用 `?: 0` / `?: 0L` 安全默认。
+     * `tiers` 中 tier 字段缺失则 `return@mapNotNull null` 丢弃该行；max/min_resolution 可为 JSON null
+     * （Go `*resolution` 指针），故先 `is JsonNull` 短路再读字段。失败返回 null，调用方按 null 静默跳过。
+     */
+    suspend fun getResolutionDistribution(): ResolutionDist? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-resolution-distribution") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val tiers = obj["tiers"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    ResolutionTier(
+                        tier = o["tier"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                } ?: emptyList()
+                val orientObj = obj["orientation"]?.jsonObject
+                val orientation = Orientation(
+                    landscape = orientObj?.get("landscape")?.jsonPrimitive?.intOrNull ?: 0,
+                    portrait = orientObj?.get("portrait")?.jsonPrimitive?.intOrNull ?: 0,
+                    square = orientObj?.get("square")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                val maxRes = obj["max_resolution"]?.let { el ->
+                    if (el is JsonNull) null
+                    else {
+                        val o = el.jsonObject
+                        ResolutionInfo(
+                            width = o["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                            height = o["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                            pixels = o["pixels"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    }
+                }
+                val minRes = obj["min_resolution"]?.let { el ->
+                    if (el is JsonNull) null
+                    else {
+                        val o = el.jsonObject
+                        ResolutionInfo(
+                            width = o["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                            height = o["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                            pixels = o["pixels"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    }
+                }
+                ResolutionDist(
+                    tiers = tiers,
+                    orientation = orientation,
+                    maxResolution = maxRes,
+                    minResolution = minRes,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getResolutionDistribution FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V21：分辨率分布单档（档次名 + 该档媒体数 + 累计字节）。 */
+    data class ResolutionTier(val tier: String, val count: Int, val bytes: Long)
+
+    /** V21：方向统计（横向 / 纵向 / 正方形）。 */
+    data class Orientation(val landscape: Int, val portrait: Int, val square: Int)
+
+    /** V21：分辨率极值（宽 + 高 + 像素总量）。 */
+    data class ResolutionInfo(val width: Int, val height: Int, val pixels: Int)
+
+    /** V21：增强版分辨率分布（四档 + 方向 + 极值 + 参与分档的未软删媒体总数）。 */
+    data class ResolutionDist(
+        val tiers: List<ResolutionTier>,
+        val orientation: Orientation,
+        val maxResolution: ResolutionInfo?,
+        val minResolution: ResolutionInfo?,
+        val total: Int
+    )
+
+    /**
      * V8：GET /api/media/time-distribution — 按拍摄时段统计媒体数量。
      *
      * 后端返回 `{distribution: {"早晨":N,"下午":N,"晚上":N,"深夜":N}, total: N}`，

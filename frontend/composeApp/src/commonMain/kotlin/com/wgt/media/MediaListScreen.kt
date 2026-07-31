@@ -2309,6 +2309,108 @@ private fun MyTabContent(
             }
         }
 
+        // V21：分辨率分布增强卡片——在基础分辨率分布之后，调
+        // GET /api/media/media-resolution-distribution 展示像素总量四档 + 方向 + 极值。
+        // total=0 或异常时静默跳过（与基础分辨率分布同款，?.let + total 守卫）。
+        var resolutionDist by remember { mutableStateOf<MediaService.ResolutionDist?>(null) }
+        LaunchedEffect(Unit) { resolutionDist = MediaService.getResolutionDistribution() }
+        resolutionDist?.let { dist ->
+            if (dist.total > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("分辨率分布（增强）", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 四档：低清 / 标清·高清 / 超清 / 4K+（后端按像素总量分档，顺序固定）
+                        val maxTierCount = dist.tiers.maxOf { it.count }.coerceAtLeast(1)
+                        dist.tiers.forEach { t ->
+                            val pct = (t.count.toFloat() / maxTierCount).coerceIn(0f, 1f)
+                            val mbStr = if (t.bytes > 0L) {
+                                (t.bytes.toDouble() / (1024.0 * 1024.0)).toString()
+                                    .let { it.take(it.indexOf('.') + 2) }
+                            } else "0"
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(t.tier, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${t.count} 项 · ${mbStr} MB",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                            // 比例条（与媒体年龄卡片同款）
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(pct)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // 方向统计：横向 / 纵向 / 正方形
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("方向", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "横向 ${dist.orientation.landscape}  ·  纵向 ${dist.orientation.portrait}  ·  方形 ${dist.orientation.square}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                        // 极值分辨率（max/min，无有效分辨率媒体时后端返 null → maxRes/minRes 为 null）
+                        dist.maxResolution?.let { mx ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("最高分辨率", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${mx.width}×${mx.height}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                        dist.minResolution?.let { mn ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("最低分辨率", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${mn.width}×${mn.height}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 ${dist.total} 项（按像素总量分档：低清<307200 · 标清·高清<2073600 · 超清<8294400 · 4K+≥8294400）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V8：文件大小分布
         var sizeRange by remember { mutableStateOf<MediaService.SizeRangeStat?>(null) }
         LaunchedEffect(Unit) { sizeRange = MediaService.getBySizeRange() }
