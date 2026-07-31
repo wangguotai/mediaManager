@@ -354,6 +354,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/mime-type-stats", s.handleMimeTypeStats)
 	// V8：孤立文件检查（DB 有记录但磁盘文件缺失）
 	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
+	// 媒体错误检查（扩展版孤立检查：size=0/文件缺失/大小不符）。
+	s.mux.HandleFunc("/api/media/media-error-check", s.handleMediaErrorCheck)
 	// V8：按天统计上传量（日历热力图）
 	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
 	// 连续上传天数统计（current/longest streak，类似 GitHub 连续贡献天数）。
@@ -7148,6 +7150,112 @@ func (s *Server) handleMediaOrphanCheck(w http.ResponseWriter, r *http.Request) 
 		"checked":      checked,
 		"orphan_count": len(orphans),
 		"orphans":      orphans,
+	})
+}
+
+// handleMediaErrorCheck GET /api/media/media-error-check — 媒体错误检查。
+// 检测损坏的媒体文件，三种错误类型逐条判定（按优先级，单条 media 至多记录一种）：
+//  a) zero_size   —— DB 记录 Size <= 0
+//  b) missing_file —— 磁盘文件不存在（uploads 目录下 m.ID.* glob 无命中，或 stat 失败）
+//  c) size_mismatch—— 磁盘文件大小与 DB 记录不符
+// 查询参数 limit 控制最大扫描条数（默认 100，上限 1000）。仅扫描未软删（deleted=0）记录。
+// 返回 {errors:[{media_id,filename,error_type,db_size,disk_size?}], total_errors, total_checked}。
+// disk_size 仅在 size_mismatch 时携带。
+func (s *Server) handleMediaErrorCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage not configured"})
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "uploads dir not configured"})
+		return
+	}
+	type mediaErrorItem struct {
+		MediaID   string `json:"media_id"`
+		Filename  string `json:"filename"`
+		ErrorType string `json:"error_type"`
+		DBSize    int64  `json:"db_size"`
+		DiskSize  int64  `json:"disk_size,omitempty"`
+	}
+	checked := 0
+	var errs []mediaErrorItem
+	for _, m := range mediaList {
+		if m.Deleted || checked >= limit {
+			continue
+		}
+		checked++
+		// a) size <= 0：DB 记录本身即为损坏数据
+		if m.Size <= 0 {
+			errs = append(errs, mediaErrorItem{
+				MediaID:   m.ID,
+				Filename:  m.Filename,
+				ErrorType: "zero_size",
+				DBSize:    m.Size,
+			})
+			continue
+		}
+		// 以 media ID 为前缀 glob 定位磁盘文件（扩展名未知，与 orphan-check 一致）
+		files, _ := filepath.Glob(filepath.Join(uploadsDir, m.ID+".*"))
+		if len(files) == 0 {
+			// b) 磁盘文件缺失
+			errs = append(errs, mediaErrorItem{
+				MediaID:   m.ID,
+				Filename:  m.Filename,
+				ErrorType: "missing_file",
+				DBSize:    m.Size,
+			})
+			continue
+		}
+		// c) 磁盘大小 != DB 记录
+		info, statErr := os.Stat(files[0])
+		if statErr != nil {
+			// glob 命中但 stat 失败（并发删除等罕见竞态），视为缺失
+			errs = append(errs, mediaErrorItem{
+				MediaID:   m.ID,
+				Filename:  m.Filename,
+				ErrorType: "missing_file",
+				DBSize:    m.Size,
+			})
+			continue
+		}
+		if info.Size() != m.Size {
+			errs = append(errs, mediaErrorItem{
+				MediaID:   m.ID,
+				Filename:  m.Filename,
+				ErrorType: "size_mismatch",
+				DBSize:    m.Size,
+				DiskSize:  info.Size(),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"errors":        errs,
+		"total_errors":  len(errs),
+		"total_checked": checked,
 	})
 }
 
