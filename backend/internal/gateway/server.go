@@ -230,6 +230,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/remove", s.handleAlbumRemove)
 	// V7：设置相册封面
 	s.mux.HandleFunc("/api/media/album/cover", s.handleAlbumCover)
+	// 智能选封面：优先图片类型 + 最大尺寸 + 最近上传，自动挑出最佳封面并落库。
+	// 区别于 auto-cover（仅取第一个 media 且只在封面为空时执行），本端点无论已有
+	// 封面与否都按尺寸/新鲜度重选并覆盖。精确匹配优先于 /api/media/album/ 前缀。
+	s.mux.HandleFunc("/api/media/album/cover-auto-pick", s.handleAlbumCoverAutoPick)
 	// V8：取消相册共享
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
 	// V8：列出相册共享给了哪些用户
@@ -2009,6 +2013,114 @@ func (s *Server) handleAlbumCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "album_id": req.AlbumID, "cover_media_id": req.MediaID})
+}
+
+// handleAlbumCoverAutoPick 智能选封面：POST /api/media/album/cover-auto-pick。
+// 请求体: { album_id }
+// 从相册所有 media 中按优先级「图片类型 > 最大尺寸(width*height) > 最近上传(created_at)」
+// 挑选最佳封面并调 SetAlbumCover 落库。区别于 auto-cover（仅取第一个且只在封面为空时执行），
+// 本端点无论已有封面与否都重选并覆盖。返回 {status, cover_media_id, reason}。
+func (s *Server) handleAlbumCoverAutoPick(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	album := provider.GetAlbum(uid, req.AlbumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	if len(album.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album is empty"})
+		return
+	}
+
+	// 拉取每个 media 的元数据，筛选 IMAGE 类型，按 width*height DESC + created_at DESC 排序。
+	type candidate struct {
+		ID       string
+		Pixels   int64
+		CreatedA time.Time
+	}
+	var cands []candidate
+	type fallback struct {
+		ID       string
+		CreatedA time.Time
+	}
+	var fallbacks []fallback
+	for _, mid := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mid)
+		if err != nil || m == nil || m.Deleted {
+			continue
+		}
+		fallbacks = append(fallbacks, fallback{ID: mid, CreatedA: m.CreatedAt})
+		if m.Type == "IMAGE" {
+			cands = append(cands, candidate{
+				ID:       mid,
+				Pixels:   int64(m.Width) * int64(m.Height),
+				CreatedA: m.CreatedAt,
+			})
+		}
+	}
+
+	reason := ""
+	coverID := ""
+	if len(cands) > 0 {
+		sort.Slice(cands, func(i, j int) bool {
+			if cands[i].Pixels != cands[j].Pixels {
+				return cands[i].Pixels > cands[j].Pixels
+			}
+			return cands[i].CreatedA.After(cands[j].CreatedA)
+		})
+		coverID = cands[0].ID
+		reason = "best_image_by_size_and_recency"
+	} else {
+		// 相册中无图片：回退取上传时间最新的 media 作为封面。
+		sort.Slice(fallbacks, func(i, j int) bool {
+			return fallbacks[i].CreatedA.After(fallbacks[j].CreatedA)
+		})
+		if len(fallbacks) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no media available"})
+			return
+		}
+		coverID = fallbacks[0].ID
+		reason = "no_image_fallback_to_most_recent_media"
+	}
+
+	if err := provider.SetAlbumCover(uid, req.AlbumID, coverID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "success",
+		"album_id":       req.AlbumID,
+		"cover_media_id": coverID,
+		"reason":         reason,
+	})
 }
 
 // handleAlbumUnshare V8：POST /api/media/album/unshare — 取消相册共享。
