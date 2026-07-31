@@ -989,6 +989,30 @@ private fun MyTabContent(
             }
         }
 
+        // V8：文件类型分布
+        var fileTypes by remember { mutableStateOf<List<MediaService.FileTypeStat>?>(null) }
+        LaunchedEffect(Unit) { fileTypes = MediaService.getFileTypes() }
+        fileTypes?.let { types ->
+            if (types.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("文件类型", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        types.take(5).forEach { ft ->
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(ft.mime, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${ft.count} 项", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：收藏快速统计（复用 summary.favoriteCount，无需单独请求）
         mediaSummary?.let { summary ->
             Card(

@@ -1419,6 +1419,32 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/file-types — 按 MIME 统计。 */
+    suspend fun getFileTypes(): List<FileTypeStat>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/file-types") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["types"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    FileTypeStat(
+                        mime = o["mime"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getFileTypes FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：文件类型统计 */
+    data class FileTypeStat(val mime: String, val count: Int, val bytes: Long)
+
     /** V8：GET /api/media/extreme-media — 最老和最大媒体。 */
     suspend fun getExtremeMedia(): ExtremeMedia? {
         return try {
