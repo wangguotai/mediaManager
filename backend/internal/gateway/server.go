@@ -479,6 +479,10 @@ func (s *Server) registerRoutes() {
 	// 推荐可创建的相册（如"2026年7月的照片"、"视频合集"、"旅行标签"等），供前端
 	// "推荐相册"功能展示并让用户一键创建。只读端点。
 	s.mux.HandleFunc("/api/media/album-suggestions", s.handleAlbumSuggestions)
+	// 照片组织建议：分析当前用户媒体库，按月份/类型/标签维度给出可操作的整理建议
+	// （建议创建相册或为待整理媒体打标签），与 album-suggestions 互补：
+	// 后者仅针对"未分类"媒体，本端点对全量媒体做整体组织诊断。只读端点。
+	s.mux.HandleFunc("/api/media/photo-organize-suggest", s.handlePhotoOrganizeSuggest)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 	// 媒体完整性报告（合并 orphan-check + error-check + duplicate-report 为一份完整报告，
@@ -12339,6 +12343,198 @@ func (s *Server) handleAlbumSuggestions(w http.ResponseWriter, r *http.Request) 
 			MediaCount: b.count,
 			Type:       "by_tag",
 			PreviewIDs: previewIDs(tagMedia),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
+	})
+}
+
+// handlePhotoOrganizeSuggest GET /api/media/photo-organize-suggest — 照片组织建议。
+//
+// 分析当前用户的媒体库，从月份/类型/标签三个维度给出可操作的组织建议，供前端
+// "整理建议"卡片展示并引导用户创建相册或为媒体打标签。与 album-suggestions 互补：
+// album-suggestions 只针对未分类（不在任意相册中的）媒体；本端点对全量媒体做
+// 整体组织诊断，阈值也更保守（月份≥5 / 视频≥3 / 未标签图片≥10），减少噪音。
+//
+// 三类建议（仅当对应条件成立才产出，避免空建议噪音）：
+//
+//	a) by_month  — 按拍摄时间（taken_at 优先，回退 created_at）的"年-月"分组，
+//	   某月 >= 5 张媒体 → 建议创建"YYYY年M月"相册（月份升序）。
+//	b) by_type   — 视频类媒体 >= 3 → 建议"视频合集"相册。
+//	c) untagged  — 无标签的图片（IMAGE 且不出现在任意标签关联中）>= 10 → 建议
+//	   "待整理"，引导用户为这批图片打标签（提示适合批量打 tag）。
+//
+// 数据来源：store.ListMediaByUser 一次拉全量未软删媒体；store.ListAllTags +
+// SearchMediaByTag 派生已标签 media_id 集合以判定 untagged。各维度独立容错
+// （ListAllTags 失败时跳过 untagged 维度，不阻断其余建议）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+// 响应：{ suggestions: [{type, name, media_count, reason, preview_ids:[...]}], total }
+func (s *Server) handlePhotoOrganizeSuggest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// organizeSuggestion 是单条组织建议的响应结构。
+	type organizeSuggestion struct {
+		Type       string   `json:"type"`        // by_month | by_type | untagged
+		Name       string   `json:"name"`        // 建议相册/分组名
+		MediaCount int      `json:"media_count"` // 命中媒体数
+		Reason     string   `json:"reason"`      // 人类可读的生成理由
+		PreviewIDs []string `json:"preview_ids"` // 命中媒体的预览 id（最多 maxPreview 个，按时间倒序）
+	}
+	suggestions := make([]organizeSuggestion, 0)
+
+	const maxPreview = 4
+	// previewIDs 从一组 media（按 created_at 降序）取前 maxPreview 个 id。
+	previewIDs := func(group []*storage.Media) []string {
+		if len(group) == 0 {
+			return []string{}
+		}
+		sorted := make([]*storage.Media, len(group))
+		copy(sorted, group)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+		})
+		n := len(sorted)
+		if n > maxPreview {
+			n = maxPreview
+		}
+		ids := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			ids = append(ids, sorted[i].ID)
+		}
+		return ids
+	}
+
+	// mediaTime 取一条 media 的代表性时间（优先拍摄时间 taken_at，回退上传时间 created_at），
+	// UTC 归一化（codebase 时间聚合约定）。taken_at 为 int64 毫秒时间戳，0 表未知。
+	mediaTime := func(m *storage.Media) time.Time {
+		if m.TakenAt > 0 {
+			return time.UnixMilli(m.TakenAt).UTC()
+		}
+		return m.CreatedAt.UTC()
+	}
+
+	// 先过滤软删媒体（ListMediaByUser 通常已过滤，防御式再跳过）。
+	active := make([]*storage.Media, 0, len(mediaList))
+	for _, m := range mediaList {
+		if !m.Deleted {
+			active = append(active, m)
+		}
+	}
+
+	// 中文月份名（1..12 → "1月".."12月"），用于"YYYY年M月"命名。
+	monthName := func(m int) string {
+		cnNums := []string{"", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"}
+		if m >= 1 && m <= 12 {
+			return cnNums[m] + "月"
+		}
+		return fmt.Sprintf("%d月", m)
+	}
+
+	// a) by_month：按"年-月"分组，count >= 5 产出建议，月份升序（便于用户按时间顺序整理）。
+	type monthBucket struct {
+		year  int
+		month int
+		media []*storage.Media
+	}
+	byMonth := make(map[string]*monthBucket)
+	for _, m := range active {
+		t := mediaTime(m)
+		key := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
+		b, ok := byMonth[key]
+		if !ok {
+			b = &monthBucket{year: t.Year(), month: int(t.Month())}
+			byMonth[key] = b
+		}
+		b.media = append(b.media, m)
+	}
+	monthKeys := make([]string, 0, len(byMonth))
+	for k := range byMonth {
+		monthKeys = append(monthKeys, k)
+	}
+	sort.Strings(monthKeys) // 升序：最早月份在前
+	for _, k := range monthKeys {
+		b := byMonth[k]
+		if len(b.media) < 5 {
+			continue
+		}
+		suggestions = append(suggestions, organizeSuggestion{
+			Type:       "by_month",
+			Name:       fmt.Sprintf("%d年%s", b.year, monthName(b.month)),
+			MediaCount: len(b.media),
+			Reason:     fmt.Sprintf("该月共有 %d 张媒体，建议创建相册集中管理", len(b.media)),
+			PreviewIDs: previewIDs(b.media),
+		})
+	}
+
+	// b) by_type：视频类媒体 >= 3 产出"视频合集"建议。
+	var videos []*storage.Media
+	for _, m := range active {
+		if strings.ToUpper(m.Type) == "VIDEO" {
+			videos = append(videos, m)
+		}
+	}
+	if len(videos) >= 3 {
+		suggestions = append(suggestions, organizeSuggestion{
+			Type:       "by_type",
+			Name:       "视频合集",
+			MediaCount: len(videos),
+			Reason:     fmt.Sprintf("共有 %d 个视频，建议单独成册便于浏览", len(videos)),
+			PreviewIDs: previewIDs(videos),
+		})
+	}
+
+	// c) untagged：无标签的图片（IMAGE 且不在任意标签关联中）>= 10 产出"待整理"建议。
+	// 实现：ListAllTags + 对每个标签 SearchMediaByTag 汇总 tagged media_id 集合，
+	// 再遍历 IMAGE 类 active 媒体取差集。任一步失败则跳过该维度（不阻断其他建议）。
+	taggedIDs := make(map[string]struct{})
+	if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+		for _, tag := range tags {
+			if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+				for _, id := range ids {
+					taggedIDs[id] = struct{}{}
+				}
+			}
+		}
+	}
+	var untaggedImages []*storage.Media
+	for _, m := range active {
+		if strings.ToUpper(m.Type) != "IMAGE" {
+			continue
+		}
+		if _, tagged := taggedIDs[m.ID]; tagged {
+			continue
+		}
+		untaggedImages = append(untaggedImages, m)
+	}
+	if len(untaggedImages) >= 10 {
+		suggestions = append(suggestions, organizeSuggestion{
+			Type:       "untagged",
+			Name:       "待整理",
+			MediaCount: len(untaggedImages),
+			Reason:     fmt.Sprintf("有 %d 张图片尚未打标签，建议批量为它们添加标签以便检索", len(untaggedImages)),
+			PreviewIDs: previewIDs(untaggedImages),
 		})
 	}
 
