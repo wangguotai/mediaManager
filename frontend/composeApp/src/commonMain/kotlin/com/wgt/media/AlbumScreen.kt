@@ -36,6 +36,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -1145,6 +1146,19 @@ private fun AlbumDetailPage(
                             onMessage = { msg -> viewModel.showErrorMessage(msg) }
                         )
                     }
+                    // 分布分析按钮 📈 — 弹出 Dialog 显示相册内媒体的类型/月份/大小三维度分布，
+                    // 调 GET /api/media/album-media-distribution?album_id=xxx。
+                    // 注：📊 emoji 已被上方"封面分析"按钮占用，此处用 📈 表分布趋势，避免重复。
+                    var showDistributionDialog by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showDistributionDialog = true }) {
+                        Text("📈", fontSize = 20.sp)
+                    }
+                    if (showDistributionDialog) {
+                        AlbumDistributionDialog(
+                            albumId = albumId,
+                            onDismiss = { showDistributionDialog = false }
+                        )
+                    }
                     // V12：给相册打标签按钮 🏷️ — 弹出对话框输入标签名，
                     // 调 batch-tag-album 给整个相册所有媒体批量打标签，成功后 Snackbar 提示数量。
                     var showTagAlbumDialog by remember { mutableStateOf(false) }
@@ -1649,6 +1663,162 @@ private fun CoverAnalysisDialog(
                 onClick = onDismiss
             ) { Text("关闭") }
         }
+    )
+}
+
+/**
+ * 相册分布分析对话框 — 调 [MediaService.getAlbumMediaDistribution] 显示相册内媒体的
+ * 类型 / 月份 / 大小三维度分布。
+ *
+ * 进入时异步拉取（loading 态）；失败时显示错误提示。三段均带小标题，大小分布用
+ * [LinearProgressIndicator] 可视化各档占比，月分布按月份顺序列出非零项。
+ *
+ * @param albumId 目标相册 id
+ * @param onDismiss 关闭回调
+ */
+@Composable
+private fun AlbumDistributionDialog(
+    albumId: String,
+    onDismiss: () -> Unit
+) {
+    var result by remember { mutableStateOf<MediaService.AlbumDistribution?>(null) }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(albumId) {
+        loading = true
+        result = MediaService.getAlbumMediaDistribution(albumId)
+        loading = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分布分析", fontWeight = FontWeight.Bold) },
+        text = {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                when {
+                    loading -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Text("分析中…", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    result == null -> {
+                        Text(
+                            "无法获取分布分析，请稍后重试",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    else -> {
+                        val r = result!!
+                        Column(
+                            modifier = Modifier.verticalScroll(rememberScrollState())
+                        ) {
+                            // —— 总数 ——
+                            Text(
+                                "媒体总数：${r.total}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // —— 类型分布 ——
+                            DistributionSectionTitle("类型分布")
+                            if (r.byType.isEmpty()) {
+                                EmptyDistributionHint("暂无类型数据")
+                            } else {
+                                r.byType.forEach { (type, count) ->
+                                    DistributionRow(
+                                        label = type,
+                                        value = count,
+                                        total = r.total
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // —— 月份分布 ——
+                            DistributionSectionTitle("月份分布")
+                            val months = r.byMonth.filter { it.count > 0 }
+                            if (months.isEmpty()) {
+                                EmptyDistributionHint("暂无月份数据")
+                            } else {
+                                months.forEach { mc ->
+                                    DistributionRow(
+                                        label = mc.month,
+                                        value = mc.count,
+                                        total = r.total
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // —— 大小分布 ——
+                            DistributionSectionTitle("大小分布")
+                            val sizeTotal = r.bySize.total
+                            if (sizeTotal == 0) {
+                                EmptyDistributionHint("暂无大小数据")
+                            } else {
+                                DistributionRow("小文件 (<1MB)", r.bySize.small, sizeTotal)
+                                DistributionRow("中文件 (1~10MB)", r.bySize.medium, sizeTotal)
+                                DistributionRow("大文件 (>10MB)", r.bySize.large, sizeTotal)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+/** 分布段落小标题：与 [CoverAnalysisDialog] 的 labelMedium 风格对齐。 */
+@Composable
+private fun DistributionSectionTitle(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+}
+
+/** 分布单行：label + 数量 + 占比进度条。total 为分母（计算比例，0 时进度条置 0）。 */
+@Composable
+private fun DistributionRow(label: String, value: Int, total: Int) {
+    val ratio = if (total > 0) value.toFloat() / total else 0f
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            Text("$value", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+        }
+        LinearProgressIndicator(
+            progress = { ratio },
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+        )
+    }
+}
+
+/** 段落空态提示（如后端该维度无数据时）。 */
+@Composable
+private fun EmptyDistributionHint(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
 

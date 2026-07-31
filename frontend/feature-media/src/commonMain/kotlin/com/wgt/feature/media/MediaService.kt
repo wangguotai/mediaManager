@@ -1718,6 +1718,94 @@ object MediaService {
     }
 
     /**
+     * 相册内媒体分布分析——GET /api/media/album-media-distribution?album_id=xxx。
+     *
+     * 后端返回 `{by_type, by_month, by_size, total}`：
+     * - [byType]：按媒体类型聚合的数量映射（key 如 "image"/"video"/"live"，后端按实际类型键返回）。
+     * - [byMonth]：按月份聚合的上传数量（[DistributionMonthCount]，month 为后端给的
+     *   "YYYY-MM" 字符串，零值时间归入 "unknown"）。
+     *   注：不复用既有 [MonthCount]（其 month 为 Int，对应 yearly-review 的 1~12 整数月），
+     *   因后端本端点 month 为 "YYYY-MM" 字符串——类型不符，故新建专用项类型。
+     * - [bySize]：按字节区间分桶的数量（[SizeDist]，small/medium/large 三档）。
+     * - [total]：该相册媒体总数。
+     *
+     * 后端不可用 / 非 200 / 异常时返回 null（与 [getAlbumSharingSummary] 同语义，
+     * 调用方按 null 态静默跳过渲染，不抛）。
+     *
+     * @param albumId 目标相册 id
+     * @return 分布分析结果，或 null（失败）
+     */
+    suspend fun getAlbumMediaDistribution(albumId: String): AlbumDistribution? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-media-distribution") {
+                parameter("album_id", albumId)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // by_type: {image: N, video: M, ...} —— 后端键名按实际类型返回，逐项解析为 Map
+                val byType: Map<String, Int> = obj["by_type"]?.jsonObject?.mapValues { (_, v) ->
+                    v.jsonPrimitive.intOrNull ?: 0
+                } ?: emptyMap()
+                // by_month: [{month, count}] —— month 为 "YYYY-MM" 字符串（零值时间归 "unknown"）
+                val byMonth: List<DistributionMonthCount> = obj["by_month"]?.jsonArray?.map { el ->
+                    val o = el.jsonObject
+                    DistributionMonthCount(
+                        month = o["month"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                // by_size: {small, medium, large} —— 三档分桶数量
+                val sizeObj = obj["by_size"]?.jsonObject
+                val bySize = SizeDist(
+                    small = sizeObj?.get("small")?.jsonPrimitive?.intOrNull ?: 0,
+                    medium = sizeObj?.get("medium")?.jsonPrimitive?.intOrNull ?: 0,
+                    large = sizeObj?.get("large")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                AlbumDistribution(
+                    byType = byType,
+                    byMonth = byMonth,
+                    bySize = bySize,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getAlbumMediaDistribution status=${response.status} albumId=$albumId")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumMediaDistribution FAILED albumId=$albumId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 相册媒体分布分析结果（与后端 album-media-distribution 响应对齐）。
+     *
+     * [byMonth] 用 [DistributionMonthCount]（month 为 "YYYY-MM" 字符串），不复用既有
+     * [MonthCount]（其 month 为 Int）——两者后端语义不同，避免类型错位。
+     */
+    data class AlbumDistribution(
+        val byType: Map<String, Int> = emptyMap(),
+        val byMonth: List<DistributionMonthCount> = emptyList(),
+        val bySize: SizeDist = SizeDist(),
+        val total: Int = 0
+    )
+
+    /** 相册分布分析的月份项：month 为 "YYYY-MM" 字符串（零值时间归 "unknown"）。 */
+    data class DistributionMonthCount(
+        val month: String = "",
+        val count: Int = 0
+    )
+
+    /** 字节区间分桶：[small] (<1MB) / [medium] (1~10MB) / [large] (>10MB)。 */
+    data class SizeDist(
+        val small: Int = 0,
+        val medium: Int = 0,
+        val large: Int = 0
+    ) {
+        val total: Int get() = small + medium + large
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头
