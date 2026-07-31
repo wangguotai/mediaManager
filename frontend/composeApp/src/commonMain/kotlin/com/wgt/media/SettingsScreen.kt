@@ -1397,6 +1397,84 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // 近似重复检测卡片 —— 调 /api/media/media-duplicates-similar 显示近似重复文件对
+            // （SHA256 不同但同类型+大小相近+同分辨率），与完整性报告/精确重复互补。
+            var dupSimilarPairs by remember { mutableStateOf<List<MediaService.DupSimilarPair>?>(null) }
+            var dupSimilarLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                dupSimilarPairs = MediaService.getMediaDuplicatesSimilar()
+                dupSimilarLoading = false
+            }
+            SectionTitle("🔍 近似重复检测", iconRes = Res.drawable.ic_info)
+            if (dupSimilarLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (dupSimilarPairs == null) {
+                Text(
+                    "无法获取近似重复检测",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (dupSimilarPairs!!.isEmpty()) {
+                Text(
+                    "未发现近似重复文件",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val pairs = dupSimilarPairs!!
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Text(
+                        "发现 ${pairs.size} 对近似重复",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 最多展示 5 对
+                    pairs.take(5).forEach { pair ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                pair.filenameA.ifEmpty { pair.mediaAId },
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text("↔", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Text(
+                                pair.filenameB.ifEmpty { pair.mediaBId },
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Text(
+                            "${formatBytesToMB(pair.size)} MB · ${pair.resolution}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V22：归档建议卡片 —— 调 /api/media/archive-suggest 显示冷数据 + 大视频归档候选，
             // 列出每项文件名 / 大小 / 归档年龄，并给出可释放空间汇总。
             // 放在"完整性报告"之后、\"数据概览\"之前。

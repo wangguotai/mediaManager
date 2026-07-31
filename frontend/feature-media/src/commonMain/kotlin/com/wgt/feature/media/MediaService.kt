@@ -5933,6 +5933,73 @@ object MediaService {
     )
 
     /**
+     * 近似重复媒体对条目（与后端 [handleMediaDuplicatesSimilar] 的 pair JSON 对齐）。
+     *
+     * 后端按"同类型 + 文件大小差距 <5% + 分辨率完全相同"两两比对，捕获 SHA256 不同但
+     * 物理特征高度相近的可疑对（同一照片的不同格式/质量版本）。与 [DupReport]（精确
+     * SHA256 去重）互补。[size] 为较大者的字节，[resolution] 形如 "1920x1080"。
+     *
+     * @param mediaAId 媒体 A 的 ID
+     * @param mediaBId 媒体 B 的 ID
+     * @param filenameA 媒体 A 的文件名
+     * @param filenameB 媒体 B 的文件名
+     * @param size 较大者的文件大小（字节）
+     * @param resolution 分辨率字符串 "WxH"
+     */
+    data class DupSimilarPair(
+        val mediaAId: String,
+        val mediaBId: String,
+        val filenameA: String,
+        val filenameB: String,
+        val size: Long,
+        val resolution: String
+    )
+
+    /**
+     * GET /api/media/media-duplicates-similar?limit=50 — 获取近似重复媒体对列表。
+     *
+     * 后端两两比对用户媒体库，返回 SHA256 不同但同类型 + size 差距 <5% + 分辨率完全
+     * 相同的可疑对，响应：`{ "pairs": [{media_a_id,media_b_id,filename_a,filename_b,
+     * size,resolution,type,size_diff}], "total": N }`。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getDupReport] 同款）。HTTP 非 200 或网络异常返回
+     * null，调用方按空态处理。[limit] 截断到前 50 对（设置页仅展示前 5，此处多取一些
+     * 兼顾将来扩展）。鉴权头由 defaultRequest 统一注入。
+     *
+     * @param limit 返回上限（默认 50，后端上限 500）
+     * @return 近似重复对列表；失败返回 null
+     */
+    suspend fun getMediaDuplicatesSimilar(limit: Int = 50): List<DupSimilarPair>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-duplicates-similar") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["pairs"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val aId = item["media_a_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val bId = item["media_b_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    DupSimilarPair(
+                        mediaAId = aId,
+                        mediaBId = bId,
+                        filenameA = item["filename_a"]?.jsonPrimitive?.contentOrNull ?: "",
+                        filenameB = item["filename_b"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = item["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        resolution = item["resolution"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaDuplicatesSimilar status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaDuplicatesSimilar FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/stat-summary — 一站式统计汇总。
      *
      * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
