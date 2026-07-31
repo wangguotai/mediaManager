@@ -1966,6 +1966,39 @@ object MediaService {
     /** V8：上传日（按天统计） */
     data class UploadDay(val date: String, val count: Int, val bytes: Long)
 
+    /**
+     * V8：GET /api/media/timeline-calendar — 按拍摄日期分组的媒体统计。
+     *
+     * 后端返回 `{days: [{date, count, type}], total_days, total_media}`，
+     * 本方法仅取 `days` 数组解析为 [TimelineCalendarDay]。`type` 字段用于
+     * 前端按媒体类型着色（图片蓝 / 视频红 / Live 绿）。失败返回 null，
+     * 调用方按 null 展示空状态。
+     */
+    suspend fun getTimelineCalendar(): List<TimelineCalendarDay>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/timeline-calendar") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["days"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TimelineCalendarDay(
+                        date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "image"
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTimelineCalendar FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：拍摄日历单日（按拍摄日期分组：日期 + 条数 + 类型）。 */
+    data class TimelineCalendarDay(val date: String, val count: Int, val type: String)
+
     /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
     suspend fun orphanCheck(): OrphanCheckResult? {
         return try {

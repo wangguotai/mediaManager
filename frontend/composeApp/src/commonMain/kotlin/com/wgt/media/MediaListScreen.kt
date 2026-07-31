@@ -1091,6 +1091,57 @@ private fun MyTabContent(
             }
         }
 
+        // V8：拍摄日历（按拍摄日期分组的媒体统计，调 timeline-calendar）
+        var timelineCalendar by remember { mutableStateOf<List<MediaService.TimelineCalendarDay>?>(null) }
+        LaunchedEffect(Unit) { timelineCalendar = MediaService.getTimelineCalendar() }
+        timelineCalendar?.let { days ->
+            if (days.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("拍摄日历", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            days.take(30).forEach { d ->
+                                // 按 type 着色：图片蓝 / 视频红 / Live 绿
+                                val chipColor = when (d.type.lowercase()) {
+                                    "video" -> Color(0xFFE53935)
+                                    "live", "live_photo", "livephoto" -> Color(0xFF43A047)
+                                    else -> Color(0xFF1E88E5)
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(chipColor.copy(alpha = 0.15f))
+                                        .border(1.dp, chipColor.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    // 日期取 MM/dd：后端 date 形如 "2026-07-30"
+                                    val mmdd = d.date.takeLast(5)
+                                    Text(mmdd, fontSize = 11.sp, color = chipColor, fontWeight = FontWeight.Medium)
+                                    Text("×${d.count}", fontSize = 11.sp, color = chipColor.copy(alpha = 0.8f))
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "最近 ${days.size} 天有拍摄记录",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V8：文件类型分布
         var fileTypes by remember { mutableStateOf<List<MediaService.FileTypeStat>?>(null) }
         LaunchedEffect(Unit) { fileTypes = MediaService.getFileTypes() }
