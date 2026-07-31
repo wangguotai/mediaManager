@@ -170,6 +170,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
 	// V9：按月统计媒体数量（所有媒体 created_at 的 YYYY-MM 分布，不限时间范围）。
 	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
+	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
+	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
@@ -3603,6 +3605,137 @@ func (s *Server) handleMediaCountByMonth(w http.ResponseWriter, r *http.Request)
 		"months":       months,
 		"total_months": len(months),
 		"total_media":  totalMedia,
+	})
+}
+
+// handleStorageForecast V9：GET /api/media/storage-forecast — 存储用量预测。
+//
+// 基于最近 6 个月的上传趋势（created_at 的 YYYY-MM 分组累计 bytes），计算月均
+// 增长率并预测 1/3/6 个月后的预期存储用量，同时估算当前配额何时耗尽。
+//
+// 响应结构：
+//
+//	{
+//	  "current_bytes":         N,     // 当前未软删媒体总字节数
+//	  "monthly_average_bytes": N,     // 最近 6 个月月均新增字节数（样本月数<2 时为 0）
+//	  "growth_rate_percent":   12.34, // 月均增长率相对 current 的百分比，current=0 时为 0
+//	  "forecast": [
+//	    {"months_ahead": 1, "predicted_bytes": N},
+//	    {"months_ahead": 3, "predicted_bytes": N},
+//	    {"months_ahead": 6, "predicted_bytes": N}
+//	  ],
+//	  "quota_bytes":        N,           // 用户配额（默认 10GB，与 handleUserQuota 一致）
+//	  "months_until_full":  N 或 null    // 按 monthly_average_bytes 估算配额耗尽月数；
+//	                                    // monthly_average_bytes<=0 时为 null（无法预测），
+//	                                    // current_bytes>=quota 时为 0（已满）
+//	}
+//
+// 算法说明：
+//   - 取最近 6 个有媒体的月份的 monthly bytes 增量；月均增长率 = 这 6 个月增量和 / 样本月数
+//     （样本月数 >=2 才有意义，否则置 0 不预测）。
+//   - 预测 = current_bytes + monthly_average_bytes * months_ahead（线性外推）。
+//   - months_until_full = ceil((quota - current) / monthly_average_bytes)；当月均 <=0
+//     时返回 null（无法预测），current >= quota 时返回 0（已满）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageForecast(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 1) 按 created_at 的 YYYY-MM 分桶累计 bytes（仅未软删），同时对齐计算 current_bytes。
+	buckets := make(map[string]int64) // month(YYYY-MM) → bytes
+	var currentBytes int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		currentBytes += m.Size
+		month := m.CreatedAt.UTC().Format("2006-01")
+		buckets[month] += m.Size
+	}
+
+	// 2) 收集月份键并升序排序（YYYY-MM 字典序 = 时间序）。
+	months := make([]string, 0, len(buckets))
+	for month := range buckets {
+		months = append(months, month)
+	}
+	sort.Strings(months)
+
+	// 3) 取最近最多 6 个月作为样本。
+	const sampleMonths = 6
+	recent := months
+	if len(recent) > sampleMonths {
+		recent = recent[len(recent)-sampleMonths:]
+	}
+
+	// 4) 月均增长率（bytes/month）：样本月 bytes 之和 / 样本月数。
+	//    样本月数 < 2 时无法拟合趋势，置 0 且不预测增长。
+	var sampleBytesSum int64
+	for _, month := range recent {
+		sampleBytesSum += buckets[month]
+	}
+	monthlyAverageBytes := int64(0)
+	if len(recent) >= 2 {
+		monthlyAverageBytes = sampleBytesSum / int64(len(recent))
+	}
+
+	// 5) 增长率百分比（相对 current_bytes），current=0 时为 0。
+	growthRatePercent := 0.0
+	if currentBytes > 0 {
+		growthRatePercent = float64(monthlyAverageBytes) / float64(currentBytes) * 100
+	}
+
+	// 6) 预测 1/3/6 个月后的用量（线性外推）。
+	forecastHops := []int{1, 3, 6}
+	forecast := make([]map[string]any, 0, len(forecastHops))
+	for _, n := range forecastHops {
+		predicted := currentBytes + monthlyAverageBytes*int64(n)
+		forecast = append(forecast, map[string]any{
+			"months_ahead":    n,
+			"predicted_bytes": predicted,
+		})
+	}
+
+	// 7) 配额耗尽估算。默认 10GB，与 handleUserQuota 的 defaultQuotaBytes 保持一致。
+	const quotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
+	var monthsUntilFull any // 默认 nil → JSON null
+	if monthlyAverageBytes > 0 && currentBytes < quotaBytes {
+		remaining := quotaBytes - currentBytes
+		// 向上取整：剩余空间除不尽时算多一个月。
+		n := remaining / monthlyAverageBytes
+		if remaining%monthlyAverageBytes != 0 {
+			n++
+		}
+		monthsUntilFull = n
+	} else if currentBytes >= quotaBytes {
+		// 已达或超配额 → 0 个月（已满），区别于“无限/无法预测”的 null。
+		monthsUntilFull = int64(0)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_bytes":         currentBytes,
+		"monthly_average_bytes": monthlyAverageBytes,
+		"growth_rate_percent":   growthRatePercent,
+		"forecast":              forecast,
+		"quota_bytes":           quotaBytes,
+		"months_until_full":     monthsUntilFull,
 	})
 }
 
