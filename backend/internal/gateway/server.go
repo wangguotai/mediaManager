@@ -368,6 +368,8 @@ func (s *Server) registerRoutes() {
 	// V9：批量创建分享链接——一次为多个 media 各生成一个独立分享 token。
 	// 走 /api/media/ 前缀（authMiddleware 自动鉴权），handler 用 userIDFromContext 取 uid。
 	s.mux.HandleFunc("/api/media/batch-share", s.handleMediaBatchShare)
+	// 分享分析统计（分享总数/活跃/过期/密码保护/即将过期的占比），只读端点。
+	s.mux.HandleFunc("/api/media/share-analytics", s.handleShareAnalytics)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：审计日志——列表/统计/记录
@@ -7806,6 +7808,94 @@ func (s *Server) handleMediaBatchShare(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"links":         links,
 		"created_count": len(links),
+	})
+}
+
+// handleShareAnalytics GET /api/media/share-analytics — 分享分析统计。
+//
+// 聚合当前用户所有分享链接的使用状况，供前端"分享分析"卡片展示：
+//   - total             : 分享链接总数
+//   - active            : 未过期的分享数（含永不过期 + 过期时间晚于 now）
+//   - expired           : 已过期的分享数（过期时间早于 now，永不过期不计入）
+//   - password_protected: 设置了密码的分享数
+//   - expiring_soon     : 7 天内将过期的分享数（仅算未过期且非永久）
+//   - active_percentage: 活跃率 = active/total*100，保留两位小数；total=0 时为 0
+//
+// 数据来源：store.ListShareTokensByUser。ExpiresAt 零值表示永不过期（计为 active，
+// 不计为 expired/expiring_soon）。PasswordHash != "" 即密码保护。查询/扫描失败不致命——
+// 总数已确定的情况下返回已有统计，store 错误本身回 500。
+func (s *Server) handleShareAnalytics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	tokens, err := s.store.ListShareTokensByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	total := len(tokens)
+	active := 0
+	expired := 0
+	passwordProtected := 0
+	expiringSoon := 0
+
+	now := time.Now().UTC()
+	soonCutoff := now.AddDate(0, 0, 7)
+
+	for _, st := range tokens {
+		if st.PasswordHash != "" {
+			passwordProtected++
+		}
+		if st.ExpiresAt.IsZero() {
+			// 永不过期：算 active，不计 expired 也不计 expiring_soon。
+			active++
+			continue
+		}
+		expiresUTC := st.ExpiresAt.UTC()
+		if !expiresUTC.Before(now) {
+			// 未过期。
+			active++
+			if !expiresUTC.After(soonCutoff) {
+				// 7 天内（含 now~cutoff）将过期。
+				expiringSoon++
+			}
+		} else {
+			expired++
+		}
+	}
+
+	// 保留两位小数。
+	var activePct float64
+	if total > 0 {
+		activePct = float64(active) / float64(total) * 100
+		activePct = float64(int(activePct*100+0.5)) / 100 // round2
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":              total,
+		"active":             active,
+		"expired":            expired,
+		"password_protected": passwordProtected,
+		"expiring_soon":      expiringSoon,
+		"active_percentage":  activePct,
+		"user_id":            uid,
+
+		// 旧字段别名（与任务规格 total_shares 等对应，兼容前端旧命名口径）：
+		"total_shares":   total,
+		"active_shares":  active,
+		"expired_shares": expired,
 	})
 }
 
