@@ -1419,6 +1419,30 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/by-size-range — 按大小范围统计。 */
+    suspend fun getBySizeRange(): SizeRangeStat? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/by-size-range") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val counts = obj["ranges"]?.jsonObject?.let { resObj ->
+                    resObj.entries.associate { (k, v) ->
+                        k to (v.jsonPrimitive.intOrNull ?: 0)
+                    }
+                } ?: emptyMap()
+                SizeRangeStat(counts = counts)
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getBySizeRange FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：大小范围统计 */
+    data class SizeRangeStat(val counts: Map<String, Int>)
+
     /** V8：GET /api/media/by-resolution — 按分辨率统计。 */
     suspend fun getByResolution(): Map<String, Int>? {
         return try {
