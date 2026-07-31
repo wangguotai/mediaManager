@@ -1054,6 +1054,32 @@ private fun MyTabContent(
             }
         }
 
+        // V8：分辨率分布
+        var resolutions by remember { mutableStateOf<Map<String, Int>?>(null) }
+        LaunchedEffect(Unit) { resolutions = MediaService.getByResolution() }
+        resolutions?.let { res ->
+            if (res.values.sum() > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("分辨率分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        res.forEach { (label, count) ->
+                            if (count > 0) {
+                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("$count 项", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：收藏快速统计（复用 summary.favoriteCount，无需单独请求）
         mediaSummary?.let { summary ->
             Card(

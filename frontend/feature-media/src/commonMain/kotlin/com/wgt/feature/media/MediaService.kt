@@ -1419,6 +1419,26 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/by-resolution — 按分辨率统计。 */
+    suspend fun getByResolution(): Map<String, Int>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/by-resolution") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["resolutions"]?.jsonObject?.let { resObj ->
+                    resObj.entries.associate { (k, v) ->
+                        k to (v.jsonPrimitive.intOrNull ?: 0)
+                    }
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getByResolution FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/disk-usage — 服务器磁盘使用情况。 */
     suspend fun getDiskUsage(): DiskUsage? {
         return try {
