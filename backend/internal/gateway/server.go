@@ -212,6 +212,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/favorite-batch", s.handleMediaFavoriteBatch)
 	// V9：批量取消收藏（单次落盘，返回实际移除条数）
 	s.mux.HandleFunc("/api/media/batch-favorite-remove", s.handleMediaBatchFavoriteRemove)
+	// 收藏时间线：按收藏时间（media.updated_at 倒序）展示已收藏媒体，供前端"收藏"Tab 渲染。
+	s.mux.HandleFunc("/api/media/favorite-timeline", s.handleFavoriteTimeline)
 
 	// 相册：创建、列表、加入/移除媒体、删除。
 	s.mux.HandleFunc("/api/media/album", s.handleAlbumCreate)
@@ -1509,6 +1511,106 @@ func (s *Server) handleMediaFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := userIDFromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{"favorites": fav.ListFavorites(uid)})
+}
+
+// handleFavoriteTimeline 处理 GET /api/media/favorite-timeline，按收藏时间倒序
+// 返回当前用户已收藏的媒体列表。
+//
+// 收藏集本身（favoriteProvider）只存 media_id，不记录收藏发生的时间戳。这里以
+// media.updated_at 作为 favorited_at 的近似——收藏操作会触发该 media 的
+// updated_at 刷新（详见 service 层 AddFavorite 实现），故 updated_at 倒序等价于
+// "最近发生收藏的在前"，符合"收藏时间线"语义。updated_at 缺失或为 0 的条目
+// 退到列表尾部。
+//
+// 与 /api/media/favorites 的差异：后者只返 media_id 字符串数组；本端点返完整
+// 摘要（media_id + filename + type + favorited_at）并按时间倒序、带 limit 分页，
+// 供前端"收藏"Tab 直接渲染列表，无需再逐条拉 /api/media/info。
+//
+// 查询参数:?limit=20（上限 200，<=0 回退默认 20）。
+// 返回:{"favorites":[{"media_id","filename","type","favorited_at"}],"total":N}
+func (s *Server) handleFavoriteTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	// 收藏能力由 mediaSvc 提供（文件系统态，不依赖 SQL store）；未配置时 501。
+	fav, ok := s.mediaSvc.(favoriteProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "favorite is not supported by the configured media service"})
+		return
+	}
+	// filename/type/updated_at 来自元数据库；store 未注入时无法渲染摘要，503。
+	//（与 handleMediaRecentActivity / handleMediaRecentUploads 口径一致。）
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	limit := 20
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	favIDs := fav.ListFavorites(uid)
+	if len(favIDs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"favorites": []map[string]any{}, "total": 0})
+		return
+	}
+	favSet := make(map[string]struct{}, len(favIDs))
+	for _, id := range favIDs {
+		favSet[id] = struct{}{}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type favItem struct {
+		MediaID     string    `json:"media_id"`
+		Filename    string    `json:"filename"`
+		Type        string    `json:"type"`
+		FavoritedAt time.Time `json:"favorited_at"`
+	}
+	items := make([]favItem, 0, len(favIDs))
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		if _, isFav := favSet[m.ID]; !isFav {
+			continue
+		}
+		items = append(items, favItem{
+			MediaID:     m.ID,
+			Filename:    m.Filename,
+			Type:        m.Type,
+			FavoritedAt: m.UpdatedAt,
+		})
+	}
+	// 按 favorited_at（=media.updated_at）倒序；零值回退到列表尾部。
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].FavoritedAt.After(items[j].FavoritedAt)
+	})
+	total := len(items)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"favorites": items,
+		"total":     total,
+	})
 }
 
 // handleMediaFavoriteBatch 处理 POST /api/media/favorite-batch，批量设置/取消收藏。
