@@ -1463,6 +1463,122 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V25：照片组织建议卡片 —— 调 /api/media/photo-organize-suggest 显示按
+            // 月份/类型/未标签维度产出的组织建议，每条附"创建相册"一键按钮
+            // （调 createAlbum + batchAddMediaToAlbum(previewIds)）。
+            // 放在"归档建议"之后、"数据概览"之前。最多展示 5 条（后端阈值保守，
+            // 通常条目不多，仍 cap 以防极端库产出长列表）。
+            var photoOrganize by remember { mutableStateOf<List<MediaService.OrganizeSuggestion>?>(null) }
+            var photoOrganizeLoading by remember { mutableStateOf(true) }
+            // 记录正在创建相册的建议 name（按钮 loading 态），空串=空闲。同一时刻仅一条在创建。
+            var creatingAlbumFor by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                photoOrganize = MediaService.getPhotoOrganizeSuggest()
+                photoOrganizeLoading = false
+            }
+            SectionTitle("📁 照片组织建议", iconRes = Res.drawable.ic_info)
+            if (photoOrganizeLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (photoOrganize == null) {
+                Text(
+                    "无法获取照片组织建议",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (photoOrganize!!.isEmpty()) {
+                Text(
+                    "暂无组织建议，媒体库已井井有条",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                photoOrganize!!.take(5).forEach { sug ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // 📁 建议名 (N 项)
+                            Text(
+                                "📁 ${sug.name}（${sug.mediaCount} 项）",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            sug.reason,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 一键创建相册：createAlbum(name) → batchAddMediaToAlbum(albumId, previewIds)。
+                        // previewIds 为后端给出的预览子集（≤4），作为相册初始成员；
+                        // 创建中禁用按钮防重复点击；结果经 Snackbar 反馈。
+                        OutlinedButton(
+                            onClick = {
+                                if (creatingAlbumFor.isNotEmpty()) return@OutlinedButton
+                                val ids = sug.previewIds
+                                if (ids.isEmpty()) {
+                                    scope.launch { snackbarHostState.showSnackbar("该建议无可加入相册的预览媒体") }
+                                    return@OutlinedButton
+                                }
+                                creatingAlbumFor = sug.name
+                                scope.launch {
+                                    val albumName = sug.name.ifEmpty { "新建相册" }
+                                    val album = MediaService.createAlbum(albumName)
+                                    if (album == null) {
+                                        creatingAlbumFor = ""
+                                        snackbarHostState.showSnackbar("创建相册失败")
+                                        return@launch
+                                    }
+                                    val added = MediaService.batchAddMediaToAlbum(album.id, ids)
+                                    creatingAlbumFor = ""
+                                    if (added == null) {
+                                        snackbarHostState.showSnackbar("相册已创建，但加入媒体失败")
+                                    } else {
+                                        snackbarHostState.showSnackbar(
+                                            "已创建相册「${album.name}」，加入 $added 项"
+                                        )
+                                    }
+                                }
+                            },
+                            enabled = creatingAlbumFor.isEmpty() || creatingAlbumFor == sug.name
+                        ) {
+                            if (creatingAlbumFor == sug.name) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("创建中…")
+                            } else {
+                                Text("创建相册")
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
             // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
             // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。

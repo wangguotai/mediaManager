@@ -3137,6 +3137,68 @@ object MediaService {
     )
 
     /**
+     * V25：照片组织建议单条（GET /api/media/photo-organize-suggest 返回）。
+     *
+     * 后端从 月份(by_month)/类型(by_type)/未标签(untagged) 三个维度对全量媒体做
+     * 整理诊断并给出可操作建议，字段与后端 `organizeSuggestion` 结构对齐：
+     * - [type] 分组类型：`by_month` | `by_type` | `untagged`
+     * - [name] 建议相册/分组名（形如"2026年七月"/"视频合集"/"待整理"）
+     * - [mediaCount] 该建议覆盖的媒体数
+     * - [reason] 人类可读的生成理由（如"该月共有 8 张媒体，建议创建相册集中管理"）
+     * - [previewIds] 命中媒体的预览 id（最多 4 个，按 created_at 倒序），供"一键创建相册"
+     *   时作为相册初始成员（与 [AlbumSuggestion.previewIds] 同口径，仅预览而非全量 media id）
+     */
+    data class OrganizeSuggestion(
+        val type: String = "",
+        val name: String = "",
+        val mediaCount: Int = 0,
+        val reason: String = "",
+        val previewIds: List<String> = emptyList()
+    )
+
+    /**
+     * V25：GET /api/media/photo-organize-suggest — 照片组织建议。
+     *
+     * 后端分析当前用户媒体库，从 月份/类型/未标签 三个维度给出可供"一键创建相册"
+     * 或批量打标签的组织建议。只读端点，不修改数据。响应：
+     *
+     * `{ suggestions: [{type, name, media_count, reason, preview_ids:[...]}], total }`
+     *
+     * 后端不可用/出错时返回 null（与 [getArchiveSuggest] 同语义——区分"成功但空"
+     * 与"网络失败"），调用方据此决定是否渲染组织建议卡片。
+     *
+     * @return 建议列表（成功，可能为空），或 null（失败）
+     */
+    suspend fun getPhotoOrganizeSuggest(): List<OrganizeSuggestion>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/photo-organize-suggest") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["suggestions"]?.jsonArray ?: JsonArray(emptyList())
+                arr.map { el ->
+                    val o = el.jsonObject
+                    OrganizeSuggestion(
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        reason = o["reason"]?.jsonPrimitive?.contentOrNull ?: "",
+                        previewIds = o["preview_ids"]?.jsonArray?.map { it.jsonPrimitive.content }
+                            ?: emptyList()
+                    )
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getPhotoOrganizeSuggest FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V20：GET /api/media/upload-pattern-analysis — 上传模式分析。
      *
      * 后端基于当前用户全部未删除媒体的 created_at/size/type 统计最常上传的：
