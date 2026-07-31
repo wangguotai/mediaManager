@@ -966,6 +966,127 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V24：活跃度评分卡片 —— 调 /api/media/user-activity-score 显示
+            // 加权总分 + 等级徽章 + 总进度条 + 分维度明细（每行 action emoji + count + points）。
+            // 紧跟智能洞察之后，作为用户活跃度的量化总览；失败显示错误态。
+            var activityScore by remember { mutableStateOf<MediaService.UserActivityScore?>(null) }
+            var activityScoreLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                activityScore = MediaService.getUserActivityScore()
+                activityScoreLoading = false
+            }
+            SectionTitle("📊 活跃度评分", iconRes = Res.drawable.ic_info)
+            if (activityScoreLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (activityScore == null) {
+                Text(
+                    "无法获取活跃度评分",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val a = activityScore!!
+                // 等级颜色：新手灰 / 活跃蓝 / 达人橙 / 专家绿（默认灰）
+                val levelColor = when (a.level) {
+                    "新手" -> MaterialTheme.colorScheme.outline
+                    "活跃" -> Color(0xFF2196F3)
+                    "达人" -> Color(0xFFFF9800)
+                    "专家" -> Color(0xFF4CAF50)
+                    else -> MaterialTheme.colorScheme.outline
+                }
+                // 大字号评分 + 等级徽章
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${a.score}",
+                        fontSize = 40.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = levelColor
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(levelColor)
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            a.level.ifEmpty { "-" },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "共 ${a.totalActions} 次操作",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 总进度条：score / 100（任务明确要求进度条，用 LinearProgressIndicator）
+                LinearProgressIndicator(
+                    progress = { (a.score / 100.0).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = levelColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "分维度明细",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                // 分维度明细：每行 action emoji + 名称 + 次数 + 贡献分
+                a.breakdown.forEach { b ->
+                    val emoji = when (b.action) {
+                        "upload" -> "📤"
+                        "favorite" -> "⭐"
+                        "share" -> "🔗"
+                        "tag" -> "🏷️"
+                        "rename" -> "✏️"
+                        "rotate" -> "🔄"
+                        else -> "•"
+                    }
+                    val name = when (b.action) {
+                        "upload" -> "上传"
+                        "favorite" -> "收藏"
+                        "share" -> "分享"
+                        "tag" -> "打标签"
+                        "rename" -> "重命名"
+                        "rotate" -> "旋转"
+                        else -> b.action
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("$emoji $name", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "${b.count} 次 · +${b.points} 分",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V22：存储健康度卡片 —— 调 /api/media/storage-health 显示评分+等级+比例条+建议。
             // 放在"数据概览"前，作为首屏健康度总览；后端即将提供该端点。
             var storageHealth by remember { mutableStateOf<MediaService.StorageHealth?>(null) }
