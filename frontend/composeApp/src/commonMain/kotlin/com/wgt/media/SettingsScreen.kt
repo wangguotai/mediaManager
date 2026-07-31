@@ -235,8 +235,15 @@ object SettingsState {
         logger.info(TAG, "last backup time saved: $timeMs")
     }
 
-    /** 后端地址默认值——与 MediaService 既有的 10.0.2.2:8080 模拟器回环地址一致。 */
-    private const val DEFAULT_BACKEND_URL = "http://192.168.31.251:8080"
+    /** 后端地址默认值——开发阶段用 localhost:8080 + adb reverse tcp:8080 tcp:8080。 */
+    private const val DEFAULT_BACKEND_URL = "http://localhost:8080"
+
+    /**
+     * V8 开发环境预设凭据——登录界面自动填充，省去每次手输。
+     * 生产环境改为空串即可禁用预填。
+     */
+    const val DEV_DEFAULT_USERNAME = "admin"
+    const val DEV_DEFAULT_PASSWORD = "ab123456"
 }
 
 /**
@@ -656,6 +663,21 @@ fun SettingsScreen(
                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                     modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
                 )
+                if (r.orphanCount > 0) {
+                    Row(
+                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(onClick = {
+                            orphanScope.launch {
+                                val result = MediaService.cleanupOrphan()
+                                if (result != null) {
+                                    orphanResult = MediaService.orphanCheck()
+                                }
+                            }
+                        }) { Text("一键清理", color = MaterialTheme.colorScheme.error) }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))

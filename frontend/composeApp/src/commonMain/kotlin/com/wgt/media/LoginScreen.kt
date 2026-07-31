@@ -72,8 +72,11 @@ fun LoginScreen(
 
     // 服务端地址默认取已存设置；为空时给占位提示，不阻断输入。
     var serverUrl by remember { mutableStateOf(SettingsState.backendUrl) }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+
+    // V8 开发环境预填——地址为默认值或空时自动填入 admin 凭据，省去每次手输。
+    val isDevDefault = serverUrl.isBlank() || serverUrl == "http://localhost:8080"
+    var username by remember { mutableStateOf(if (isDevDefault) SettingsState.DEV_DEFAULT_USERNAME else "") }
+    var password by remember { mutableStateOf(if (isDevDefault) SettingsState.DEV_DEFAULT_PASSWORD else "") }
     var passwordVisible by remember { mutableStateOf(false) }
     var isSubmitting by remember { mutableStateOf(false) }
 
@@ -118,7 +121,7 @@ fun LoginScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 enabled = !isSubmitting,
-                placeholder = { Text("http://192.168.31.251:8080") },
+                placeholder = { Text("http://localhost:8080") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
             )
 

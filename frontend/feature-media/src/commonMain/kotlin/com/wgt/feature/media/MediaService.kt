@@ -1419,6 +1419,25 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/cleanup-orphan — 清理孤立记录，返回清理数。 */
+    suspend fun cleanupOrphan(): Pair<Int, List<String>>? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/cleanup-orphan") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val count = obj["cleaned_count"]?.jsonPrimitive?.intOrNull ?: 0
+                val ids = obj["cleaned_ids"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+                Pair(count, ids)
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "cleanupOrphan FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/sync-status — 同步状态摘要。 */
     suspend fun getSyncStatus(): SyncStatus? {
         return try {
