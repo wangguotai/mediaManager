@@ -1327,6 +1327,62 @@ private fun MyTabContent(
             }
         }
 
+        // V9：连续上传天数卡片——在上传日历热力图之后展示激励统计。
+        // 后端 GET /api/media/upload-streak 返回 null（未铺量/异常）时静默跳过，
+        // 与其他统计卡片保持一致的 null 容错策略。
+        var uploadStreak by remember { mutableStateOf<MediaService.UploadStreak?>(null) }
+        LaunchedEffect(Unit) { uploadStreak = MediaService.getUploadStreak() }
+        uploadStreak?.let { s ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("连续上传", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 🔥 当前连续天数：今天已上传时高亮 primary 色激励，否则按普通色显示。
+                    // current_streak>0 即视作有效 streak（含今天 +1 或昨天截止的连续段）。
+                    val streakActive = s.currentStreak > 0
+                    val streakColor = if (streakActive) MaterialTheme.colorScheme.primary
+                                      else MaterialTheme.colorScheme.onSurfaceVariant
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            "🔥 当前连续 ${s.currentStreak} 天",
+                            fontSize = 14.sp,
+                            fontWeight = if (streakActive) FontWeight.Bold else FontWeight.Normal,
+                            color = streakColor
+                        )
+                        if (s.todayCount > 0) {
+                            Text(
+                                "今日 ${s.todayCount} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 🏆 最长连续记录
+                    Text(
+                        "🏆 最长连续 ${s.longestStreak} 天",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 📅 累计活跃总天数 + 最近上传日期
+                    Text(
+                        "📅 活跃总天数 ${s.totalActiveDays} 天" +
+                            (if (s.lastUploadDate.isNotEmpty()) " · 最近 ${s.lastUploadDate}" else ""),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+
         // V8：拍摄日历（按拍摄日期分组的媒体统计，调 timeline-calendar）
         var timelineCalendar by remember { mutableStateOf<List<MediaService.TimelineCalendarDay>?>(null) }
         LaunchedEffect(Unit) { timelineCalendar = MediaService.getTimelineCalendar() }

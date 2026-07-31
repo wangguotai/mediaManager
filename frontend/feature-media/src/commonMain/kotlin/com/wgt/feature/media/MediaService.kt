@@ -2307,6 +2307,52 @@ object MediaService {
     data class UploadDay(val date: String, val count: Int, val bytes: Long)
 
     /**
+     * V9：连续上传天数信息——配合"我的"Tab 上传日历热力图后展示，激励用户保持上传习惯。
+     *
+     * 后端 GET /api/media/upload-streak 返回：
+     * `{current_streak, longest_streak, total_active_days, last_upload_date, today_count}`。
+     * - [currentStreak] 当前连续上传天数（含今天则 +1，今天未传则归零或保留至昨天的值，以后端为准）。
+     * - [longestStreak] 历史最长连续天数。
+     * - [totalActiveDays] 累计有上传记录的独立天数。
+     * - [lastUploadDate] 最近一次上传日期（"YYYY-MM-DD"）。
+     * - [todayCount] 今天已上传数量（0 表示今天尚未上传）。
+     */
+    data class UploadStreak(
+        val currentStreak: Int = 0,
+        val longestStreak: Int = 0,
+        val totalActiveDays: Int = 0,
+        val lastUploadDate: String = "",
+        val todayCount: Int = 0
+    )
+
+    /**
+     * V9：GET /api/media/upload-streak — 获取连续上传天数统计。
+     *
+     * 解析宽容：缺字段回退 0/空串（[contentOrNull]），保证后端字段增减不破坏前端。
+     * 失败（HTTP 非 200 / 网络异常）返回 null，调用方按 null 静默跳过不渲染卡片。
+     */
+    suspend fun getUploadStreak(): UploadStreak? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/upload-streak") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                UploadStreak(
+                    currentStreak = o["current_streak"]?.jsonPrimitive?.intOrNull ?: 0,
+                    longestStreak = o["longest_streak"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalActiveDays = o["total_active_days"]?.jsonPrimitive?.intOrNull ?: 0,
+                    lastUploadDate = o["last_upload_date"]?.jsonPrimitive?.contentOrNull ?: "",
+                    todayCount = o["today_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUploadStreak FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/timeline-calendar — 按拍摄日期分组的媒体统计。
      *
      * 后端返回 `{days: [{date, count, type}], total_days, total_media}`，
