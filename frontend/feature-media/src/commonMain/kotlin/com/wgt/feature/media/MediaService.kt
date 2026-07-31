@@ -1419,6 +1419,25 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/album/sort-by-date — 按日期排序相册内媒体。 */
+    suspend fun sortAlbumByDate(albumId: String, order: String): Boolean {
+        return try {
+            val body = buildJsonObject {
+                put("album_id", albumId)
+                put("order", order)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/sort-by-date") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "sortAlbumByDate FAILED: ${e.message}")
+            false
+        }
+    }
+
     /** V8：POST /api/media/auto-tag — 按文件名自动打标签，返回标签数。 */
     suspend fun autoTag(): Int {
         return try {

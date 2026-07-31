@@ -698,6 +698,20 @@ private fun AlbumDetailPage(
                             }
                         )
                     }
+                    // V8：按日期排序按钮
+                    val sortScope = rememberCoroutineScope()
+                    IconButton(onClick = {
+                        sortScope.launch {
+                            if (MediaService.sortAlbumByDate(albumId, "desc")) {
+                                viewModel.loadAlbumDetail(albumId)
+                            }
+                        }
+                    }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_sort),
+                            contentDescription = "按日期排序"
+                        )
+                    }
                     // V7 §2.3：分享相册按钮
                     var showShareDialog by remember { mutableStateOf(false) }
                     IconButton(onClick = { showShareDialog = true }) {
