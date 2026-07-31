@@ -220,6 +220,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/search", s.handleMediaTagSearch)
 	// V8：批量打标签
 	s.mux.HandleFunc("/api/media/tag/batch-add", s.handleMediaTagBatchAdd)
+	// V8：批量移除标签
+	s.mux.HandleFunc("/api/media/tag/batch-remove", s.handleMediaTagBatchRemove)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -2868,9 +2870,50 @@ func (s *Server) handleMediaTagBatchAdd(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tag":           req.TagName,
-		"tagged_count":  count,
-		"total":         len(req.MediaIDs),
+		"tag":          req.TagName,
+		"tagged_count": count,
+		"total":        len(req.MediaIDs),
+	})
+}
+
+// handleMediaTagBatchRemove V8：POST /api/media/tag/batch-remove — 批量移除标签。
+// 请求体: { media_ids: [...], tag_name: "xxx" }
+func (s *Server) handleMediaTagBatchRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+		TagName  string   `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.MediaIDs) == 0 || req.TagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids and tag_name required"})
+		return
+	}
+	count := 0
+	for _, mediaID := range req.MediaIDs {
+		if err := s.store.RemoveMediaTag(r.Context(), uid, mediaID, req.TagName); err == nil {
+			count++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tag":            req.TagName,
+		"removed_count":  count,
+		"total":          len(req.MediaIDs),
 	})
 }
 
