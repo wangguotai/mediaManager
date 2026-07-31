@@ -230,6 +230,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 	// V8：用户存储配额
 	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
+	// V8：最近上传的媒体
+	s.mux.HandleFunc("/api/media/recent-uploads", s.handleMediaRecentUploads)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3069,6 +3071,62 @@ func (s *Server) handleUserQuota(w http.ResponseWriter, r *http.Request) {
 		"used_mb":       float64(usedBytes) / (1024 * 1024),
 		"free_bytes":    defaultQuotaBytes - usedBytes,
 		"usage_percent": percent,
+	})
+}
+
+// handleMediaRecentUploads V8：GET /api/media/recent-uploads — 最近上传的媒体。
+// 返回最新 5 个媒体（完整 metadata），按 created_at 倒序。
+func (s *Server) handleMediaRecentUploads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	limit := 5
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 过滤已删除 + 按 CreatedAt 倒序
+	var active []*storage.Media
+	for _, m := range mediaList {
+		if !m.Deleted {
+			active = append(active, m)
+		}
+	}
+	// 按 CreatedAt 倒序排序
+	for i := 0; i < len(active)-1; i++ {
+		for j := i + 1; j < len(active); j++ {
+			if active[j].CreatedAt.After(active[i].CreatedAt) {
+				active[i], active[j] = active[j], active[i]
+			}
+		}
+	}
+	if len(active) > limit {
+		active = active[:limit]
+	}
+	items := make([]map[string]any, 0, len(active))
+	for _, m := range active {
+		items = append(items, map[string]any{
+			"id":         m.ID,
+			"filename":   m.Filename,
+			"type":       m.Type,
+			"size":       m.Size,
+			"created_at": m.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items,
+		"count": len(items),
 	})
 }
 
