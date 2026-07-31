@@ -166,6 +166,8 @@ func (s *Server) registerRoutes() {
 	// V9：按拍摄日期（taken_at）分组的日历视图，不限时间范围。区别于 upload-calendar
 	// （基于 created_at 的最近 30 天上传热力图）。供前端日历视图渲染每天照片/视频数量。
 	s.mux.HandleFunc("/api/media/timeline-calendar", s.handleMediaTimelineCalendar)
+	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
+	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -3410,6 +3412,165 @@ func (s *Server) handleMediaTimelineCalendar(w http.ResponseWriter, r *http.Requ
 		"days":        rows,
 		"total_days":  totalDays,
 		"total_media": totalMedia,
+	})
+}
+
+// handleMediaStatSummary V9：GET /api/media/stat-summary — 一站式统计汇总。
+//
+// 合并前端"我的"Tab 多个卡片所需的最常用统计，一次请求返回，避免逐卡片多次调用
+// （storage-breakdown / file-types / tag.stats / audit-log/stats / user-quota /
+// favorites / albums / share/list / trash 等）。
+//
+// 各子统计 best-effort：单条 Store 调用失败仅令对应字段为空/null，不影响整体 200。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "summary": {total_count, total_bytes, image_count, video_count, live_count},
+//	  "tags":     [{tag, count}],      // top 5
+//	  "audit":    [{action, count}],
+//	  "quota":    {quota_bytes, used_bytes, usage_percent},
+//	  "favorites": N,
+//	  "shares":    N,
+//	  "albums":    N,
+//	  "trash":     N,
+//	  "recent_uploads": [{id, filename, type, created_at}]  // top 3
+//	}
+func (s *Server) handleMediaStatSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// summary + recent_uploads 由 ListMediaByUser 一次拉取派生（该方法返回未软删
+	// 媒体且已按 created_at DESC 排序，故前 3 条即最近上传）。
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 handleUserQuota 一致
+	const recentUploadLimit = 3
+
+	var summary map[string]any
+	var recentUploads []map[string]any
+	var usedBytes int64
+	if mediaList, err := s.store.ListMediaByUser(r.Context(), uid); err != nil {
+		slog.Warn("stat-summary: list media failed", "error", err)
+	} else {
+		var total int
+		var imgCount, vidCount, liveCount int
+		for _, m := range mediaList {
+			total++
+			usedBytes += m.Size
+			switch m.Type {
+			case "IMAGE":
+				imgCount++
+			case "VIDEO":
+				vidCount++
+			case "LIVE_PHOTO":
+				liveCount++
+			}
+		}
+		summary = map[string]any{
+			"total_count":  total,
+			"total_bytes":  usedBytes,
+			"image_count":  imgCount,
+			"video_count":  vidCount,
+			"live_count":   liveCount,
+		}
+		n := len(mediaList)
+		if n > recentUploadLimit {
+			n = recentUploadLimit
+		}
+		recentUploads = make([]map[string]any, 0, n)
+		for i := 0; i < n; i++ {
+			m := mediaList[i]
+			recentUploads = append(recentUploads, map[string]any{
+				"id":         m.ID,
+				"filename":   m.Filename,
+				"type":       m.Type,
+				"created_at": m.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	}
+
+	// tags：取 top 5（TagStats 已按 count DESC 返回）。
+	var topTags []map[string]any
+	if tagStats, err := s.store.TagStats(r.Context(), uid); err != nil {
+		slog.Warn("stat-summary: tag stats failed", "error", err)
+	} else {
+		n := len(tagStats)
+		if n > 5 {
+			n = 5
+		}
+		topTags = make([]map[string]any, 0, n)
+		for i := 0; i < n; i++ {
+			topTags = append(topTags, tagStats[i])
+		}
+	}
+
+	// audit：按操作类型聚合。
+	var auditStats []map[string]any
+	if stats, err := s.store.AuditLogStats(r.Context(), uid); err != nil {
+		slog.Warn("stat-summary: audit stats failed", "error", err)
+	} else {
+		auditStats = stats
+	}
+
+	// quota：复用 summary 阶段算出的 usedBytes（ListMediaByUser 失败时 usedBytes=0）。
+	usagePercent := 0.0
+	if defaultQuotaBytes > 0 {
+		usagePercent = float64(usedBytes) / float64(defaultQuotaBytes) * 100
+	}
+	quota := map[string]any{
+		"quota_bytes":   defaultQuotaBytes,
+		"used_bytes":    usedBytes,
+		"usage_percent": usagePercent,
+	}
+
+	// shares：当前用户创建的分享链接数。
+	var shareCount int
+	if tokens, err := s.store.ListShareTokensByUser(r.Context(), uid); err != nil {
+		slog.Warn("stat-summary: list share tokens failed", "error", err)
+	} else {
+		shareCount = len(tokens)
+	}
+
+	// trash：回收站（deleted=1）总条数。
+	var trashCount int
+	if n, err := s.store.CountTrashByUser(r.Context(), uid); err != nil {
+		slog.Warn("stat-summary: count trash failed", "error", err)
+	} else {
+		trashCount = n
+	}
+
+	// favorites / albums：来自 mediaSvc 的 provider 接口（与 handleMediaFavorites /
+	// handleAlbumList 一致），provider 不支持时记 0 且不阻断。
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites(uid))
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary":        summary,
+		"tags":           topTags,
+		"audit":          auditStats,
+		"quota":          quota,
+		"favorites":      favoriteCount,
+		"shares":         shareCount,
+		"albums":         albumCount,
+		"trash":          trashCount,
+		"recent_uploads": recentUploads,
 	})
 }
 
