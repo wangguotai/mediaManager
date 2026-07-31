@@ -254,6 +254,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
 	// V8：同步状态摘要
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
+	// V8：所有相册摘要
+	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3705,6 +3707,39 @@ func (s *Server) handleMediaSyncStatus(w http.ResponseWriter, r *http.Request) {
 		"total_bytes":      totalBytes,
 		"last_update":      lastUpdateStr,
 		"server_time":      time.Now().Format(time.RFC3339),
+	})
+}
+
+// handleAlbumAllSummary V8：GET /api/media/album/all-summary — 所有相册的摘要列表。
+func (s *Server) handleAlbumAllSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+	items := make([]map[string]any, 0, len(albums))
+	for _, a := range albums {
+		items = append(items, map[string]any{
+			"id":            a.ID,
+			"name":          a.Name,
+			"media_count":   len(a.MediaIDs),
+			"cover_media_id": a.CoverMediaID,
+			"created_at":    a.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"albums": items,
+		"total":  len(items),
 	})
 }
 
