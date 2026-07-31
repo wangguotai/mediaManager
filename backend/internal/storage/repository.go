@@ -336,6 +336,42 @@ func (s *Store) SetMediaRotation(ctx context.Context, userID, mediaID string, ro
 	return nil
 }
 
+// BatchSetMediaRotation 批量旋转媒体（单条 UPDATE，区别于逐条 SetMediaRotation）。
+// 把指定 mediaIDs 中属于 userID 的记录 orientation 置为 rotation，刷新 updated_at 使
+// 变更进入增量同步流。返回实际更新的行数（未命中 / 不属于当前用户均不计入，与
+// BatchRestoreMedia 同样的越权防护语义——不泄露 media_id 是否存在）。mediaIDs 为空
+// 或 userID 为空直接返回 (0, nil)。
+//
+// rotation 应为 0/90/180/270 之一（EXIF orientation 语义）；本方法不做值域校验，由调用方
+// （handler）负责，保持 storage 层只管持久化（与 SetMediaRotation 一致）。
+//
+// 防横向越权：WHERE 含 user_id 双键，非己有或不存在均不计入计数（不区分，避免泄露）。
+// SQL 注入防护：IN 列表用 strings.Repeat("?,", n) 生成等量占位符，mediaIDs 作为参数
+// 逐个绑定（不拼接进 SQL 文本），参考 BatchRestoreMedia 的参数化模式。
+func (s *Store) BatchSetMediaRotation(ctx context.Context, userID string, mediaIDs []string, rotation int) (int, error) {
+	if userID == "" || len(mediaIDs) == 0 {
+		return 0, nil
+	}
+	// 构造 IN (?, ?, ...) 占位符：n 个 "?" 用 "," 连接，外层包 "IN (" ")"。
+	placeholders := strings.Repeat("?,", len(mediaIDs))
+	placeholders = placeholders[:len(placeholders)-1] // 去掉末尾多余的 ","
+	args := make([]any, 0, len(mediaIDs)+3)
+	args = append(args, rotation)               // orientation = ?
+	args = append(args, timeToVal(time.Now()))  // updated_at = ?
+	for _, id := range mediaIDs {               // id IN (...) — 逐个追加，避免 []string→[]any 的 ... 展开类型不符
+		args = append(args, id)
+	}
+	args = append(args, userID) // AND user_id = ?
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE "media" SET orientation = ?, updated_at = ? WHERE id IN (`+placeholders+`) AND user_id = ?`,
+		args...)
+	if err != nil {
+		return 0, fmt.Errorf("batch set media rotation: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // MarkDeleted 软删除一行 media（deleted=1），刷新 updated_at。未命中返回 ErrNotFound。
 // 软删除保留数据，与现有 DeleteMedia（物理删文件）解耦：SQL 软删 + 磁盘文件清理
 // 可由后续任务分别处理。

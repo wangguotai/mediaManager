@@ -149,6 +149,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
 	// V9：媒体旋转（更新 EXIF orientation / 旋转标记）
 	s.mux.HandleFunc("/api/media/rotate", s.handleMediaRotate)
+	// V9：批量旋转多个媒体（单条 UPDATE，返回实际旋转计数）
+	s.mux.HandleFunc("/api/media/batch-rotate", s.handleMediaBatchRotate)
 	// V7：最近活动（合并最近上传/收藏/分享）
 	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
 	// V7：存储增长趋势（按月份累计）
@@ -3056,6 +3058,73 @@ func (s *Server) handleMediaRotate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"rotation": req.Rotation,
+	})
+}
+
+// handleMediaBatchRotate 处理 POST /api/media/batch-rotate，
+// 批量旋转多个媒体（更新 media.orientation 列，EXIF orientation 语义：0/90/180/270）。
+//
+// 与 POST /api/media/rotate 的区别：rotate 逐条更新单条媒体；本端点用单条
+// UPDATE ... WHERE id IN (...) AND user_id=? 一次性旋转，仅返回总旋转计数（不区分逐条
+// 结果），适合前端"全选旋转"等不关心明细的场景。
+//
+// 请求体: { media_ids: ["id1","id2",...], rotation: 90 }
+// 校验：rotation 必须为 0/90/180/270 之一；media_ids 非空且不超过 maxBatchIDs（500）。
+// 防横向越权：BatchSetMediaRotation 内部按 (id, user_id) 双键校验，非己有或不存在均
+// 不计入计数（不区分，避免泄露 media_id 是否存在）。
+// 审计日志记一条 "rotate"（mediaID 留空，detail 注明批量旋转角度与数量），与
+// batch-restore 等批量操作一致。响应：{"status":"success","rotated_count":N}。
+func (s *Server) handleMediaBatchRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+		Rotation int      `json:"rotation"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids required"})
+		return
+	}
+	if len(req.MediaIDs) > maxBatchIDs {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too many media_ids in one request"})
+		return
+	}
+	// 校验旋转角度为合法值（0/90/180/270），非法直接 400。
+	switch req.Rotation {
+	case 0, 90, 180, 270:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rotation must be one of 0/90/180/270"})
+		return
+	}
+
+	count, err := s.store.BatchSetMediaRotation(r.Context(), uid, req.MediaIDs, req.Rotation)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 审计日志：best-effort，失败不影响旋转结果（与 handleMediaRotate / batch-restore 等一致）。
+	_ = s.store.AddAuditLog(r.Context(), uid, "rotate", "", fmt.Sprintf("batch rotate %d media to %d degrees", count, req.Rotation))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"rotated_count": count,
 	})
 }
 
