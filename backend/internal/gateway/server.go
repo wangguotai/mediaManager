@@ -228,6 +228,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
+	// V8：用户存储配额
+	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3024,6 +3026,49 @@ func (s *Server) handleMediaTagDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tag":           req.TagName,
 		"deleted_count": count,
+	})
+}
+
+// handleUserQuota V8：GET /api/media/user-quota — 返回用户存储配额信息。
+// 默认配额 10GB（10 * 1024^3 字节）。
+func (s *Server) handleUserQuota(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var usedBytes int64
+	for _, m := range mediaList {
+		if !m.Deleted {
+			usedBytes += m.Size
+		}
+	}
+	percent := 0.0
+	if defaultQuotaBytes > 0 {
+		percent = float64(usedBytes) / float64(defaultQuotaBytes) * 100
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"quota_bytes":   defaultQuotaBytes,
+		"quota_gb":      float64(defaultQuotaBytes) / (1024 * 1024 * 1024),
+		"used_bytes":    usedBytes,
+		"used_mb":       float64(usedBytes) / (1024 * 1024),
+		"free_bytes":    defaultQuotaBytes - usedBytes,
+		"usage_percent": percent,
 	})
 }
 
