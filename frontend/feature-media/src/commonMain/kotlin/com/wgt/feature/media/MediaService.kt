@@ -1244,6 +1244,24 @@ object MediaService {
         val createdAt: String
     )
 
+    /**
+     * V7：GET /api/media/search-suggestions?q=xxx — 搜索建议
+     */
+    suspend fun getSearchSuggestions(q: String): List<String>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/search-suggestions?q=${q.encodeURLQueryComponent()}") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["suggestions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSearchSuggestions FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     // ---- 解析 ----
 
     /**
