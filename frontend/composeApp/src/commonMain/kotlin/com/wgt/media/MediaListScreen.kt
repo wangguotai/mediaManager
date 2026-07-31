@@ -3024,6 +3024,57 @@ private fun MyTabContent(
         // V9：标签云卡片结束
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V9：标签关联卡片——调 getTagNetwork 显示标签关联对（简化文字列表，最多5对）。
+        // 后端 edges 未按 weight 排序，前端取 top5 前自行按 weight 倒序。
+        var tagNetwork by remember { mutableStateOf<MediaService.TagNetwork?>(null) }
+        LaunchedEffect(Unit) { tagNetwork = MediaService.getTagNetwork() }
+        tagNetwork?.let { net ->
+            if (net.edges.isNotEmpty()) {
+                val topEdges = net.edges.sortedByDescending { it.weight }.take(5)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签关联",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 ${net.totalEdges} 对关联，显示前 ${topEdges.size} 对",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        topEdges.forEach { edge ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "#${edge.source} ↔ #${edge.target}",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "weight ${edge.weight}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Text(
             "我的",
             fontWeight = FontWeight.Bold,

@@ -2900,6 +2900,69 @@ object MediaService {
     data class TagPair(val tagA: String, val tagB: String, val count: Int)
 
     /**
+     * V9：GET /api/media/tag-network — 标签网络图数据（节点+边）。
+     *
+     * 与 [getTagCoOccurrence] 同源数据但输出图结构：标签作为节点（[TagNode.count]
+     * =关联媒体数），共现关系作为边（[TagEdge.weight] =同时拥有两标签的 media 数）。
+     * 响应: `{nodes: [{id, count}], edges: [{source, target, weight}], total_nodes, total_edges}`。
+     *
+     * 注意：后端 edges 按标签遍历顺序（i<j）输出，**未按 weight 排序**，故前端
+     * 取 top-N 前需自行按 weight 倒序（见 [MediaListScreen] 标签关联卡片）。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（无 serialization 编译器插件依赖）。
+     *
+     * @return 标签网络（节点+边+汇总数）；HTTP 非 200 或网络异常返回 null（调用方按空态跳过）。
+     */
+    suspend fun getTagNetwork(): TagNetwork? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-network") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val nodes = o["nodes"]?.jsonArray?.mapNotNull { item ->
+                    val n = item.jsonObject
+                    TagNode(
+                        id = n["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = n["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                val edges = o["edges"]?.jsonArray?.mapNotNull { item ->
+                    val e = item.jsonObject
+                    TagEdge(
+                        source = e["source"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        target = e["target"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        weight = e["weight"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                TagNetwork(
+                    nodes = nodes,
+                    edges = edges,
+                    totalNodes = o["total_nodes"]?.jsonPrimitive?.intOrNull ?: nodes.size,
+                    totalEdges = o["total_edges"]?.jsonPrimitive?.intOrNull ?: edges.size
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagNetwork FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V9：标签网络节点。 */
+    data class TagNode(val id: String, val count: Int)
+
+    /** V9：标签网络边（关联对）。 */
+    data class TagEdge(val source: String, val target: String, val weight: Int)
+
+    /** V9：标签网络图数据（GET /api/media/tag-network）。 */
+    data class TagNetwork(
+        val nodes: List<TagNode>,
+        val edges: List<TagEdge>,
+        val totalNodes: Int,
+        val totalEdges: Int
+    )
+
+    /**
      * V8：GET /api/media/mime-type-stats — 按 MIME 类型详细统计。
      *
      * 与 [getFileTypes]（`/api/media/file-types`）的区别：本端点额外提供
