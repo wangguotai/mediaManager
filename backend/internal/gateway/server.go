@@ -334,6 +334,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/search-history", s.handleMediaSearchHistory)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
+	// V18：批量合并多个相册到第一个（album_ids[0] 为目标，其余为源）
+	s.mux.HandleFunc("/api/media/album/batch-merge", s.handleAlbumBatchMerge)
 	// V8：自动设置相册封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover", s.handleAlbumAutoCover)
 	// V8：按日期排序相册内媒体
@@ -6234,6 +6236,101 @@ func (s *Server) handleAlbumMerge(w http.ResponseWriter, r *http.Request) {
 		"target_album_id": req.TargetAlbumID,
 		"deleted_source":  req.SourceAlbumID,
 	})
+}
+
+// handleAlbumBatchMerge V18：POST /api/media/album/batch-merge — 批量合并多个相册到第一个。
+// 请求体: { album_ids: ["id1","id2","id3"] }
+// album_ids[0] 是目标相册，album_ids[1:] 是源相册。
+// 逐个把源相册的 MediaIDs BatchAddToAlbum 到目标，然后删除源相册。
+// 返回 { status, merged_count, target_album_id, deleted_sources: [...] }
+func (s *Server) handleAlbumBatchMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.AlbumIDs) < 2 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids must contain at least 2 ids"})
+		return
+	}
+	targetID := req.AlbumIDs[0]
+	if provider.GetAlbum(uid, targetID) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "target album not found"})
+		return
+	}
+	// 去重 & 校验源相册 id 不能等于目标
+	seen := make(map[string]bool, len(req.AlbumIDs))
+	seen[targetID] = true
+	var sourceIDs []string
+	for _, id := range req.AlbumIDs[1:] {
+		if id == "" || id == targetID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		sourceIDs = append(sourceIDs, id)
+	}
+	if len(sourceIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no valid source albums to merge"})
+		return
+	}
+
+	mergedCount := 0
+	deletedSources := make([]string, 0, len(sourceIDs))
+	failedSources := make([]string, 0)
+	for _, srcID := range sourceIDs {
+		source := provider.GetAlbum(uid, srcID)
+		if source == nil {
+			// 源相册不存在，跳过（不中断整体流程）
+			failedSources = append(failedSources, srcID)
+			continue
+		}
+		if len(source.MediaIDs) > 0 {
+			added, addErr := provider.BatchAddToAlbum(uid, targetID, source.MediaIDs)
+			if addErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error":          addErr.Error(),
+					"failed_source":  srcID,
+					"target_album_id": targetID,
+				})
+				return
+			}
+			mergedCount += added
+		}
+		// 删除源相册
+		_ = provider.DeleteAlbum(uid, srcID)
+		// 级联清理源相册共享记录
+		if s.store != nil {
+			_ = s.store.DeleteAlbumShare(r.Context(), srcID, uid, "")
+		}
+		deletedSources = append(deletedSources, srcID)
+	}
+
+	resp := map[string]any{
+		"status":          "success",
+		"merged_count":    mergedCount,
+		"target_album_id": targetID,
+		"deleted_sources": deletedSources,
+	}
+	if len(failedSources) > 0 {
+		resp["failed_sources"] = failedSources // 源相册不存在被跳过时列出
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAlbumAutoCover V8：POST /api/media/album/auto-cover — 自动设置相册封面。
