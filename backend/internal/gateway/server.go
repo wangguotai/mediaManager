@@ -253,6 +253,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
 	// V8：批量重命名标签
 	s.mux.HandleFunc("/api/media/tag/batch-rename", s.handleMediaTagBatchRename)
+	// V8：批量导入标签（从外部系统迁移标签数据，INSERT OR IGNORE 幂等）
+	s.mux.HandleFunc("/api/media/tag/import", s.handleMediaTagImport)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 	// V8：标签自动补全
@@ -3963,6 +3965,100 @@ func (s *Server) handleMediaTagBatchRename(w http.ResponseWriter, r *http.Reques
 		"status":        status,
 		"renamed_count": renamedCount,
 		"failed":        failed,
+	})
+}
+// handleMediaTagImport V8：POST /api/media/tag/import — 批量导入标签。
+// 用于从外部系统迁移标签数据。请求体: { tags: [{media_id, tag_name}, ...] }
+// 遍历调 s.store.AddMediaTag(ctx, uid, media_id, tag_name)；底层 INSERT OR IGNORE 幂等。
+// 单批最多 500 条。AddMediaTag 返回 nil 不区分"新增"与"忽略已存在"，故导入前先
+// 查各媒体的已存标签集合用于判重：命中已存→skipped；否则 AddMediaTag 后计 imported。
+// 响应: { status, imported_count, skipped_count, total }
+func (s *Server) handleMediaTagImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		Tags []struct {
+			MediaID string `json:"media_id"`
+			TagName string `json:"tag_name"`
+		} `json:"tags"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.Tags) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tags required"})
+		return
+	}
+	if len(req.Tags) > 500 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 500 tags per batch"})
+		return
+	}
+	ctx := r.Context()
+	imported, skipped := 0, 0
+	// 按 media_id 批量预查已存标签集合，避免逐条查库；同一媒体多个标签一次取回。
+	mediaIDs := make(map[string]struct{}, len(req.Tags))
+	for _, t := range req.Tags {
+		mediaIDs[t.MediaID] = struct{}{}
+	}
+	existing := make(map[string]map[string]struct{}, len(mediaIDs))
+	for mid := range mediaIDs {
+		tags, err := s.store.ListMediaTags(ctx, uid, mid)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(tags))
+		for _, t := range tags {
+			set[t] = struct{}{}
+		}
+		existing[mid] = set
+	}
+	for _, item := range req.Tags {
+		mediaID := strings.TrimSpace(item.MediaID)
+		tagName := strings.TrimSpace(item.TagName)
+		if mediaID == "" || tagName == "" {
+			skipped++
+			continue
+		}
+		// 幂等判重：该媒体已挂此标签则跳过，AddMediaTag 本身 INSERT OR IGNORE 也兜底。
+		if set, ok := existing[mediaID]; ok {
+			if _, hit := set[tagName]; hit {
+				skipped++
+				continue
+			}
+		}
+		if err := s.store.AddMediaTag(ctx, uid, mediaID, tagName); err != nil {
+			skipped++
+			continue
+		}
+		// 成功插入后登记到本地集合，同批内重复 (media_id,tag_name) 也会被正确计入 skipped。
+		if existing[mediaID] == nil {
+			existing[mediaID] = make(map[string]struct{})
+		}
+		existing[mediaID][tagName] = struct{}{}
+		imported++
+	}
+	status := "success"
+	if imported == 0 {
+		status = "skipped"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          status,
+		"imported_count":  imported,
+		"skipped_count":   skipped,
+		"total":           len(req.Tags),
 	})
 }
 // handleMediaTagDelete V8：POST /api/media/tag/delete — 删除标签。
