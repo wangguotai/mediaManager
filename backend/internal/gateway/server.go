@@ -271,6 +271,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/move-media", s.handleAlbumMoveMedia)
 	// V8：跨相册复制照片（source 不删）
 	s.mux.HandleFunc("/api/media/album/copy-media", s.handleAlbumCopyMedia)
+	// V9：批量创建分享链接——一次为多个 media 各生成一个独立分享 token。
+	// 走 /api/media/ 前缀（authMiddleware 自动鉴权），handler 用 userIDFromContext 取 uid。
+	s.mux.HandleFunc("/api/media/batch-share", s.handleMediaBatchShare)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：审计日志——列表/统计/记录
@@ -4179,6 +4182,110 @@ func (s *Server) handleAlbumCopyMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":       "success",
 		"copied_count": copied,
+	})
+}
+
+// handleMediaBatchShare V9：POST /api/media/batch-share — 批量创建分享链接。
+//
+// 请求体: {"media_ids": ["id1","id2",...]}
+// 对每个 media_id 各创建一个独立分享 token（1 个 media → 1 个 share link），
+// 简化版：默认不设密码，7 天过期。
+//
+// 鉴权：走 /api/media/ 前缀（authMiddleware 自动校验），handler 用 userIDFromContext 取 uid。
+// 单批上限 50 个 media_ids，防滥用。每个 media_id 均校验格式安全 + 归属当前用户
+// （含 deleted=false 检查，复用 handleShareCreate 的越权防护策略）。
+//
+// 响应: {"links": [{"media_id":..., "token":..., "url":...}], "created_count": N}
+// 其中任一 media 创建失败即整体 400/403/500 返回（事务性语义，避免半成品）。
+func (s *Server) handleMediaBatchShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "share requires storage backend"})
+		return
+	}
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids must not be empty"})
+		return
+	}
+	// 单批最多 50 个（batchShareMaxIDs），比单次分享上限 shareMaxMediaIDs(128) 更保守，
+	// 因为批量端点每个 media 各落一条 ShareToken，写放大更显著。
+	const batchShareMaxIDs = 50
+	if len(req.MediaIDs) > batchShareMaxIDs {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("too many media_ids (max %d)", batchShareMaxIDs)})
+		return
+	}
+	// 校验每个 media_id 格式安全 + 归属当前用户 + 未软删（与 handleShareCreate 一致）。
+	// 任一不合法即整体拒绝——不部分创建，避免向客户端返回混杂的成败结果。
+	for _, mid := range req.MediaIDs {
+		if mid == "" || strings.Contains(mid, "..") || strings.Contains(mid, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id in list"})
+			return
+		}
+		m, err := s.store.GetMedia(r.Context(), mid)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "media not accessible"})
+			return
+		}
+		if m.UserID != uid || m.Deleted {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "media not accessible"})
+			return
+		}
+	}
+
+	// 默认 7 天过期（简化版：不设密码）。
+	const batchShareExpiresDays = 7
+	expiresAt := time.Now().Add(time.Duration(batchShareExpiresDays) * 24 * time.Hour)
+
+	type shareLink struct {
+		MediaID string `json:"media_id"`
+		Token   string `json:"token"`
+		URL     string `json:"url"`
+	}
+	links := make([]shareLink, 0, len(req.MediaIDs))
+	for _, mid := range req.MediaIDs {
+		// 每个 media 各序列化成单元素 JSON 数组落库，保持与 ShareToken.MediaIDs 字段
+		// （JSON 数组字符串）的格式一致，公开访问端点解析逻辑无需改动。
+		mediaIDsJSON, err := json.Marshal([]string{mid})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "marshal media_ids: " + err.Error()})
+			return
+		}
+		st := &storage.ShareToken{
+			Token:     generateShareToken(),
+			UserID:    uid,
+			MediaIDs:  string(mediaIDsJSON),
+			ExpiresAt: expiresAt,
+		}
+		if err := s.store.CreateShareToken(r.Context(), st); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "create share token: " + err.Error()})
+			return
+		}
+		links = append(links, shareLink{
+			MediaID: mid,
+			Token:   st.Token,
+			URL:     "/share/" + st.Token,
+		})
+	}
+	_ = s.store.AddAuditLog(r.Context(), uid, "share", "", fmt.Sprintf("batch created %d share links", len(links)))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"links":        links,
+		"created_count": len(links),
 	})
 }
 
