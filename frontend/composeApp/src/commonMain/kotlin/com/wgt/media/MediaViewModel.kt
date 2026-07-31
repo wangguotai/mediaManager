@@ -1280,6 +1280,28 @@ class MediaViewModel {
         }
     }
 
+    /**
+     * V8：批量旋转选中项——调后端 /api/media/batch-rotate（顺时针 90°）。
+     *
+     * 成功后清空选择并刷新当前云端列表（拿到新 orientation 重新渲染）。
+     * 仅对云端源（BACKEND）有意义，本地相册旋转不走后端。
+     */
+    fun batchRotateSelectedMedia(rotation: Int = 90) {
+        if (selectedMediaIds.isEmpty()) return
+        val ids = selectedMediaIds.toList()
+        viewModelScope.launch {
+            val ok = MediaService.batchRotateMedia(ids, rotation)
+            if (ok) {
+                errorMessage = "已旋转 ${ids.size} 项"
+                deselectAll()
+                // 刷新云端列表以拿到新 orientation
+                loadCloudMediaList(forceRefresh = true)
+            } else {
+                errorMessage = "批量旋转失败，请稍后重试"
+            }
+        }
+    }
+
 
     /**
      * V8：批量重命名选中项——调后端 /api/media/batch-rename。

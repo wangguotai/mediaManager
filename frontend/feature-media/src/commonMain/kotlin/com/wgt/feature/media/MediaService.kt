@@ -422,6 +422,37 @@ object MediaService {
     }
 
     /**
+     * V8：POST /api/media/batch-rotate — 批量旋转媒体（顺时针 90° 步进）。
+     *
+     * 与 [rotateMedia] 同语义，但一次提交多个 media_id；后端仅持久化各自旋转标记
+     * （media.orientation），不改底层文件。调用成功后需刷新列表以拿到新 orientation。
+     *
+     * @param mediaIds 目标媒体 ID 列表
+     * @param rotation 旋转角度，后端仅接受 0/90/180/270，非法值返回 400
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun batchRotateMedia(mediaIds: List<String>, rotation: Int): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-rotate") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_ids", Json.encodeToJsonElement(mediaIds))
+                    put("rotation", JsonPrimitive(rotation))
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info(
+                "MediaService",
+                "batchRotateMedia count=${mediaIds.size} rotation=$rotation status=${response.status}"
+            )
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRotateMedia FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * 上传媒体
      *
      * 协议：POST /api/media/upload，body = 文件原始字节流（raw bytes），

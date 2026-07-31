@@ -500,7 +500,12 @@ fun MediaListScreen(
                     onBatchUnfavorite = {
                         // V8：批量取消收藏选中项
                         viewModel.batchRemoveFavoritesFromSelected()
-                    }
+                    },
+                    onBatchRotate = {
+                        // V8：批量旋转选中项（顺时针 90°）
+                        viewModel.batchRotateSelectedMedia(90)
+                    },
+                    showBatchRotateButton = selectedTab != 0 // V8：仅云端源显示批量旋转
                 )
             } else {
                 // 正常模式：底部导航栏（MIUI 风格）
@@ -3430,6 +3435,7 @@ fun SelectionBottomBar(
     onBatchRename: () -> Unit = {},
     onBatchTag: () -> Unit = {},
     onBatchUnfavorite: () -> Unit = {},
+    onBatchRotate: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
@@ -3437,7 +3443,8 @@ fun SelectionBottomBar(
     showShareLinkButton: Boolean = false,
     showBatchRenameButton: Boolean = false,
     showBatchTagButton: Boolean = false,
-    showBatchUnfavoriteButton: Boolean = false
+    showBatchUnfavoriteButton: Boolean = false,
+    showBatchRotateButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3507,6 +3514,16 @@ fun SelectionBottomBar(
                 Icon(
                     painterResource(Res.drawable.ic_tag),
                     contentDescription = "批量打标签"
+                )
+            }
+        }
+
+        // V8：批量旋转（仅云端源显示，顺时针 90°）
+        if (showBatchRotateButton) {
+            IconButton(onClick = onBatchRotate) {
+                Icon(
+                    painterResource(Res.drawable.ic_refresh),
+                    contentDescription = "批量旋转"
                 )
             }
         }
