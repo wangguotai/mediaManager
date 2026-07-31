@@ -2387,6 +2387,62 @@ object MediaService {
     data class AgeRange(val range: String, val count: Int, val bytes: Long)
 
     /**
+     * V21：GET /api/media/media-archive-status — 媒体归档状态（热/温/冷数据温度分布）。
+     *
+     * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：
+     *   - hot  热数据（最近 30 天内上传）
+     *   - warm 温数据（30-180 天内上传）
+     *   - cold 冷数据（上传超过 180 天）
+     * 每档统计 count 与 bytes（累计该档媒体的 Size）。
+     *
+     * 响应结构（与 [handleMediaArchiveStatus] 对齐）：
+     *   `{hot:{count,bytes}, warm:{count,bytes}, cold:{count,bytes}, total:N}`
+     * 注意 `total` 是参与分类的未软删媒体总数（整数），不是 TierInfo 对象；
+     * 三档 count 之和恒等于 total。
+     *
+     * count/bytes 均为后端 int64（永不为 JSON null），用 `?: 0` / `?: 0L` 安全默认。
+     * 失败返回 null，调用方按 null 静默跳过不渲染占位（与 [getMediaAgeDistribution] 同款）。
+     */
+    suspend fun getMediaArchiveStatus(): ArchiveStatus? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-archive-status") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // 解析单个温度档对象为 TierInfo；缺失或非对象时返回 0 档，保证三行稳定渲染。
+                fun tier(key: String): TierInfo {
+                    val o = obj[key]?.jsonObject ?: return TierInfo(0, 0L)
+                    return TierInfo(
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+                ArchiveStatus(
+                    hot = tier("hot"),
+                    warm = tier("warm"),
+                    cold = tier("cold"),
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaArchiveStatus FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V21：归档温度档统计（该档媒体数 + 累计字节）。 */
+    data class TierInfo(val count: Int, val bytes: Long)
+
+    /** V21：媒体归档状态（热/温/冷三档 + 参与分类的未软删媒体总数）。 */
+    data class ArchiveStatus(
+        val hot: TierInfo,
+        val warm: TierInfo,
+        val cold: TierInfo,
+        val total: Int
+    )
+
+    /**
      * V20：GET /api/media/upload-pattern-analysis — 上传模式分析。
      *
      * 后端基于当前用户全部未删除媒体的 created_at/size/type 统计最常上传的：

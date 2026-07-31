@@ -1604,6 +1604,74 @@ private fun MyTabContent(
             }
         }
 
+        // V21：数据温度卡片——在媒体年龄之后，展示热/温/冷数据分布。
+        // 调 GET /api/media/media-archive-status，total=0 或异常时静默跳过（与媒体年龄同款）。
+        // 三档与后端口径一致：hot 30 天内 / warm 30-180 天 / cold 180 天+。
+        var archiveStatus by remember { mutableStateOf<MediaService.ArchiveStatus?>(null) }
+        LaunchedEffect(Unit) { archiveStatus = MediaService.getMediaArchiveStatus() }
+        archiveStatus?.let { st ->
+            if (st.total > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("数据温度", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 比例条按 count 占 total 的比例绘制；用 max(count,1) 避免除零。
+                        val totalCount = st.total.coerceAtLeast(1)
+                        // 三档三元组：emoji·标签·颜色·TierInfo，顺序固定（热→温→冷）。
+                        val tiers = listOf(
+                            Triple("🔥 热数据 (30天内)", Color(0xFFEF5350), st.hot),
+                            Triple("🌡️ 温数据 (30-180天)", Color(0xFFFFA726), st.warm),
+                            Triple("❄️ 冷数据 (180天+)", Color(0xFF42A5F5), st.cold)
+                        )
+                        tiers.forEach { (label, color, tier) ->
+                            val ratio = (tier.count.toFloat() / totalCount).coerceIn(0f, 1f)
+                            val mbStr = if (tier.bytes > 0L) {
+                                (tier.bytes.toDouble() / (1024.0 * 1024.0)).toString()
+                                    .let { it.take(it.indexOf('.') + 2) }
+                            } else "0"
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${tier.count} 项 · ${mbStr} MB",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                            // 比例条（按各档占总数的百分比着色，与媒体年龄卡片样式一致）
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(ratio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(color.copy(alpha = 0.85f))
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 ${st.total} 项（按上传时间到现在的温度分类）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
         var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
         LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }
