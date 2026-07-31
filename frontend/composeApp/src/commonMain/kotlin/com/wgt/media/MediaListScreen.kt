@@ -1187,6 +1187,44 @@ private fun MyTabContent(
             }
         }
 
+        // V8：标签云卡片
+        var tagStats by remember { mutableStateOf<List<MediaService.TagStat>?>(null) }
+        LaunchedEffect(Unit) { tagStats = MediaService.getTagStats() }
+        tagStats?.let { stats ->
+            if (stats.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            stats.forEach { s ->
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text("#${s.tag} (${s.count})", fontSize = 12.sp) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // V8：标签云卡片结束
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(

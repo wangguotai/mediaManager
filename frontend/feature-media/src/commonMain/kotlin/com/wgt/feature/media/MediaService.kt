@@ -1419,6 +1419,31 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/tag/stats — 标签统计。 */
+    suspend fun getTagStats(): List<TagStat>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/stats") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagStat(
+                        tag = o["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagStats FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：标签统计项 */
+    data class TagStat(val tag: String, val count: Int)
+
     /** V8：GET /api/media/tag/search?tag=xxx — 按标签搜索 media_id 列表。 */
     suspend fun searchByTag(tag: String): List<String>? {
         return try {
