@@ -342,6 +342,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/autocomplete", s.handleMediaTagAutocomplete)
 	// V8：合并标签
 	s.mux.HandleFunc("/api/media/tag/merge", s.handleMediaTagMerge)
+	// 智能合并相似标签：自动检测大小写不同 / 简繁不同 / 中英对应的三类相似标签，
+	// 逐对调 RenameTag 把后者并入前者（保留字典序较小者为目标），返回合并明细。
+	s.mux.HandleFunc("/api/media/tag/merge-smart", s.handleTagMergeSmart)
 	// V8：用户存储配额
 	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
 	// V8：最近上传的媒体
@@ -7504,6 +7507,288 @@ func (s *Server) handleMediaTagMerge(w http.ResponseWriter, r *http.Request) {
 		"source_tag":   req.SourceTag,
 		"target_tag":   req.TargetTag,
 		"merged_count": count,
+	})
+}
+
+// tagTradSimpMap 内置常用繁->简字符映射，用于把繁体标签归一化到简体后比较。
+// 仅覆盖常见标签场景出现的字，避免引入 golang.org/x/text 依赖（任务约束：只改 server.go）。
+var tagTradSimpMap = map[rune]rune{
+	'遊': '游', '誌': '志', '舘': '馆', '灣': '湾', '環': '环',
+	'國': '国', '園': '园', '會': '会', '東': '东', '車': '车',
+	'電': '电', '視': '视', '開': '开', '關': '关', '場': '场',
+	'書': '书', '學': '学', '機': '机', '動': '动', '藝': '艺',
+	'術': '术', '長': '长', '島': '岛', '橋': '桥', '館': '馆',
+	'華': '华', '語': '语', '樂': '乐', '業': '业', '網': '网',
+	'論': '论', '壇': '坛', '態': '态', '燈': '灯',
+	'風': '风', '雲': '云', '陽': '阳', '陰': '阴', '曆': '历',
+	'曉': '晓', '葉': '叶', '節': '节', '歲': '岁',
+	'寶': '宝', '實': '实', '寬': '宽', '獨': '独', '貓': '猫',
+	'豬': '猪', '馬': '马', '鳥': '鸟', '魚': '鱼', '龍': '龙',
+	'買': '买', '賣': '卖', '賞': '赏', '貨': '货',
+	'腳': '脚', '腦': '脑', '臉': '脸', '膚': '肤', '藥': '药',
+	'夢': '梦', '兒': '儿', '媽': '妈', '爸': '爸',
+	'爺': '爷', '師': '师', '醫': '医', '聖': '圣', '愛': '爱',
+	'麗': '丽', '廠': '厂', '廣': '广', '廳': '厅',
+	'廟': '庙', '製': '制', '計': '计', '討': '讨', '記': '记',
+	'試': '试', '詩': '诗', '話': '话', '讀': '读', '誰': '谁',
+	'運': '运', '過': '过', '傳': '传', '傷': '伤', '億': '亿',
+	'僅': '仅', '價': '价', '儀': '仪', '優': '优', '儲': '储',
+	'兩': '两', '冊': '册', '軍': '军', '農': '农',
+	'邊': '边', '還': '还', '進': '进', '達': '达', '遠': '远',
+	'遲': '迟', '飛': '飞', '騎': '骑', '驚': '惊',
+	'體': '体', '髮': '发', '鬧': '闹', '齊': '齐', '齒': '齿',
+	'龜': '龟', '鹽': '盐', '麵': '面', '點': '点', '齋': '斋',
+}
+
+// tagCnEnMap 内置常见中文标签 <-> 英文标签对应表（双向）。
+// 仅收录媒体管理场景高频词，用户可后续扩展。键为小写英文，值为中文简体。
+var tagCnEnMap = map[string]string{
+	"travel":    "旅行",
+	"food":      "美食",
+	"photo":     "照片",
+	"video":     "视频",
+	"nature":    "自然",
+	"landscape": "风景",
+	"portrait":  "人像",
+	"family":    "家庭",
+	"friend":    "朋友",
+	"friends":   "朋友",
+	"wedding":   "婚礼",
+	"sunset":    "日落",
+	"sunrise":   "日出",
+	"night":     "夜景",
+	"city":      "城市",
+	"street":    "街拍",
+	"animal":    "动物",
+	"cat":       "猫",
+	"dog":       "狗",
+	"flower":    "花",
+	"beach":     "海滩",
+	"mountain":  "山",
+	"snow":      "雪",
+	"baby":      "宝宝",
+	"birthday":  "生日",
+	"party":     "聚会",
+	"festival":  "节日",
+	"holiday":   "假期",
+	"car":       "汽车",
+	"architecture": "建筑",
+	"sky":       "天空",
+	"sea":       "海",
+	"forest":    "森林",
+	"autumn":    "秋天",
+	"spring":    "春天",
+	"summer":    "夏天",
+	"winter":    "冬天",
+	"art":       "艺术",
+	"music":     "音乐",
+	"sport":     "运动",
+	"running":   "跑步",
+	"coffee":    "咖啡",
+	"dessert":   "甜点",
+	"garden":    "花园",
+	"park":      "公园",
+	"museum":    "博物馆",
+	"church":    "教堂",
+}
+
+// tagVariantMap 把"繁体简化后得到另一个但同义的词"映射到规范词。
+// 典型：旅遊 --char--> 旅游 --variant--> 旅行。仅收录确属同义异形的常见词，
+// 避免"照片/相片"这类纯地域异称被误并（它们不在繁简关系链上，不收录）。
+var tagVariantMap = map[string]string{
+	"旅游": "旅行", // 旅遊(繁)->旅游(简)->旅行；任务示例即此情形
+}
+
+// tagNormalize 把标签归一化为用于相似性比较的规范形式：
+//  1. 全小写 + 去首尾空白
+//  2. 繁体 -> 简体（按内置字符表逐字替换）
+//  3. 同义异形词 -> 规范词（tagVariantMap，如 旅游 -> 旅行）
+// 同一规范形式的标签视为"相似"，将被合并。
+func tagNormalize(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if simp, ok := tagTradSimpMap[r]; ok {
+			b.WriteRune(simp)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if v, ok := tagVariantMap[out]; ok {
+		return v
+	}
+	return out
+}
+
+// tagEnOf 返回中文名对应的英文（若在映射表中），否则返回空串。
+func tagEnOf(cn string) string {
+	for en, c := range tagCnEnMap {
+		if c == cn {
+			return en
+		}
+	}
+	return ""
+}
+
+// tagCnOf 返回英文名（小写）对应的中文（若在映射表中），否则返回空串。
+func tagCnOf(en string) string {
+	if c, ok := tagCnEnMap[strings.ToLower(en)]; ok {
+		return c
+	}
+	return ""
+}
+
+// handleTagMergeSmart POST /api/media/tag/merge-smart — 智能合并相似标签。
+// 自动检测三类相似标签并合并（保留字典序较小者为目标，把后者 RenameTag 并入）：
+//  a) 大小写不同（"Travel" vs "travel"）
+//  b) 简繁不同（"旅行" vs "旅遊"）
+//  c) 中英对应（"travel" vs "旅行"，按内置常见映射表）
+// 响应: { status, merged_count, merges: [{from, to, count, reason}], total_tags_before, total_tags_after }
+func (s *Server) handleTagMergeSmart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalBefore := len(tags)
+
+	// alive 记录仍存活（尚未被合并删除）的标签集合，避免对已删标签重复操作。
+	alive := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		alive[t] = true
+	}
+
+	type mergeRec struct {
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Count  int    `json:"count"`
+		Reason string `json:"reason"`
+	}
+	merges := make([]mergeRec, 0)
+
+	// 1) 大小写 + 简繁归一化：同一归一形式内选字典序最小者为目标，其余逐个并入。
+	//    这同时覆盖 (a) 大小写不同 与 (b) 简繁不同 两类。
+	groups := make(map[string][]string) // norm -> 原标签列表
+	for _, t := range tags {
+		if !alive[t] {
+			continue
+		}
+		n := tagNormalize(t)
+		groups[n] = append(groups[n], t)
+	}
+	for _, grp := range groups {
+		if len(grp) < 2 {
+			continue
+		}
+		// 选目标：字典序最小者；其余按字典序依次并入。
+		sorted := make([]string, len(grp))
+		copy(sorted, grp)
+		sort.Strings(sorted)
+		target := sorted[0]
+		for i := 1; i < len(sorted); i++ {
+			src := sorted[i]
+			if !alive[src] || !alive[target] {
+				continue
+			}
+			if src == target {
+				continue
+			}
+			count, rerr := s.store.RenameTag(r.Context(), uid, src, target)
+			if rerr != nil {
+				slog.Warn("merge-smart: rename failed",
+					"from", src, "to", target, "err", rerr.Error())
+				continue
+			}
+			alive[src] = false
+			merges = append(merges, mergeRec{
+				From:   src,
+				To:     target,
+				Count:  count,
+				Reason: "case_or_trad_simp",
+			})
+		}
+	}
+
+	// 2) 中英对应：在归一化后的标签里，若同时存在某中文与其英文映射，
+	//    将英文并入中文（保留中文为目标，更符合中文用户习惯）。
+	//    仅当两者当前都 alive 时处理。
+	for en, cn := range tagCnEnMap {
+		// 计算两侧归一形式后实际存活的候选标签。
+		var enName, cnName string
+		for t := range alive {
+			if !alive[t] {
+				continue
+			}
+			tl := strings.ToLower(strings.TrimSpace(t))
+			if tl == en {
+				enName = t
+			}
+		}
+		if enName == "" {
+			continue
+		}
+		// 中文目标用归一化匹配（兼容用户已用繁体形式输入中文的情况）。
+		cnNorm := tagNormalize(cn)
+		for t := range alive {
+			if !alive[t] || t == enName {
+				continue
+			}
+			if tagNormalize(t) == cnNorm {
+				cnName = t
+				break
+			}
+		}
+		if cnName == "" {
+			continue
+		}
+		count, rerr := s.store.RenameTag(r.Context(), uid, enName, cnName)
+		if rerr != nil {
+			slog.Warn("merge-smart: cn-en rename failed",
+				"from", enName, "to", cnName, "err", rerr.Error())
+			continue
+		}
+		alive[enName] = false
+		merges = append(merges, mergeRec{
+			From:   enName,
+			To:     cnName,
+			Count:  count,
+			Reason: "cn_en_mapping",
+		})
+	}
+
+	totalAfter := 0
+	for t := range alive {
+		if alive[t] {
+			totalAfter++
+		}
+	}
+
+	statusVal := "ok"
+	if len(merges) == 0 {
+		statusVal = "no_merges"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":            statusVal,
+		"merged_count":      len(merges),
+		"merges":            merges,
+		"total_tags_before": totalBefore,
+		"total_tags_after":  totalAfter,
 	})
 }
 
