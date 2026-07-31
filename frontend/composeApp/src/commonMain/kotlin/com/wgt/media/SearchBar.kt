@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlin.time.Clock
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
 import mediamanager.composeapp.generated.resources.ic_close
@@ -452,6 +453,73 @@ fun SearchBar(
                 }
             }
         }
+        // 最近操作区：展开态且输入为空时，从后端 GET /api/media/search-history 拉取
+        // 最近操作（搜索/删除/重命名/旋转/上传等），在本地搜索历史下方展示最近 5 条。
+        // 与本地 SearchHistory 区分：此处展示后端视角的全量操作流水。
+        if (expanded && queryText.isEmpty()) {
+            var recentOps by remember { mutableStateOf<List<MediaService.SearchHistoryItem>>(emptyList()) }
+            LaunchedEffect(expanded) {
+                if (expanded) {
+                    recentOps = MediaService.getSearchHistoryFromBackend()?.take(5) ?: emptyList()
+                }
+            }
+            if (recentOps.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                // 标题行。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "最近操作",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                // 操作列表：每条一行，emoji + detail + 相对时间。
+                recentOps.forEach { item ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                // 点击若 detail 是搜索词则触发搜索；仅 search 类操作有可搜索词。
+                                // 其余删除/重命名等动作的 detail 多为文件名，点击亦尝试搜索。
+                                val query = item.detail.trim()
+                                if (query.isNotEmpty()) {
+                                    queryText = query
+                                    queryVisible = true
+                                    onDebouncedQueryChange(query)
+                                    SearchHistory.add(query)
+                                }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            actionEmoji(item.action),
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            item.detail.ifEmpty { item.action },
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            relativeTime(item.createdAt),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
         // V8：标签快捷区——展开态且输入为空时显示用户所有标签，点击触发标签搜索
         if (expanded && queryText.isEmpty()) {
             var allTags by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -520,4 +588,69 @@ fun SearchBar(
             }
         }
     }
+}
+
+/**
+ * 后端操作类型 → 展示 emoji 映射。未知类型回退为圆点，保证不空白。
+ */
+private fun actionEmoji(action: String): String = when (action.lowercase()) {
+    "search" -> "🔍"
+    "delete" -> "🗑"
+    "rename" -> "✏️"
+    "rotate" -> "🔄"
+    "upload" -> "⬆️"
+    "share" -> "🔗"
+    "tag", "add_tag", "remove_tag" -> "🏷"
+    "download" -> "⬇️"
+    "move" -> "📦"
+    else -> "•"
+}
+
+/**
+ * 后端 created_at（RFC3339，如 2026-07-31T12:34:56Z）→ 相对时间文案（"刚刚"/"3分钟前"等）。
+ *
+ * 纯 Kotlin 解析：提取 `YYYY-MM-DDTHH:MM:SS` 部分拼成 epoch 秒近似值，与当前秒数比较。
+ * 解析失败回退截断原串（去掉 T 后的时分），避免可见技术细节。容错优先——展示用途，不追求精度。
+ */
+private fun relativeTime(createdAt: String): String {
+    if (createdAt.isBlank()) return ""
+    // 提取 YYYY-MM-DDTHH:MM:SS（兼容带/不带时区后缀）。
+    val match = Regex("(\\d{4})-(\\d{2})-(\\d{2})[T ](\\d{2}):(\\d{2}):(\\d{2})").find(createdAt)
+        ?: return createdAt.substringBefore('T').ifBlank { createdAt }
+    val (y, mo, d, h, mi, s) = match.destructured
+    // 粗略转 epoch 秒：用 UTC 日历近似（忽略闰秒/时区偏移，相对展示足够）。
+    val epochSec = try {
+        approxEpochSeconds(y.toInt(), mo.toInt(), d.toInt(), h.toInt(), mi.toInt(), s.toInt())
+    } catch (e: Exception) {
+        return createdAt.substringBefore('T')
+    }
+    // KMP 可移植取当前时间（kotlin.time.Clock，Kotlin 2.1+）。
+    val nowSec = Clock.System.now().toEpochMilliseconds() / 1000
+    val delta = nowSec - epochSec
+    return when {
+        delta < 0 -> "刚刚"
+        delta < 60 -> "刚刚"
+        delta < 3600 -> "${delta / 60}分钟前"
+        delta < 86400 -> "${delta / 3600}小时前"
+        delta < 2592000 -> "${delta / 86400}天前"
+        else -> "${delta / 2592000}个月前"
+    }
+}
+
+/**
+ * UTC 日历近似 epoch 秒（1970-01-01 起算）。仅用于相对时间展示，不追求历法精确。
+ * 算法：逐年累加天数（闰年按 366）×86400，加当年已过天数与日内秒数。
+ */
+private fun approxEpochSeconds(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int): Long {
+    val daysPerMonth = intArrayOf(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    var days: Long = 0L
+    for (y in 1970 until year) {
+        days += if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) 366 else 365
+    }
+    val leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    for (m in 1 until month) {
+        days += if (m == 2 && leap) 29 else daysPerMonth[m - 1]
+    }
+    days += (day - 1)
+    return days * 86400L + hour * 3600L + minute * 60L + second
 }

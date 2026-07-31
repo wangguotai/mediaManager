@@ -1645,6 +1645,55 @@ object MediaService {
     )
 
     /**
+     * 后端搜索历史条目 —— 对应 GET /api/media/search-history 返回的 history[] 元素。
+     *
+     * 后端结构：`{ "id": "...", "action": "...", "detail": "...", "created_at": "..." }`。
+     * action 为动作类型（如 search/delete/rename/rotate/upload 等），detail 为动作详情
+     * （搜索词、文件名等），created_at 为后端 time.Time 的 RFC3339 字符串，前端仅透传展示。
+     *
+     * 与本地 [com.wgt.media.SearchHistory] 区别：后者只记录本端键入的搜索词，本类记录
+     * 后端视角的全量最近操作（含搜索、删除、重命名等），用于搜索栏"最近操作"区展示。
+     */
+    data class SearchHistoryItem(
+        val id: String,
+        val action: String,
+        val detail: String,
+        val createdAt: String
+    )
+
+    /**
+     * V9：GET /api/media/search-history — 后端最近操作历史。
+     *
+     * 后端返回 `{ "history": [...], "total": N }`，此处仅取 history 数组解析为
+     * [SearchHistoryItem] 列表。调用方（搜索栏"最近操作"区）按需取前 N 条展示。
+     *
+     * 鉴权由 [jsonClient] 的 defaultRequest 统一附加 Bearer token；失败/非 200 返回 null，
+     * 调用方降级为不展示该区。
+     */
+    suspend fun getSearchHistoryFromBackend(): List<SearchHistoryItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/search-history") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["history"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    SearchHistoryItem(
+                        id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        action = o["action"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSearchHistoryFromBackend FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：DELETE /api/share/{token} — 撤销分享链接。
      */
     suspend fun deleteShare(token: String): Boolean {
