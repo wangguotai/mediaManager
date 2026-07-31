@@ -380,6 +380,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// 重复文件详细报告（仅报告不删除）
 	s.mux.HandleFunc("/api/media/duplicate-report", s.handleMediaDuplicateReport)
+	// 重复文件组摘要（比 duplicate-report 更轻量，只返回组数+总可回收+最大组信息，
+	// 不展开每组明细，适合前端卡片 / 仪表盘首屏快速展示）
+	s.mux.HandleFunc("/api/media/duplicate-groups-summary", s.handleDuplicateGroupsSummary)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -2685,6 +2688,126 @@ func (s *Server) handleMediaDuplicateReport(w http.ResponseWriter, r *http.Reque
 		"total_groups":            len(dups),
 		"total_reclaimable_bytes": totalReclaimable,
 		"total_duplicate_count":   totalDupCount,
+		"user_id":                 uid,
+	})
+}
+
+// handleDuplicateGroupsSummary 处理 GET /api/media/duplicate-groups-summary，
+// 返回重复文件组摘要（比 duplicate-report 更轻量：只返回组数、总可回收字节数、
+// 最大组信息与平均组大小，不展开每组明细），适合前端卡片 / 仪表盘首屏快速展示。
+//
+// 响应结构：
+//
+//	{
+//	  "total_groups": N,                      // count>1 的重复组数量
+//	  "total_duplicates": N,                  // 所有重复组中的文件总数
+//	  "total_reclaimable_bytes": N,           // 所有组可回收字节数之和（(count-1)*bytes_per_file）
+//	  "largest_group": {                      // 按 count 最大的组（并列取 reclaimable 最大）
+//	    "sha256_prefix": "abc123...",         // SHA256 前 12 字符（脱敏，避免泄露完整哈希）
+//	    "count": N,
+//	    "reclaimable_bytes": N
+//	  },
+//	  "avg_group_size": N,                    // 平均每组文件数：total_duplicates/total_groups（无组时 0）
+//	  "user_id": "..."
+//	}
+//
+// 无重复组时 largest_group 返回 null；其余数值字段为 0。
+func (s *Server) handleDuplicateGroupsSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 直接从 DB 获取全部媒体（含 SHA256），与 duplicate-report 同源。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 SHA256 分组（跳过空 SHA256 与已软删的记录），仅记录每组的 count 与 bytes_per_file。
+	type groupInfo struct {
+		Count         int
+		BytesPerFile  int64
+		Reclaimable   int64
+	}
+	const sha256PrefixLen = 12
+	groups := make(map[string]*groupInfo)
+	for _, m := range mediaList {
+		if m.SHA256 == "" || m.Deleted {
+			continue
+		}
+		g, ok := groups[m.SHA256]
+		if !ok {
+			g = &groupInfo{BytesPerFile: m.Size}
+			groups[m.SHA256] = g
+		}
+		g.Count++
+	}
+
+	var totalGroups int
+	var totalDupCount int
+	var totalReclaimable int64
+	var largestSha string
+	var largestCount int
+	var largestReclaimable int64
+
+	for sha, g := range groups {
+		if g.Count < 2 {
+			continue
+		}
+		// 同一 SHA256 内容相同，文件 size 应一致，取首份 size 作为每文件字节数。
+		// 注意：组内首份 size 是分组时第一条记录的 size，与 duplicate-report 一致。
+		g.Reclaimable = int64(g.Count-1) * g.BytesPerFile
+
+		totalGroups++
+		totalDupCount += g.Count
+		totalReclaimable += g.Reclaimable
+
+		// 最大组判定：count 优先，并列时 reclaimable 更大者胜（保证输出稳定可解释）。
+		if g.Count > largestCount || (g.Count == largestCount && g.Reclaimable > largestReclaimable) {
+			largestSha = sha
+			largestCount = g.Count
+			largestReclaimable = g.Reclaimable
+		}
+	}
+
+	var largestGroup any
+	if totalGroups > 0 {
+		prefix := largestSha
+		if len(prefix) > sha256PrefixLen {
+			prefix = prefix[:sha256PrefixLen]
+		}
+		largestGroup = map[string]any{
+			"sha256_prefix":     prefix,
+			"count":             largestCount,
+			"reclaimable_bytes": largestReclaimable,
+		}
+	} else {
+		largestGroup = nil
+	}
+
+	// 平均每组文件数：无组时为 0（避免除零）。
+	var avgGroupSize float64
+	if totalGroups > 0 {
+		avgGroupSize = float64(totalDupCount) / float64(totalGroups)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_groups":            totalGroups,
+		"total_duplicates":        totalDupCount,
+		"total_reclaimable_bytes": totalReclaimable,
+		"largest_group":           largestGroup,
+		"avg_group_size":          avgGroupSize,
 		"user_id":                 uid,
 	})
 }
