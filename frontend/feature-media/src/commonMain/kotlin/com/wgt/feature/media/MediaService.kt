@@ -3699,6 +3699,60 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/share-expiring — 即将过期（7 天内）分享链接明细列表。
+     *
+     * 与 [getShareAnalytics]（仅返聚合的 `expiring_soon` 计数）互补：本端点返回
+     * 每条即将过期分享的具体信息（token / expires_at / days_left / media_id?），
+     * 供"我的"Tab"即将过期分享"卡片逐条渲染提醒。
+     *
+     * 后端返回 `{expiring:[{token, expires_at, days_left, media_id?}], total}`：
+     *   - expires_at : RFC3339（UTC）字符串；
+     *   - days_left  : 距过期剩余整天数（后端向上取整、下界 1，前端原样展示）；
+     *   - media_id   : 可选，无媒体或后端省略时为 null。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过卡片，不崩溃"我的"Tab。
+     */
+    suspend fun getShareExpiring(): List<ShareExpiringItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/share-expiring") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val arr = o["expiring"]?.jsonArray ?: return emptyList()
+                arr.mapNotNull { el ->
+                    val it = el.jsonObject
+                    val token = it["token"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val expiresAt = it["expires_at"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val daysLeft = it["days_left"]?.jsonPrimitive?.intOrNull ?: 0
+                    val mediaId = it["media_id"]?.let { mid ->
+                        if (mid is JsonNull) null else mid.jsonPrimitive.contentOrNull
+                    }
+                    ShareExpiringItem(
+                        token = token,
+                        expiresAt = expiresAt,
+                        daysLeft = daysLeft,
+                        mediaId = mediaId
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getShareExpiring FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 即将过期分享项（[getShareExpiring] 返回的单个元素）。 */
+    data class ShareExpiringItem(
+        val token: String,
+        val expiresAt: String,
+        val daysLeft: Int,
+        val mediaId: String?
+    )
+
+    /**
      * GET /api/media/media-integrity-report — 媒体完整性综合报告。
      *
      * 后端单次遍历合并 orphan-check + error-check + duplicate-report，并据此计算

@@ -3135,6 +3135,52 @@ private fun MyTabContent(
             }
         }
 
+        // V?:即将过期分享卡片（调 /api/media/share-expiring 展示即将过期分享列表）
+        var shareExpiring by remember { mutableStateOf<List<MediaService.ShareExpiringItem>?>(null) }
+        LaunchedEffect(Unit) { shareExpiring = MediaService.getShareExpiring() }
+        shareExpiring?.let { expiring ->
+            if (expiring.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "即将过期分享",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        expiring.take(5).forEach { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("🔗", fontSize = 14.sp)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        item.token.take(8),
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    "${item.daysLeft}天后过期",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：最近上传卡片
         var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
         LaunchedEffect(Unit) { recentUploads = MediaService.getRecentUploads() }
