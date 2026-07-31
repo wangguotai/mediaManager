@@ -167,6 +167,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/batch-rename", s.handleMediaBatchRename)
 	// V8：单个媒体详情
 	s.mux.HandleFunc("/api/media/info/", s.handleMediaInfo)
+	// 相关媒体推荐：基于相同标签 / 相同类型 + 相近日期（±7天）推荐，去掉自身去重。
+	// path prefix 匹配 /api/media/media-related/{id}?limit=10
+	s.mux.HandleFunc("/api/media/media-related/", s.handleMediaRelated)
 	// V9：完整 EXIF/metadata（合并 SQLite 持久化字段 + 文件实时解析的 EXIF 标签）
 	s.mux.HandleFunc("/api/media/exif/", s.handleMediaExif)
 	// V9：按拍摄日期（taken_at）分组的日历视图，不限时间范围。区别于 upload-calendar
@@ -4503,6 +4506,158 @@ func (s *Server) handleMediaInfo(w http.ResponseWriter, r *http.Request) {
 		"updated_at": media.UpdatedAt.Format(time.RFC3339),
 		"taken_at":   media.TakenAt,
 		"deleted":    media.Deleted,
+	})
+}
+
+// handleMediaRelated 返回与指定媒体相关的推荐列表。
+//
+// GET /api/media/media-related/{id}?limit=10
+//
+// 推荐逻辑（优先级从高到低）：
+//  a) 相同标签的媒体（优先）：取该 media 的所有标签，对每个标签调
+//     SearchMediaByTag 收集关联 media_id，命中即加入候选（reason="shared_tag:<tag>"）。
+//  b) 相同类型 + 相近日期（±7天）：遍历用户未软删媒体，类型相同且 created_at
+//     落在 [target.CreatedAt ±7day] 区间内（reason="same_type_nearby_date"）。
+//
+// 去掉自身、去重（已加入的不再重复），按 reason 优先级（标签 > 类型+日期）排序后
+// 截断到 limit（默认 10，上限 50）。鉴权：需有效 token，且 media.UserID 必须匹配
+// 当前 user_id（他人媒体不推荐）。store 未注入返回 503。
+func (s *Server) handleMediaRelated(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 从 path 提取 media id（/api/media/media-related/{id}）。
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/media-related/")
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	// limit：默认 10，上限 50，下限 0（允许返回空）。
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	// 获取目标媒体，校验归属。
+	target, err := s.store.GetMedia(r.Context(), mediaID)
+	if err != nil || target == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+		return
+	}
+	if target.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not owner"})
+		return
+	}
+
+	// 预加载该用户全部未软删媒体，建 id→Media 索引，用于类型+日期筛选与信息回填。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	index := make(map[string]*storage.Media, len(mediaList))
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		index[m.ID] = m
+	}
+
+	type relatedItem struct {
+		MediaID   string `json:"media_id"`
+		Filename  string `json:"filename"`
+		Type      string `json:"type"`
+		Reason    string `json:"reason"`
+	}
+
+	seen := make(map[string]bool)        // 已纳入结果的 media_id（去重）
+	seen[mediaID] = true                 // 排除自身
+	var tagHits []relatedItem            // a) 相同标签命中（优先级高）
+	var typeDateHits []relatedItem       // b) 相同类型+相近日期命中
+
+	// a) 相同标签的媒体（优先）。
+	if tags, terr := s.store.ListMediaTags(r.Context(), uid, mediaID); terr == nil {
+		for _, tag := range tags {
+			ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag)
+			if serr != nil {
+				continue
+			}
+			for _, id := range ids {
+				if seen[id] {
+					continue
+				}
+				m, ok := index[id]
+				if !ok || m.Deleted {
+					continue
+				}
+				seen[id] = true
+				tagHits = append(tagHits, relatedItem{
+					MediaID:  m.ID,
+					Filename: m.Filename,
+					Type:     m.Type,
+					Reason:   "shared_tag:" + tag,
+				})
+			}
+		}
+	}
+
+	// b) 相同类型 + 相近日期（±7天）。
+	windowStart := target.CreatedAt.Add(-7 * 24 * time.Hour)
+	windowEnd := target.CreatedAt.Add(7 * 24 * time.Hour)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		if seen[m.ID] {
+			continue
+		}
+		if m.ID == mediaID {
+			continue
+		}
+		if m.Type != target.Type {
+			continue
+		}
+		// created_at 落在 ±7天窗口内算"相近日期"。
+		if m.CreatedAt.Before(windowStart) || m.CreatedAt.After(windowEnd) {
+			continue
+		}
+		seen[m.ID] = true
+		typeDateHits = append(typeDateHits, relatedItem{
+			MediaID:  m.ID,
+			Filename: m.Filename,
+			Type:     m.Type,
+			Reason:   "same_type_nearby_date",
+		})
+	}
+
+	// 合并：标签命中优先 → 类型+日期命中 → 截断到 limit。
+	related := append(tagHits, typeDateHits...)
+	if len(related) > limit {
+		related = related[:limit]
+	}
+	if related == nil {
+		related = []relatedItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"related": related,
+		"total":   len(related),
 	})
 }
 
