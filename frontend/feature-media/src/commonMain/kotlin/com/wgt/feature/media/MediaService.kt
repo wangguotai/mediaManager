@@ -1419,6 +1419,23 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/auto-tag — 按文件名自动打标签，返回标签数。 */
+    suspend fun autoTag(): Int {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/auto-tag") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tagged_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "autoTag FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：POST /api/media/album/clone — 复制相册，返回新相册 ID。 */
     suspend fun cloneAlbum(sourceAlbumId: String, newName: String): String? {
         return try {

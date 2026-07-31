@@ -680,6 +680,35 @@ fun SettingsScreen(
                 }
             }
 
+            // V8：自动打标签
+            var autoTagResult by remember { mutableStateOf<String?>(null) }
+            var autoTagging by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("自动打标签", style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = {
+                    autoTagging = true
+                    orphanScope.launch {
+                        val count = MediaService.autoTag()
+                        autoTagResult = "已为 $count 个媒体添加标签"
+                        autoTagging = false
+                    }
+                }) {
+                    if (autoTagging) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("执行")
+                    }
+                }
+            }
+            autoTagResult?.let { msg ->
+                Text(msg, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp))
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
