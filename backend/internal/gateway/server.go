@@ -361,6 +361,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
 	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
+	// 相册分享摘要：遍历用户所有相册，返回每个相册的分享状态（是否已分享+分享链接数+
+	// 访问次数）及已分享/未分享总数。只读端点，前端用于相册管理页展示分享概况。
+	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
+	s.mux.HandleFunc("/api/media/album-sharing-summary", s.handleAlbumSharingSummary)
 	// V8：批量删除相册
 	s.mux.HandleFunc("/api/media/album/delete-batch", s.handleAlbumDeleteBatch)
 	// V8：复制相册
@@ -9613,6 +9617,88 @@ func (s *Server) handleAlbumStatsSummary(w http.ResponseWriter, r *http.Request)
 		"avg_per_album": avgPerAlbum,
 		"max_album":     maxAlbum,
 		"min_album":     minAlbum,
+	})
+}
+
+// handleAlbumSharingSummary 处理 GET /api/media/album-sharing-summary — 相册分享摘要。
+// 遍历当前用户所有相册，对每个相册查询 album_shares 表判定分享状态，返回：
+//
+//	{
+//	  "albums": [
+//	    {"album_id","name","shared":bool,"share_count":int,"access_count":int}
+//	  ],
+//	  "shared_total":   int,  // 已分享相册数
+//	  "unshared_total": int   // 未分享相册数
+//	}
+//
+// 设计取舍：
+//   - shared/share_count 来自 ListAlbumSharesByAlbum（按 owner_user_id 隔离，仅取自己
+//     发起的共享）。share_count = 该相册的共享记录条数（即被分享的目标用户数）。
+//   - access_count：当前存储层（share_tokens / album_shares）无访问计数列，公开分享
+//     链接的访问也未落审计日志，故此处恒为 0。如后续给 share_tokens 增加访问统计，
+//     在此处接入即可，响应结构无需变更。本端点只改 server.go，不扩展表结构。
+//   - store 不可用时（s.store == nil），分享状态无法判定：所有相册按"未分享"返回
+//     （shared=false, share_count=0），端点不报错，保证无元数据库场景仍可用。
+//   - 与 album/shared-with 的区别：后者返回单个相册的被共享用户明细列表；本端点
+//     跨全部相册汇总分享概况，供相册管理页一次渲染分享状态列。
+func (s *Server) handleAlbumSharingSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	type albumShareInfo struct {
+		AlbumID     string `json:"album_id"`
+		Name        string `json:"name"`
+		Shared      bool   `json:"shared"`
+		ShareCount  int    `json:"share_count"`
+		AccessCount int    `json:"access_count"`
+	}
+
+	infos := make([]albumShareInfo, 0, len(albums))
+	sharedTotal := 0
+	unsharedTotal := 0
+	for _, a := range albums {
+		shareCount := 0
+		// store 不可用时无法查询分享记录，按未分享处理（shareCount=0）。
+		if s.store != nil {
+			shares, err := s.store.ListAlbumSharesByAlbum(r.Context(), a.ID, uid)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			shareCount = len(shares)
+		}
+		shared := shareCount > 0
+		if shared {
+			sharedTotal++
+		} else {
+			unsharedTotal++
+		}
+		infos = append(infos, albumShareInfo{
+			AlbumID:     a.ID,
+			Name:        a.Name,
+			Shared:      shared,
+			ShareCount:  shareCount,
+			AccessCount: 0, // 存储层暂无访问计数，见上方设计取舍说明。
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"albums":         infos,
+		"shared_total":   sharedTotal,
+		"unshared_total": unsharedTotal,
 	})
 }
 
