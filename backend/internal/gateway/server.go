@@ -250,6 +250,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
 	s.mux.HandleFunc("/api/media/by-resolution", s.handleMediaByResolution)
+	// V8：按文件大小范围统计
+	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3592,6 +3594,66 @@ func (s *Server) handleMediaByResolution(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resolutions": resolutions,
+		"total":       len(mediaList),
+	})
+}
+
+// handleMediaBySizeRange V8：GET /api/media/by-size-range — 按文件大小范围统计。
+// 分档：<1MB / 1-10MB / 10-100MB / >100MB
+func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	const mb = 1024 * 1024
+	ranges := map[string]int{
+		"<1MB":      0,
+		"1-10MB":    0,
+		"10-100MB":  0,
+		">100MB":    0,
+	}
+	var rangeBytes = map[string]int64{
+		"<1MB":      0,
+		"1-10MB":    0,
+		"10-100MB":  0,
+		">100MB":    0,
+	}
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		sizeMB := m.Size / mb
+		var key string
+		switch {
+		case sizeMB < 1:
+			key = "<1MB"
+		case sizeMB < 10:
+			key = "1-10MB"
+		case sizeMB < 100:
+			key = "10-100MB"
+		default:
+			key = ">100MB"
+		}
+		ranges[key]++
+		rangeBytes[key] += m.Size
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ranges":      ranges,
+		"range_bytes": rangeBytes,
 		"total":       len(mediaList),
 	})
 }
