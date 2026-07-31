@@ -2760,6 +2760,71 @@ object MediaService {
     }
 
     /**
+     * 使用习惯分析——会话维度统计（GET /api/media/media-session-stats）。
+     *
+     * 后端聚合用户浏览媒体时的会话数据，返回：
+     * `{total_sessions, avg_actions, avg_duration, common_first_action, longest_session:{actions, duration}}`
+     * - total_sessions: 会话总数
+     * - avg_actions: 平均每个会话的操作次数
+     * - avg_duration: 平均会话时长（秒，后端口径）
+     * - common_first_action: 最常见的首次操作（如 "view"/"favorite"）
+     * - longest_session: 最长一次会话的 actions/duration，可能为 null（无会话时）
+     *
+     * 前端按"分钟"展示时长——[LongestSession.duration] 与 [avgDuration] 均为秒，
+     * UI 层 ([SessionStatsCard]) 除以 60 转分钟。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getMediaQueryStats] 同款）。HTTP 非 200 或网络异常返回 null，调用方降级为空态。
+     * 鉴权头由 [jsonClient] defaultRequest 统一注入。
+     *
+     * @return 会话统计；失败返回 null
+     */
+    data class LongestSession(
+        val actions: Int = 0,
+        val duration: Double = 0.0
+    )
+
+    data class MediaSessionStats(
+        val totalSessions: Int = 0,
+        val avgActions: Double = 0.0,
+        val avgDuration: Double = 0.0,
+        val commonFirstAction: String = "",
+        val longestSession: LongestSession? = null
+    )
+
+    suspend fun getMediaSessionStats(): MediaSessionStats? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-session-stats")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaSessionStats(
+                    totalSessions = obj["total_sessions"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgActions = obj["avg_actions"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    avgDuration = obj["avg_duration"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    commonFirstAction = obj["common_first_action"]?.jsonPrimitive?.contentOrNull ?: "",
+                    longestSession = parseLongestSession(obj["longest_session"])
+                )
+            } else {
+                logger.info("MediaService", "getMediaSessionStats status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSessionStats FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 解析 longest_session 子对象；后端在无会话时返回 null/缺省。 */
+    private fun parseLongestSession(el: JsonElement?): LongestSession? {
+        if (el == null || el is JsonNull) return null
+        val o = el.jsonObject
+        return LongestSession(
+            actions = o["actions"]?.jsonPrimitive?.intOrNull ?: 0,
+            duration = o["duration"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+        )
+    }
+
+    /**
      * V7：DELETE /api/share/{token} — 撤销分享链接。
      */
     suspend fun deleteShare(token: String): Boolean {

@@ -2137,6 +2137,9 @@ fun SettingsScreen(
             // 上传延迟分析卡片（GET /api/media/media-time-analysis）—— 拍摄→上传延迟分布。
             // 抽成独立 [UploadDelayCard] @Composable，避免主函数体过大（见文件末尾定义）。
             UploadDelayCard()
+            // 使用习惯分析卡片（GET /api/media/media-session-stats）—— 会话维度统计。
+            // 独立 [SessionStatsCard] @Composable，自取数据，见文件末尾定义。
+            SessionStatsCard()
             // V23：媒体覆盖率卡片（GET /api/media/media-coverage）
             // 显示标签/收藏/分享/相册 4 个维度的覆盖率，每行带 LinearProgressIndicator。
             var mediaCoverage by remember { mutableStateOf<MediaService.MediaCoverage?>(null) }
@@ -3427,4 +3430,143 @@ private fun formatDelaySeconds(seconds: Double): String {
 private fun formatPercent(ratio: Double): String {
     val r = if (ratio.isNaN() || ratio < 0) 0.0 else ratio
     return "${(r * 100.0).toInt()}%"
+}
+
+/**
+ * 使用习惯分析卡片（GET /api/media/media-session-stats）—— 会话维度统计。
+ *
+ * 独立顶级 @Composable，自取数据（[LaunchedEffect] 拉取一次），三态渲染：
+ * 加载中 / 失败（null，含后端尚未实现该端点的情况）/ 数据。
+ *
+ * 展示四行：
+ * - 总会话数 N · 平均操作 X 次/会话
+ * - 平均时长 X 分钟（后端 avg_duration 为秒，÷60 转分钟）
+ * - 最常见首操作: action
+ * - 最长会话: N 次操作 / X 分钟（longest_session 为 null 时不展示该行）
+ *
+ * 与 [UploadDelayCard] 同款结构：SectionTitle + when 三态 + Column 内容。
+ */
+@Composable
+fun SessionStatsCard() {
+    var data by remember { mutableStateOf<MediaService.MediaSessionStats?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        data = MediaService.getMediaSessionStats()
+        loading = false
+    }
+    SectionTitle("🧭 使用习惯分析", iconRes = Res.drawable.ic_info)
+    when {
+        loading -> Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        data == null -> Text(
+            "无法获取使用习惯分析",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        else -> {
+            val s = data!!
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                // 总会话数 · 平均操作
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("总会话数", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Text(
+                        "${s.totalSessions} · 平均 ${formatActions(s.avgActions)} 次/会话",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                // 平均时长
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "平均时长",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${formatMinutes(s.avgDuration)} 分钟",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                // 最常见首操作
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "最常见首操作",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        s.commonFirstAction.ifEmpty { "—" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                // 最长会话（可能为 null）
+                val ls = s.longestSession
+                if (ls != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "最长会话",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${ls.actions} 次操作 / ${formatMinutes(ls.duration)} 分钟",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 把秒级时长格式化为分钟整数字符串（四舍五入）。
+ * 后端 avg_duration / longest_session.duration 均为秒，UI 按分钟展示。
+ * commonMain 无 `String.format`，手动拼接。负值/NaN 视为 0。
+ */
+private fun formatMinutes(seconds: Double): String {
+    val s = if (seconds.isNaN() || seconds < 0) 0.0 else seconds
+    return "${(s / 60.0).toInt()}".let { mins ->
+        // 不足 1 分钟按 1 分钟展示，避免“0 分钟”无信息量
+        if (s > 0.0 && mins == "0") "1" else mins
+    }
+}
+
+/**
+ * 格式化平均操作次数：整数直接显示，非整数保留 1 位小数（手动拼接，commonMain 无 String.format）。
+ */
+private fun formatActions(actions: Double): String {
+    val rounded = (actions * 10.0).toInt() / 10.0
+    val intPart = rounded.toInt()
+    val frac = ((actions * 10.0).toInt() - intPart * 10)
+    return if (frac == 0) "$intPart" else "$intPart.$frac"
 }
