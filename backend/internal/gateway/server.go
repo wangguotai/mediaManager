@@ -180,6 +180,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/cover", s.handleAlbumCover)
 	// V8：取消相册共享
 	s.mux.HandleFunc("/api/media/album/unshare", s.handleAlbumUnshare)
+	// V8：列出相册共享给了哪些用户
+	s.mux.HandleFunc("/api/media/album/shared-with", s.handleAlbumSharedWith)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
 	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
@@ -1648,6 +1650,56 @@ func (s *Server) handleAlbumUnshare(w http.ResponseWriter, r *http.Request) {
 		"status":             "success",
 		"album_id":           req.AlbumID,
 		"shared_with_user":   req.SharedWithUserID,
+	})
+}
+
+// handleAlbumSharedWith V8：GET /api/media/album/shared-with?album_id=xxx
+// 返回某相册共享给了哪些用户。
+func (s *Server) handleAlbumSharedWith(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	albumID := r.URL.Query().Get("album_id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	// 校验 owner
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	if provider.GetAlbum(uid, albumID) == nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not album owner"})
+		return
+	}
+	shares, err := s.store.ListAlbumSharesByAlbum(r.Context(), albumID, uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	items := make([]map[string]any, 0, len(shares))
+	for _, s2 := range shares {
+		items = append(items, map[string]any{
+			"shared_with_user_id": s2.SharedWithUserID,
+			"shared_at":           s2.SharedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"album_id": albumID,
+		"shared_with": items,
+		"count":      len(items),
 	})
 }
 

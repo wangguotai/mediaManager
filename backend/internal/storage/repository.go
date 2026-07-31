@@ -578,6 +578,35 @@ ORDER BY shared_at DESC`, sharedWithUserID)
 	return out, nil
 }
 
+// ListAlbumSharesByAlbum V8：返回某相册共享给了哪些用户。
+func (s *Store) ListAlbumSharesByAlbum(ctx context.Context, albumID, ownerUserID string) ([]*AlbumShare, error) {
+	if albumID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, album_id, owner_user_id, shared_with_user_id, shared_at
+FROM album_shares WHERE album_id = ? AND owner_user_id = ?
+ORDER BY shared_at DESC`, albumID, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list album shares by album: %w", err)
+	}
+	defer rows.Close()
+	var out []*AlbumShare
+	for rows.Next() {
+		var a AlbumShare
+		var sharedAt string
+		if err := rows.Scan(&a.ID, &a.AlbumID, &a.OwnerUserID, &a.SharedWithUserID, &sharedAt); err != nil {
+			return nil, fmt.Errorf("scan album share: %w", err)
+		}
+		a.SharedAt = timeFromVal(sharedAt)
+		out = append(out, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows album shares: %w", err)
+	}
+	return out, nil
+}
+
 // IsAlbumSharedWith 判断 albumID 是否已共享给 sharedWithUserID（即该用户对该相册
 // 有访问权）。
 //
