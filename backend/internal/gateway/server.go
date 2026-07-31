@@ -386,6 +386,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/activity", s.handleAlbumActivity)
 	// V15：存储清理建议（重复+大文件+旧文件+孤立文件分析，估算可回收空间）。
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
+	// V25：存储健康度评分（综合重复率/孤立率/配额使用率/冷数据占比给出 0-100 分+等级+建议）。
+	s.mux.HandleFunc("/api/media/storage-health", s.handleStorageHealth)
 	// V20：上传模式分析（最常上传的类型/大小范围/时段/星期，基于 created_at）。
 	s.mux.HandleFunc("/api/media/upload-pattern-analysis", s.handleUploadPatternAnalysis)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
@@ -8815,6 +8817,163 @@ func isAllowedMethod(m string) bool {
 func isJSONContentType(ct string) bool {
 	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	return ct == "application/json" || strings.HasSuffix(ct, "+json")
+}
+
+// handleStorageHealth V25：GET /api/media/storage-health — 存储健康度评分。
+// 综合重复率（权重 30）、孤立率（权重 20，可选磁盘扫描，跳过用 0）、
+// 配额使用率（权重 30，默认 10GB）、冷数据占比（权重 20，>180 天视为冷数据）
+// 给出 0-100 分，并映射 A/B/C/D 等级，附带针对性建议。
+//
+// 评分模型：score = 100 - (duplicate_rate*30 + orphan_rate*20 + quota_usage*30 + (1-age_score)*20)
+//   - duplicate_rate = duplicate_count / total_count（同一 SHA256 出现 >1 份视为重复）
+//   - orphan_rate    = orphan_count / total_count（跳过磁盘扫描时为 0）
+//   - quota_usage    = used_bytes / quota_bytes（默认 10GB）
+//   - age_score      = 1 - cold_count / total_count（热+温数据占比，>180 天视为冷）
+func (s *Server) handleStorageHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
+	now := time.Now()
+
+	// 一次遍历：统计总量、已用字节、冷数据（>180 天）、按 SHA256 重复。
+	totalCount := 0
+	coldCount := 0
+	var usedBytes int64
+	shaCounts := make(map[string]int)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		usedBytes += m.Size
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+	}
+
+	// 重复文件份：每个 SHA256 出现 >1，超出 1 份的部分计入重复。
+	duplicateCount := 0
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateCount += c - 1
+		}
+	}
+
+	// 孤立文件需磁盘扫描，本端点默认跳过（避免 IO 放大），按 0 计。
+	// 如需精确孤立率，调用方可用 /api/media/orphan-check 单独扫描。
+	orphanCount := 0
+
+	// 各项比率 [0,1]，totalCount 为 0 时全部归 0（空库视为满分健康）。
+	duplicateRate := 0.0
+	orphanRate := 0.0
+	quotaUsage := 0.0
+	ageScore := 1.0
+	if totalCount > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalCount)
+		orphanRate = float64(orphanCount) / float64(totalCount)
+		ageScore = 1.0 - float64(coldCount)/float64(totalCount)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(usedBytes) / float64(defaultQuotaBytes)
+	}
+
+	// 健康度评分：100 - 加权扣分（各权重分别 30/20/30/20，合计 100）。
+	// 各扣分项上限为其权重，避免单项异常拉爆到负分。
+	dupPenalty := min01(duplicateRate) * 30
+	orphanPenalty := min01(orphanRate) * 20
+	quotaPenalty := min01(quotaUsage) * 30
+	agePenalty := (1.0 - min01(ageScore)) * 20
+	score := 100.0 - (dupPenalty + orphanPenalty + quotaPenalty + agePenalty)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	// 等级映射：A(>=85) / B(70-84) / C(50-69) / D(<50)。
+	grade := "D"
+	switch {
+	case score >= 85:
+		grade = "A"
+	case score >= 70:
+		grade = "B"
+	case score >= 50:
+		grade = "C"
+	}
+
+	// 建议：按各项扣分严重程度给出针对性提示，最多保留最相关的几条。
+	suggestions := make([]string, 0, 5)
+	if duplicateCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("检测到 %d 份重复文件（重复率 %.1f%%），建议用 /api/media/duplicate-cleanup 清理", duplicateCount, duplicateRate*100))
+	}
+	if quotaUsage >= 0.8 {
+		suggestions = append(suggestions, fmt.Sprintf("配额使用率 %.1f%% 接近上限，建议清理回收站或升级配额", quotaUsage*100))
+	} else if quotaUsage >= 0.5 {
+		suggestions = append(suggestions, fmt.Sprintf("配额使用率 %.1f%%，建议关注存储增长趋势", quotaUsage*100))
+	}
+	if coldCount > 0 && totalCount > 0 && float64(coldCount)/float64(totalCount) > 0.3 {
+		suggestions = append(suggestions, fmt.Sprintf("冷数据占比 %.1f%%（%d 个文件超过 180 天未访问），建议归档或清理", float64(coldCount)/float64(totalCount)*100, coldCount))
+	}
+	if orphanCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("检测到 %d 个孤立文件（DB 有记录但磁盘缺失），建议用 /api/media/cleanup-orphan 处理", orphanCount))
+	}
+	if len(suggestions) == 0 {
+		suggestions = append(suggestions, "存储状态良好，建议保持当前使用习惯")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"score":           int(score),
+		"grade":           grade,
+		"duplicate_rate":  round2(duplicateRate),
+		"quota_usage":     round2(quotaUsage),
+		"age_score":       round2(ageScore),
+		"total_count":     totalCount,
+		"duplicate_count": duplicateCount,
+		"orphan_count":    orphanCount,
+		"cold_count":      coldCount,
+		"used_bytes":      usedBytes,
+		"quota_bytes":     defaultQuotaBytes,
+		"suggestions":     suggestions,
+		"user_id":         uid,
+	})
+}
+
+// min01 把浮点截断到 [0,1] 区间，用于评分项上限钳制。
+func min01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// round2 保留两位小数，用于 JSON 响应中的比率字段。
+func round2(v float64) float64 {
+	return float64(int(v*100+0.5)) / 100
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
