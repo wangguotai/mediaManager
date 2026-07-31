@@ -6799,26 +6799,34 @@ func (s *Server) handleMediaTagRecommendations(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// 推荐规则：匹配函数 → (标签名, 推荐理由)。匹配基于不区分大小写的子串/前缀判断。
+	// 推荐规则：匹配模式 → (标签名, 推荐理由)。匹配对文件名与模式都做 ToUpper，
+	// 大小写不敏感，与 handleMediaAutoTag 的 prefix 匹配约定一致。
 	type rule struct {
-		match  func(filename string) bool
-		tag    string
-		reason string
+		pattern string
+		isSub   bool // true→Contains, false→HasPrefix
+		tag     string
+		reason  string
 	}
 	rules := []rule{
-		{func(f string) bool { return strings.HasPrefix(f, "IMG_") }, "照片", "文件名以 IMG_ 开头"},
-		{func(f string) bool { return strings.HasPrefix(f, "VID_") }, "视频", "文件名以 VID_ 开头"},
-		{func(f string) bool { return strings.Contains(f, "Screenshot") }, "截图", "文件名含 Screenshot"},
-		{func(f string) bool { return strings.Contains(f, "WeChat") }, "微信", "文件名含 WeChat"},
-		{func(f string) bool { return strings.Contains(f, "camera") }, "相机", "文件名含 camera"},
+		{"IMG_", false, "照片", "文件名以 IMG_ 开头"},
+		{"VID_", false, "视频", "文件名以 VID_ 开头"},
+		{"Screenshot", true, "截图", "文件名含 Screenshot"},
+		{"WeChat", true, "微信", "文件名含 WeChat"},
+		{"camera", true, "相机", "文件名含 camera"},
 	}
-	// 统计每条规则命中的媒体数量（不区分大小写匹配）。
+	// 统计每条规则命中的媒体数量（模式与文件名都 ToUpper 后比较，大小写不敏感）。
 	counts := make([]int, len(rules))
 	for _, m := range mediaList {
 		nameUpper := strings.ToUpper(m.Filename)
 		for i, rl := range rules {
-			// 用大写形式做匹配，保证大小写不敏感。
-			if rl.match(nameUpper) {
+			patUpper := strings.ToUpper(rl.pattern)
+			hitted := false
+			if rl.isSub {
+				hitted = strings.Contains(nameUpper, patUpper)
+			} else {
+				hitted = strings.HasPrefix(nameUpper, patUpper)
+			}
+			if hitted {
 				counts[i]++
 			}
 		}
