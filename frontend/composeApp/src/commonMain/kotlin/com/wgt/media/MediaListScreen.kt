@@ -231,7 +231,24 @@ fun MediaListScreen(
                         slideshowActive = true
                     },
                     onRename = { media -> renameTarget = media },
-                    onShowInfo = { id -> mediaInfoTarget = id }
+                    onShowInfo = { id -> mediaInfoTarget = id },
+                    onRotate = { media ->
+                        // V8：调后端 /api/media/rotate 旋转 90°，成功后按当前 Tab
+                        // 强制刷新对应缓存列表（拿到新 orientation 重新渲染）。
+                        // 仅云端源走到这里（按钮仅 useBackendLoader 时显示）。
+                        advancedSearchScope.launch(dispatchers.io) {
+                            val ok = MediaService.rotateMedia(media.id, 90)
+                            if (ok) {
+                                // 清缓存后按 Tab 触发强制刷新；预览对话框读取的
+                                // imageOnlyList 派生自 viewModel.filteredList，
+                                // 列表刷新后预览内的图片方向也会跟着更新。
+                                when (selectedTab) {
+                                    1 -> viewModel.loadCloudViewForTab(forceRefresh = true)
+                                    2 -> viewModel.loadCloudMediaList(forceRefresh = true)
+                                }
+                            }
+                        }
+                    }
                 )
             } else {
                 // 点击的是视频但不知为何 previewIndex 被设置（理论上不会发生），关关闭
@@ -1644,7 +1661,8 @@ fun ImagePreviewDialog(
     onSlideshow: () -> Unit = {},
     onRename: (MediaMetadata) -> Unit = {},
     onSetCover: (MediaMetadata) -> Unit = {},
-    onShowInfo: (String) -> Unit = {}
+    onShowInfo: (String) -> Unit = {},
+    onRotate: (MediaMetadata) -> Unit = {}
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, mediaList.lastIndex)) {
         mediaList.size
@@ -1970,6 +1988,15 @@ fun ImagePreviewDialog(
                                 label = if (isFavorite(currentMedia)) "已收藏" else "收藏",
                                 onClick = { onFavoriteToggle(currentMedia) }
                             )
+                            // V8：旋转按钮——仅当 useBackendLoader（云端源）时显示。
+                            // 本地相册图片不经过后端，无法通过 /api/media/rotate 旋转。
+                            if (useBackendLoader) {
+                                PreviewActionButton(
+                                    iconRes = Res.drawable.ic_rotate_right,
+                                    label = "旋转",
+                                    onClick = { onRotate(currentMedia) }
+                                )
+                            }
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_delete,
                                 label = "删除",

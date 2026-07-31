@@ -393,6 +393,35 @@ object MediaService {
     }
 
     /**
+     * V8：POST /api/media/rotate — 旋转媒体（顺时针 90° 步进）。
+     *
+     * 后端仅持久化旋转标记（media.orientation 列，EXIF orientation 语义：
+     * 0/90/180/270），不改底层文件；前端按 orientation 渲染显示旋转。
+     * 故调用成功后需刷新列表以拿到新 orientation 重新渲染。
+     *
+     * @param mediaId 目标媒体 ID
+     * @param rotation 旋转角度，后端仅接受 0/90/180/270，非法值返回 400
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun rotateMedia(mediaId: String, rotation: Int): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/rotate") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_id", JsonPrimitive(mediaId))
+                    put("rotation", JsonPrimitive(rotation))
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "rotateMedia id=$mediaId rotation=$rotation status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "rotateMedia FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * 上传媒体
      *
      * 协议：POST /api/media/upload，body = 文件原始字节流（raw bytes），
