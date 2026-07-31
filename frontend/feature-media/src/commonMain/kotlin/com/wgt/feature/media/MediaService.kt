@@ -2414,6 +2414,34 @@ object MediaService {
     }
 
     /**
+     * V9：GET /api/media/tag/export — 导出标签数据。
+     *
+     * 返回后端原始 JSON 字符串（包含全部标签及其关联媒体），供前端复制到剪贴板
+     * 或保存为文件分享。与 [listAllTags] 区别：后者仅返回标签名列表，本方法返回
+     * 完整导出数据（标签 + 媒体映射），格式由后端决定，前端透传不解析。
+     *
+     * @return 成功时为原始 JSON 字符串；失败/非 200 时返回 null。
+     */
+    suspend fun exportTags(): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/export") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                logger.info("MediaService", "exportTags status=${response.status} bytes=${body.length}")
+                body
+            } else {
+                logger.info("MediaService", "exportTags status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "exportTags FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/info/{id} — 返回单个媒体详情。
      */
     suspend fun getMediaInfo(mediaId: String): MediaInfo? {

@@ -1942,8 +1942,13 @@ private fun MyTabContent(
                         }
                         // V9：标签管理面板——"管理"按钮弹出，列出全部标签 (tag+count)，
                         // 每行配重命名/删除操作（复用上方 renameTarget/deleteTagTarget 对话框流程），
-                        // 操作完成后刷新 tagStats。
+                        // 操作完成后刷新 tagStats。底部配"导出"按钮调 GET /api/media/tag/export，
+                        // 导出结果复制到剪贴板并提示。
                         if (showTagManage) {
+                            // 导出反馈消息 + 剪贴板管理器
+                            var exportMessage by remember { mutableStateOf<String?>(null) }
+                            var isExporting by remember { mutableStateOf(false) }
+                            val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
                                 title = { Text("标签管理") },
@@ -1989,9 +1994,44 @@ private fun MyTabContent(
                                             }
                                         }
                                     }
+                                    // 导出反馈提示
+                                    exportMessage?.let { msg ->
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            msg,
+                                            fontSize = 12.sp,
+                                            color = if (msg.startsWith("导出失败")) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.tertiary
+                                            }
+                                        )
+                                    }
                                 },
                                 confirmButton = {
                                     TextButton(onClick = { showTagManage = false }) { Text("关闭") }
+                                },
+                                dismissButton = {
+                                    TextButton(
+                                        enabled = !isExporting && !tagStats.isNullOrEmpty(),
+                                        onClick = {
+                                            isExporting = true
+                                            val statList = tagStats
+                                            scope.launch {
+                                                val json = MediaService.exportTags()
+                                                isExporting = false
+                                                if (json != null) {
+                                                    clipboard.setText(
+                                                        androidx.compose.ui.text.AnnotatedString(json)
+                                                    )
+                                                    val count = statList?.size ?: 0
+                                                    exportMessage = "已导出 $count 个标签（已复制到剪贴板）"
+                                                } else {
+                                                    exportMessage = "导出失败，请检查后端连接"
+                                                }
+                                            }
+                                        }
+                                    ) { Text(if (isExporting) "导出中…" else "导出标签") }
                                 }
                             )
                         }
