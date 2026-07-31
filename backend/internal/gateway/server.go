@@ -6170,9 +6170,13 @@ func (s *Server) handleUploadStreak(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按日期（本地时区 YYYY-MM-DD）分组，记录每个有上传的日期集合。
+	// 按日期（YYYY-MM-DD）分组，记录每个有上传的日期集合。
+	// storage 层 created_at 以 UTC RFC3339 落库（timeToVal → t.UTC()），
+	// 行扫描返回 UTC 定位的时间，故此处 day/today 均按 UTC 取，避免与本地时区
+	// 错位导致 today_count 与 current_streak 偏一天。
+	nowUTC := time.Now().UTC()
 	days := make(map[string]bool)
-	today := time.Now().Format("2006-01-02")
+	today := nowUTC.Format("2006-01-02")
 	todayCount := 0
 	for _, m := range mediaList {
 		if m.Deleted {
