@@ -149,6 +149,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/timeline", s.handleMediaTimeline)
 	// V7：按类型+月份分组的存储统计
 	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
+	// 增强存储分项 v2：按类型×年份交叉矩阵，每格返 count+bytes，另返 total_count/total_bytes。
+	// 与 storage-breakdown（类型+月份单维分桶）互补：v2 做二维交叉，便于前端按年看类型构成、
+	// 按类型看年度分布。矩阵方向为 type→year（year→type 见 storage-deep-analysis）。
+	s.mux.HandleFunc("/api/media/storage-breakdown-v2", s.handleStorageBreakdownV2)
 	// V7：搜索建议（基于文件名前缀）
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V24：多源增强搜索建议（文件名+标签+相册名合并去重）
@@ -4226,6 +4230,96 @@ func (s *Server) handleMediaStorageBreakdown(w http.ResponseWriter, r *http.Requ
 			"bytes": totalBytes,
 			"mb":    float64(totalBytes) / (1024 * 1024),
 		},
+	})
+}
+
+// handleStorageBreakdownV2 GET /api/media/storage-breakdown-v2 — 增强存储分项（类型×年份矩阵）。
+//
+// 按 type × year 二维交叉分组，每格返回 count 与 bytes，另返 total_count/total_bytes。
+// 与 storage-breakdown（类型+月份单维分桶）互补：v2 做二维交叉，便于前端按年看类型构成、
+// 按类型看年度分布。矩阵方向为 type→year（与 storage-deep-analysis 的 year→type 互补）。
+//
+// 数据源：s.store.ListMediaByUser（当前用户全部 media，含软删行，handler 内跳过 m.Deleted）。
+// 时间口径：按 CreatedAt（上传时间）的 UTC 年份分桶，与 storage-deep-analysis /
+// storage-trend-extended 一致；不用 TakenAt（EXIF 拍摄时间），因为该字段可空（0=未知）。
+// 类型归一：空串归 "IMAGE"（与 storage-breakdown / storage-deep-analysis 同口径）。
+//
+// 响应结构：
+//
+//	{
+//	  "matrix": {
+//	    "IMAGE":     {"2024": {"count": N, "bytes": N}, "2025": {...}},
+//	    "VIDEO":     {...},
+//	    "LIVE_PHOTO": {...}
+//	  },
+//	  "total_count": N,
+//	  "total_bytes": N
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageBreakdownV2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// cellStat 是矩阵中每个交叉格 (type, year) 的统计单元。
+	type cellStat struct {
+		Count int   `json:"count"`
+		Bytes int64 `json:"bytes"`
+	}
+	// matrix: type -> year -> stat。按数据如实出现填充，不预置空年份槽（year 来自数据），
+	// 便于前端按实际存在的年份渲染。
+	matrix := make(map[string]map[string]*cellStat)
+	var totalCount int
+	var totalBytes int64
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+
+		// 归一化类型：空串归 IMAGE（与 storage-breakdown / storage-deep-analysis 同口径）。
+		t := m.Type
+		if t == "" {
+			t = "IMAGE"
+		}
+		year := m.CreatedAt.UTC().Format("2006")
+
+		ty, ok := matrix[t]
+		if !ok {
+			ty = make(map[string]*cellStat)
+			matrix[t] = ty
+		}
+		cell, ok := ty[year]
+		if !ok {
+			cell = &cellStat{}
+			ty[year] = cell
+		}
+		cell.Count++
+		cell.Bytes += m.Size
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"matrix":      matrix,
+		"total_count": totalCount,
+		"total_bytes": totalBytes,
 	})
 }
 
