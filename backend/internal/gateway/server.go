@@ -292,6 +292,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/media-list", s.handleAlbumMediaList)
 	// V8：重命名相册
 	s.mux.HandleFunc("/api/media/album/rename", s.handleAlbumRename)
+	// 相册媒体分布分析：GET ?album_id=xxx — 按类型/按月份/按大小分段统计相册内媒体分布。
+	// 只读聚合端点（区别于 album/media-list 返全量列表），返回三维度分布计数，供前端
+	// 相册详情页展示"相册构成"概览。精确匹配优先于 /api/media/album/ 前缀匹配。
+	s.mux.HandleFunc("/api/media/album-media-distribution", s.handleAlbumMediaDistribution)
 	s.mux.HandleFunc("/api/media/album/", s.handleAlbumResource)
 
 	// 共享相册（PRD-v7 §2.3）：邀请 / 撤销 / 列出被共享的相册。
@@ -2861,6 +2865,114 @@ func (s *Server) handleAlbumExport(w http.ResponseWriter, r *http.Request) {
 		},
 		"media_count": len(media),
 		"media":       media,
+	})
+}
+
+// handleAlbumMediaDistribution 处理 GET /api/media/album-media-distribution?album_id=xxx，
+// 对相册内媒体做三维度分布统计（按类型/按月份/按大小分段），返回聚合计数。
+// 校验相册归属当前用户，仅统计未软删的媒体。只读端点，不落库。
+func (s *Server) handleAlbumMediaDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	albumID := r.URL.Query().Get("album_id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	// 校验相册归属当前用户
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, albumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	// 遍历相册内媒体，按三维度分类统计。
+	//   - by_type：按 m.Type 分组计数（IMAGE/VIDEO/LIVE_PHOTO 等，键为类型名）。
+	//   - by_month：按 m.CreatedAt 的 "YYYY-MM" 月份分组计数（零值时间归入 "unknown"）。
+	//   - by_size：按文件大小分段——小<1MB / 中 1-10MB / 大>10MB。
+	const (
+		mb        = 1024 * 1024
+		smallMax  = int64(1) * mb
+		mediumMax = int64(10) * mb
+	)
+	byType := make(map[string]int)
+	byMonth := make(map[string]int)
+	sz := struct{ small, medium, large int }{}
+	total := 0
+	for _, mediaID := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || m == nil || m.UserID != uid {
+			continue
+		}
+		if m.Deleted {
+			continue
+		}
+		total++
+		// 按类型
+		t := m.Type
+		if t == "" {
+			t = "UNKNOWN"
+		}
+		byType[t]++
+		// 按月份
+		var month string
+		if m.CreatedAt.IsZero() {
+			month = "unknown"
+		} else {
+			month = m.CreatedAt.Format("2006-01")
+		}
+		byMonth[month]++
+		// 按大小分段
+		switch {
+		case m.Size < smallMax:
+			sz.small++
+		case m.Size <= mediumMax:
+			sz.medium++
+		default:
+			sz.large++
+		}
+	}
+	// by_month 转为有序切片：仅保留非 unknown 项按月份升序，unknown 项置于末尾。
+	type monthCount struct {
+		Month string `json:"month"`
+		Count int    `json:"count"`
+	}
+	var known, unknown []monthCount
+	for month, count := range byMonth {
+		mc := monthCount{Month: month, Count: count}
+		if month == "unknown" {
+			unknown = append(unknown, mc)
+		} else {
+			known = append(known, mc)
+		}
+	}
+	sort.Slice(known, func(i, j int) bool { return known[i].Month < known[j].Month })
+	byMonthList := append(known, unknown...)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"album_id": albumID,
+		"by_type":  byType,
+		"by_month": byMonthList,
+		"by_size": map[string]int{
+			"small":  sz.small,
+			"medium": sz.medium,
+			"large":  sz.large,
+		},
+		"total": total,
 	})
 }
 
