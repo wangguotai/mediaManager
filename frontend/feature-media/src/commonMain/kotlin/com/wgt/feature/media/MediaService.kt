@@ -3854,6 +3854,45 @@ object MediaService {
     )
 
     /**
+     * V22：GET /api/media/tag-trend?months=6 — 标签使用趋势（每月新增标签数）。
+     *
+     * 后端返回 `{ months: [{month, new_tags}], total_new_tags }`：month 形如
+     * "2026-03"，new_tags 为该月新增标签数（audit_log action="tag" 口径）。
+     * 月份窗口 `[本月往前推 months-1 个月 .. 本月]`，升序，空月补 0。
+     *
+     * 返回 `null` = 网络/HTTP 失败（UI 隐藏整张卡片）；非 null（可能为空列表）
+     * = 成功。调用方默认取 6 个月，最多展示 6 行。
+     *
+     * @param months 月份窗口大小（默认 6，后端收敛到 [1,24]）
+     */
+    suspend fun getTagTrend(months: Int = 6): List<TagTrendPoint>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-trend") {
+                parameter("months", months)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["months"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagTrendPoint(
+                        month = o["month"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        newTags = o["new_tags"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagTrend FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V22：标签趋势单月数据点（[getTagTrend] 返回）。 */
+    data class TagTrendPoint(
+        val month: String,
+        val newTags: Int
+    )
+
+    /**
      * V9：GET /api/media/tag-network — 标签网络图数据（节点+边）。
      *
      * 与 [getTagCoOccurrence] 同源数据但输出图结构：标签作为节点（[TagNode.count]

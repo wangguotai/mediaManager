@@ -3630,6 +3630,79 @@ private fun MyTabContent(
         // V9：标签云卡片结束
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V22：标签趋势卡片——调 getTagTrend 显示近6月每月新增标签数柱状图。
+        // 月份窗口 [本月前推5个月 .. 本月]，升序，空月补0。按最大值缩放柱宽。
+        // null（请求失败/未铺量）静默跳过，不破坏下方卡片。
+        var tagTrend by remember { mutableStateOf<List<MediaService.TagTrendPoint>?>(null) }
+        LaunchedEffect(Unit) { tagTrend = MediaService.getTagTrend() }
+        tagTrend?.let { trend ->
+            if (trend.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签趋势",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 按最大新增数缩放柱宽；全0时 coerceAtLeast(1) 防除零。
+                        val maxNew = trend.maxOf { it.newTags }.coerceAtLeast(1)
+                        // 仅展示最近6个月（后端默认已返回6条，此处再 take 兜底）
+                        trend.take(6).forEach { point ->
+                            // 柱宽比例：0..1，至少留 4% 让0月也可见。
+                            val ratio = (point.newTags.toFloat() / maxNew).coerceIn(0.04f, 1f)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 月份标签（固定宽，右对齐）
+                                Text(
+                                    point.month,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(56.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                // 柱状条容器：占满剩余宽，内部按 ratio 填充强调色
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(14.dp)
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(ratio)
+                                            .fillMaxHeight()
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .background(MaterialTheme.colorScheme.primary)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                // 新增数（固定宽，右对齐）
+                                Text(
+                                    "${point.newTags}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(32.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：标签关联卡片——调 getTagNetwork 显示标签关联对（简化文字列表，最多5对）。
         // 后端 edges 未按 weight 排序，前端取 top5 前自行按 weight 倒序。
         var tagNetwork by remember { mutableStateOf<MediaService.TagNetwork?>(null) }
