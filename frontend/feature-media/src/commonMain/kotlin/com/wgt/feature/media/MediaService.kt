@@ -2480,6 +2480,49 @@ object MediaService {
     /** V8：标签统计项 */
     data class TagStat(val tag: String, val count: Int)
 
+    /**
+     * V9：GET /api/media/tag/cloud-data — 标签云数据（含每标签封面缩略图 URL）。
+     *
+     * 后端返回 `{ tags: [{tag_name, count, thumbnail_url}], total }`：
+     * - tag_name：标签名
+     * - count：该标签下媒体数量（已按 count DESC 排序）
+     * - thumbnail_url：该标签关联第一个媒体的缩略图相对路径，形如
+     *   `/api/media/thumbnail/{media_id}`；空串表示该标签无关联媒体。
+     *
+     * 前端只消费 [tagName] + [count] + [thumbnailUrl]（thumbnailUrl 仅用于
+     * 提取 media_id 后交 [BackendImageLoader.loadThumbnail] 加载封面缩略图），故
+     * 这里把相对路径原样透传，拆 media_id 的工作在 UI 层完成（避免本层引入路径解析）。
+     *
+     * 返回 `null` = 网络/HTTP 失败（UI 隐藏整张卡片）；非 null（可能为空列表）= 成功。
+     */
+    suspend fun getTagCloudData(): List<TagCloudItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/cloud-data") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagCloudItem(
+                        tagName = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        thumbnailUrl = o["thumbnail_url"]?.let {
+                            // 字段可能为 JSON null（无关联媒体）—— 防御 JsonNull 非 JsonPrimitive。
+                            if (it is JsonNull) null else it.jsonPrimitive?.contentOrNull?.takeIf { url -> url.isNotEmpty() }
+                        }
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagCloudData FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V9：标签云条目（标签名 + 计数 + 封面缩略图相对 URL，可能为 null）。 */
+    data class TagCloudItem(val tagName: String, val count: Int, val thumbnailUrl: String?)
+
     /** V8：GET /api/media/tag/search?tag=xxx — 按标签搜索 media_id 列表。 */
     suspend fun searchByTag(tag: String): List<String>? {
         return try {

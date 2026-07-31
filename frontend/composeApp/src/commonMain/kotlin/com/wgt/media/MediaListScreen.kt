@@ -2066,9 +2066,11 @@ private fun MyTabContent(
         }
 
         // V9：标签云卡片（V8 演进：chip 点击搜索 + 长按弹重命名/删除菜单）
-        var tagStats by remember { mutableStateOf<List<MediaService.TagStat>?>(null) }
-        LaunchedEffect(Unit) { tagStats = MediaService.getTagStats() }
-        tagStats?.let { stats ->
+        // V9 升级：改用 cloud-data 端点（带每标签封面缩略图 URL），chip 渲染
+        // 24dp 圆角缩略图 + 按媒体数量动态调整字号/留白，接近真标签云观感。
+        var tagCloud by remember { mutableStateOf<List<MediaService.TagCloudItem>?>(null) }
+        LaunchedEffect(Unit) { tagCloud = MediaService.getTagCloudData() }
+        tagCloud?.let { stats ->
             if (stats.isNotEmpty()) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -2102,45 +2104,47 @@ private fun MyTabContent(
                         var renameText by remember { mutableStateOf("") }
                         // V8：删除确认对话框目标
                         var deleteTagTarget by remember { mutableStateOf<String?>(null) }
+                        // V9：标签云 chip——按 count 动态调整字号（count 越大字号越大），
+                        // 有封面缩略图的标签在 chip 前显示 24dp 圆角缩略图。
+                        // 先算各 count 的基准：maxCount 用于归一化字号区间。
+                        val maxCount = stats.maxOf { it.count }.coerceAtLeast(1)
                         FlowRow(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             stats.forEach { s ->
-                                AssistChip(
-                                    onClick = {},
-                                    label = { Text("#${s.tag} (${s.count})", fontSize = 12.sp) },
-                                    colors = AssistChipDefaults.assistChipColors(
-                                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
-                                    ),
-                                    modifier = Modifier.combinedClickable(
-                                        // V9：点击 → 触发标签搜索（切 Tab + 设 query 为 #tag）
-                                        onClick = { onTagSearch(s.tag) },
-                                        // V9：长按 → 弹重命名/删除菜单（不再直接删除）
-                                        onLongClick = {
-                                            tagMenuAnchor = s.tag
-                                            showTagMenu = true
-                                        }
-                                    )
+                                // 字号映射：12sp 起，随 count 归一化线性增至 18sp。
+                                val ratio = (s.count.toFloat() / maxCount).coerceIn(0f, 1f)
+                                val chipFontSize = (12 + (18 - 12) * ratio).sp
+                                // 简化版本：每个 chip 负责加载并缓存自己的封面缩略图。
+                                TagCloudChip(
+                                    item = s,
+                                    fontSize = chipFontSize,
+                                    onTagSearch = onTagSearch,
+                                    onLongClick = { tag ->
+                                        tagMenuAnchor = tag
+                                        showTagMenu = true
+                                    }
                                 )
                                 // DropdownMenu 需附着在 composable 上，为当前 tag 锚定显示
                                 androidx.compose.material3.DropdownMenu(
-                                    expanded = showTagMenu && tagMenuAnchor == s.tag,
-                                    onDismissRequest = { if (tagMenuAnchor == s.tag) showTagMenu = false }
+                                    expanded = showTagMenu && tagMenuAnchor == s.tagName,
+                                    onDismissRequest = { if (tagMenuAnchor == s.tagName) showTagMenu = false }
                                 ) {
                                     androidx.compose.material3.DropdownMenuItem(
                                         text = { Text("重命名") },
                                         onClick = {
                                             showTagMenu = false
-                                            renameTarget = s.tag
-                                            renameText = s.tag
+                                            renameTarget = s.tagName
+                                            renameText = s.tagName
                                         }
                                     )
                                     androidx.compose.material3.DropdownMenuItem(
                                         text = { Text("删除") },
                                         onClick = {
                                             showTagMenu = false
-                                            deleteTagTarget = s.tag
+                                            deleteTagTarget = s.tagName
                                         }
                                     )
                                 }
@@ -2168,7 +2172,7 @@ private fun MyTabContent(
                                             renameTarget = null
                                             scope.launch {
                                                 val ok = MediaService.renameTag(old, new)
-                                                if (ok) tagStats = MediaService.getTagStats()
+                                                if (ok) tagCloud = MediaService.getTagCloudData()
                                             }
                                         }
                                     ) { Text("确定") }
@@ -2190,7 +2194,7 @@ private fun MyTabContent(
                                         deleteTagTarget = null
                                         scope.launch {
                                             MediaService.deleteTag(t)
-                                            tagStats = MediaService.getTagStats()
+                                            tagCloud = MediaService.getTagCloudData()
                                         }
                                     }) { Text("删除", color = MaterialTheme.colorScheme.error) }
                                 },
@@ -2201,7 +2205,7 @@ private fun MyTabContent(
                         }
                         // V9：标签管理面板——"管理"按钮弹出，列出全部标签 (tag+count)，
                         // 每行配重命名/删除操作（复用上方 renameTarget/deleteTagTarget 对话框流程），
-                        // 操作完成后刷新 tagStats。底部配"导出"按钮调 GET /api/media/tag/export，
+                        // 操作完成后刷新 tagCloud。底部配"导出"按钮调 GET /api/media/tag/export，
                         // 导出结果复制到剪贴板并提示。
                         if (showTagManage) {
                             // 导出反馈消息 + 剪贴板管理器
@@ -2212,7 +2216,7 @@ private fun MyTabContent(
                                 onDismissRequest = { showTagManage = false },
                                 title = { Text("标签管理") },
                                 text = {
-                                    val list = tagStats
+                                    val list = tagCloud
                                     if (list.isNullOrEmpty()) {
                                         Text("暂无标签", color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     } else {
@@ -2230,7 +2234,7 @@ private fun MyTabContent(
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
                                                     Text(
-                                                        "#${s.tag} (${s.count})",
+                                                        "#${s.tagName} (${s.count})",
                                                         fontSize = 14.sp,
                                                         modifier = Modifier.weight(1f),
                                                         maxLines = 1,
@@ -2239,14 +2243,14 @@ private fun MyTabContent(
                                                     TextButton(
                                                         onClick = {
                                                             showTagManage = false
-                                                            renameTarget = s.tag
-                                                            renameText = s.tag
+                                                            renameTarget = s.tagName
+                                                            renameText = s.tagName
                                                         }
                                                     ) { Text("重命名", fontSize = 12.sp) }
                                                     TextButton(
                                                         onClick = {
                                                             showTagManage = false
-                                                            deleteTagTarget = s.tag
+                                                            deleteTagTarget = s.tagName
                                                         }
                                                     ) { Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
                                                 }
@@ -2272,10 +2276,10 @@ private fun MyTabContent(
                                 },
                                 dismissButton = {
                                     TextButton(
-                                        enabled = !isExporting && !tagStats.isNullOrEmpty(),
+                                        enabled = !isExporting && !tagCloud.isNullOrEmpty(),
                                         onClick = {
                                             isExporting = true
-                                            val statList = tagStats
+                                            val statList = tagCloud
                                             scope.launch {
                                                 val json = MediaService.exportTags()
                                                 isExporting = false
@@ -2327,6 +2331,89 @@ private fun MyTabContent(
             subtitle = "后端地址、主题、OpenClaw 等",
             onClick = onNavigateToSettings
         )
+    }
+}
+
+/**
+ * V9：标签云 chip——单条标签的渲染单元。
+ *
+ * 调用 [MediaService.getTagCloudData] 返回的 [MediaService.TagCloudItem]：
+ * - [item.thumbnailUrl] 非空时，从中解析 media_id（路径形如
+ *   `/api/media/thumbnail/{media_id}`），经 [BackendImageLoader.loadThumbnail] 异步加载
+ *   封面缩略图并在 chip 前显示 24dp 圆角缩略图；加载中/失败显示占位色块。
+ * - 字号由调用方按 count 动态计算（[fontSize]），count 越大字号越大，模拟真标签云观感。
+ *
+ * 点击触发标签搜索，长按回调（用于弹重命名/删除菜单）。chip 用 [Surface] +
+ * Row 手绘（而非 AssistChip）以承载 thumbnail + Text 两段内容并控制字号。
+ *
+ * @param item 标签云条目
+ * @param fontSize chip 文字字号（调用方按 count 归一化计算）
+ * @param onTagSearch 点击 chip → 触发标签搜索
+ * @param onLongClick 长按 chip → 回传标签名供弹菜单
+ */
+@Composable
+private fun TagCloudChip(
+    item: MediaService.TagCloudItem,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    onTagSearch: (String) -> Unit,
+    onLongClick: (String) -> Unit
+) {
+    // 解析 thumbnail_url 末段作为 media_id（形如 /api/media/thumbnail/{id}）。
+    val mediaId = item.thumbnailUrl?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+    var thumbBitmap by remember(item.tagName) { mutableStateOf<ImageBitmap?>(null) }
+    var thumbLoaded by remember(item.tagName) { mutableStateOf(false) }
+    val chipScope = rememberCoroutineScope()
+
+    // 异步加载封面缩略图（命中 BackendImageLoader 的 LRU 缓存，回滑不重复请求）。
+    if (mediaId != null) {
+        LaunchedEffect(mediaId) {
+            chipScope.launch(dispatchers.io) {
+                thumbBitmap = try { BackendImageLoader.loadThumbnail(mediaId) } catch (_: Exception) { null }
+                thumbLoaded = true
+            }
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
+        tonalElevation = 0.dp,
+        modifier = Modifier.combinedClickable(
+            onClick = { onTagSearch(item.tagName) },
+            onLongClick = { onLongClick(item.tagName) }
+        )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 6.dp, end = 10.dp, top = 4.dp, bottom = 4.dp)
+        ) {
+            // 24dp 封面缩略图：加载中/失败显示占位色块，保持布局稳定不跳动。
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                val bm = thumbBitmap
+                if (bm != null) {
+                    Image(
+                        bitmap = bm,
+                        contentDescription = item.tagName,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else if (!thumbLoaded && mediaId != null) {
+                    // 加载中：留空占位（背景色已填充）。
+                }
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                "#${item.tagName} (${item.count})",
+                fontSize = fontSize,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+        }
     }
 }
 
