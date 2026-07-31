@@ -218,6 +218,63 @@ object MediaService {
     }
 
     /**
+     * 相似媒体条目（与后端 [handleMediaSimilar] 的 similarItem JSON 对齐）。
+     *
+     * 后端按"看起来像"——同类型 + 文件大小差距 <20% + 分辨率差距 <30%——推荐相似媒体，
+     * 与 [RelatedMedia]（基于标签/日期）互补。[similarityScore] 为 0~100（100 最像）。
+     *
+     * @param mediaId 媒体 ID
+     * @param filename 文件名
+     * @param similarityScore 相似度评分 0~100（100 最像）
+     */
+    data class SimilarMedia(
+        val mediaId: String,
+        val filename: String,
+        val similarityScore: Double
+    )
+
+    /**
+     * GET /api/media/media-similar/{id}?limit=10 — 获取相似媒体推荐列表。
+     *
+     * 后端基于物理特征（同类型 + size 差距 <20% + 分辨率差距 <30%）推荐"看起来像"的媒体，
+     * 返回 `{ "similar": [{media_id,filename,similarity_score}], "total": N }`，similarity_score 为
+     * 0~100（100 最像）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getRelatedMedia] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示推荐区）。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param mediaId 目标媒体 ID
+     * @param limit 返回上限（默认 10，后端上限 50）
+     * @return 相似媒体列表；失败返回 null
+     */
+    suspend fun getSimilarMedia(mediaId: String, limit: Int = 10): List<SimilarMedia>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-similar/$mediaId") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["similar"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val id = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    SimilarMedia(
+                        mediaId = id,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        similarityScore = item["similarity_score"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getSimilarMedia id=$mediaId status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSimilarMedia FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 登录/注册成功响应（与后端 [auth.AuthResult] JSON 对齐）。
      *
      * 后端结构：`{ "token","expires_at","user":{"id","username","role","created_at"} }`。

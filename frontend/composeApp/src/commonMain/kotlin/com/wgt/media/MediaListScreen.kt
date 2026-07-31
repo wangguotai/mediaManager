@@ -4353,6 +4353,24 @@ fun ImagePreviewDialog(
                         )
                     }
 
+                    // 相似照片推荐区：调用后端 /api/media/media-similar/{id} 获取与当前
+                    // 媒体"看起来像"的推荐（同类型 + size 差距 <20% + 分辨率差距 <30%），
+                    // 横向滚动展示缩略图 + 文件名 + 相似度%，点击切换到该媒体。
+                    // 与上面的"相关照片"互补：related 用标签/日期，similar 用物理特征。
+                    // 仅后端源（useBackendLoader=true）时展示；无相似照片（拉取失败或空列表）时不显示。
+                    if (useBackendLoader) {
+                        SimilarMediaStrip(
+                            currentMediaId = currentMedia.id,
+                            mediaList = mediaList,
+                            onSimilarClick = { similarMediaId ->
+                                val targetIndex = mediaList.indexOfFirst { it.id == similarMediaId }
+                                if (targetIndex >= 0) {
+                                    scope.launch { pagerState.animateScrollToPage(targetIndex) }
+                                }
+                            }
+                        )
+                    }
+
                     if (showDetails) {
                         DetailPanel(
                             media = currentMedia,
@@ -5661,6 +5679,163 @@ private fun RelatedMediaItem(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 2.dp)
+        )
+    }
+}
+
+/**
+ * 相似照片推荐区（横向滚动）。
+ *
+ * 调用 [MediaService.getSimilarMedia] 获取与 [currentMediaId] "看起来像"的推荐列表
+ * （后端按同类型 + size 差距 <20% + 分辨率差距 <30% 筛选），横向滚动展示每项的缩略图
+ * （经 [BackendImageLoader.loadThumbnail]）+ 文件名 + 相似度%。点击某项触发 [onSimilarClick]
+ * （由父组件滚动 Pager 切换到该媒体）。
+ *
+ * 加载策略、空态处理与 [RelatedMediaStrip] 一致：[LaunchedEffect] 绑定 [currentMediaId]，
+ * 加载中（null）与空列表均不渲染（composable 提前 return），满足"如果无相似照片则不显示"。
+ * 与"相关照片"互补：related 用标签/日期判断关联，similar 用物理特征（size/类型/尺寸）。
+ *
+ * @param currentMediaId 当前预览的媒体 ID（推荐以此为中心）
+ * @param mediaList 当前预览列表（由父组件用于索引查找，本函数不直接使用）
+ * @param onSimilarClick 点击相似照片回调，参数为相似媒体的 ID
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun SimilarMediaStrip(
+    currentMediaId: String,
+    mediaList: List<MediaMetadata>,
+    onSimilarClick: (String) -> Unit
+) {
+    // 相似媒体列表：null=加载中/失败，empty=无相似推荐（均不渲染）。
+    var similarItems by remember(currentMediaId) {
+        mutableStateOf<List<com.wgt.feature.media.MediaService.SimilarMedia>?>(null)
+    }
+    val scope = rememberCoroutineScope()
+
+    // 切换当前图片即重新拉取相似推荐。
+    LaunchedEffect(currentMediaId) {
+        scope.launch(dispatchers.io) {
+            similarItems = com.wgt.feature.media.MediaService.getSimilarMedia(currentMediaId)
+        }
+    }
+
+    // 仅在有相似推荐时渲染；加载中（null）与空列表均不显示。
+    val items = similarItems ?: return
+    if (items.isEmpty()) return
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+        ) {
+            Text(
+                text = "相似照片",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(start = 16.dp, bottom = 2.dp)
+            )
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp)
+            ) {
+                items(
+                    items = items,
+                    key = { it.mediaId },
+                    contentType = { "similar_media_item" }
+                ) { similar ->
+                    SimilarMediaItem(
+                        similar = similar,
+                        onClick = { onSimilarClick(similar.mediaId) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 相似照片单项：72×72 缩略图 + 文件名（单行省略）+ 相似度%，点击触发跳转。
+ *
+ * 相似度按 [similar.similarityScore]（0~100，100 最像）取整展示为 "NN%"。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun SimilarMediaItem(
+    similar: com.wgt.feature.media.MediaService.SimilarMedia,
+    onClick: () -> Unit
+) {
+    var thumbnailBitmap by remember(similar.mediaId) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(similar.mediaId) { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(similar.mediaId) {
+        scope.launch(dispatchers.io) {
+            try {
+                thumbnailBitmap = BackendImageLoader.loadThumbnail(similar.mediaId)
+            } catch (e: Exception) {
+                // 加载失败静默
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .width(72.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                isLoading -> {
+                    ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
+                }
+                thumbnailBitmap != null -> {
+                    Image(
+                        bitmap = thumbnailBitmap!!,
+                        contentDescription = similar.filename,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                else -> {
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_image_placeholder),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = Color.Gray
+                    )
+                }
+            }
+        }
+        Text(
+            text = similar.filename,
+            color = Color.White.copy(alpha = 0.7f),
+            fontSize = 9.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 2.dp)
+        )
+        // 相似度百分比：取整显示，区分于相关照片单项（无此行）。
+        Text(
+            text = "${similar.similarityScore.toInt()}%",
+            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.85f),
+            fontSize = 9.sp,
+            maxLines = 1
         )
     }
 }
