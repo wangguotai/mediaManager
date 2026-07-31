@@ -281,6 +281,9 @@ func (s *Server) registerRoutes() {
 	// 每个标签占用的存储量与活跃度。实现：TagStats 取标签计数，ListMediaByUser 一次拉
 	// 全量 media 建索引，SearchMediaByTag 取每个标签关联的 media_id，汇总落 sum/max。
 	s.mux.HandleFunc("/api/media/tag-stat-detailed", s.handleMediaTagStatDetailed)
+	// 标签共现分析（哪些标签经常一起出现在同一 media 上）。
+	// 对每对标签统计同时拥有两者的 media 数量，只返回 co-occurrence >= 2 的标签对。
+	s.mux.HandleFunc("/api/media/tag-co-occurrence", s.handleTagCoOccurrence)
 	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
 	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
@@ -5326,6 +5329,79 @@ func (s *Server) handleMediaTagStatDetailed(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":       out,
 		"total_tags": len(out),
+	})
+}
+
+// handleTagCoOccurrence GET /api/media/tag-co-occurrence — 标签共现分析。
+// 对每对标签 (A, B) 统计同时拥有这两个标签的 media 数量，只返回 co-occurrence >= 2
+// 的标签对。响应: { pairs: [{tag_a, tag_b, count}], total_pairs }。
+//
+// 实现：ListAllTags 取全量标签，对每个标签调 SearchMediaByTag 取关联 media_id 集合，
+// 再对每对 (i<j) 求交集大小。标签数 N 时共 N*(N-1)/2 对，N 通常较小（几十～几百）。
+func (s *Server) handleTagCoOccurrence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 为每个标签构造 media_id 集合，供后续求交集。
+	tagMedia := make(map[string]map[string]struct{}, len(tags))
+	for _, t := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		tagMedia[t] = set
+	}
+	type coPair struct {
+		TagA  string `json:"tag_a"`
+		TagB  string `json:"tag_b"`
+		Count int    `json:"count"`
+	}
+	pairs := make([]coPair, 0)
+	for i := 0; i < len(tags); i++ {
+		a := tags[i]
+		setA := tagMedia[a]
+		for j := i + 1; j < len(tags); j++ {
+			b := tags[j]
+			setB := tagMedia[b]
+			// 求交集大小：遍历较小的集合查较大的集合。
+			small, large := setA, setB
+			if len(small) > len(large) {
+				small, large = large, small
+			}
+			count := 0
+			for id := range small {
+				if _, ok := large[id]; ok {
+					count++
+				}
+			}
+			if count >= 2 {
+				pairs = append(pairs, coPair{TagA: a, TagB: b, Count: count})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pairs":       pairs,
+		"total_pairs": len(pairs),
 	})
 }
 
