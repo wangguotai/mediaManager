@@ -3049,4 +3049,126 @@ object MediaService {
         val totalCount: Int,
         val totalBytes: Long
     )
+
+    /**
+     * V9：GET /api/media/stat-summary — 一站式统计汇总。
+     *
+     * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
+     * favorites / shares / albums / trash / recent_uploads），避免逐卡片多次调用。
+     *
+     * 后端响应结构（各子统计 best-effort：单条 Store 调用失败仅令对应字段为空/null）：
+     * ```
+     * { "summary": {total_count, total_bytes, image_count, video_count, live_count},
+     *   "tags":     [{tag, count}],      // top 5
+     *   "audit":    [{action, count}],
+     *   "quota":    {quota_bytes, used_bytes, usage_percent},
+     *   "favorites": N,
+     *   "shares":    N,
+     *   "albums":    N,
+     *   "trash":     N,
+     *   "recent_uploads": [{id, filename, type, created_at}]  // top 3
+     * }
+     * ```
+     *
+     * summary 子对象在后端 ListMediaByUser 失败时为 null，前端按 [SummaryData] 默认 0 容错；
+     * tags / audit 数组缺失或解析失败回退空列表；recent_uploads 同理。这样 UI 侧永远拿到
+     * 一个非 null 的 [StatSummary]，按各字段是否为默认值/空列表自行渲染空态。
+     *
+     * @return 汇总对象；HTTP 非 200 或网络异常返回 null（调用方按空态提示）
+     */
+    suspend fun getStatSummary(): StatSummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/stat-summary") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // summary：可能为 null（后端 ListMediaByUser 失败），回退零值对象。
+                val s = o["summary"]?.jsonObject
+                StatSummary(
+                    summary = SummaryData(
+                        totalCount = s?.get("total_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        totalBytes = s?.get("total_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                        imageCount = s?.get("image_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        videoCount = s?.get("video_count")?.jsonPrimitive?.intOrNull ?: 0,
+                        liveCount = s?.get("live_count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    tags = o["tags"]?.jsonArray?.mapNotNull { item ->
+                        val t = item.jsonObject
+                        val name = t["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        TagStat(
+                            tag = name,
+                            count = t["count"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    } ?: emptyList(),
+                    audit = o["audit"]?.jsonArray?.mapNotNull { item ->
+                        val a = item.jsonObject
+                        val action = a["action"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        AuditLogStat(
+                            action = action,
+                            count = a["count"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    } ?: emptyList(),
+                    quota = run {
+                        val q = o["quota"]?.jsonObject
+                        QuotaData(
+                            quotaBytes = q?.get("quota_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                            usedBytes = q?.get("used_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                            usagePercent = q?.get("usage_percent")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                        )
+                    },
+                    favorites = o["favorites"]?.jsonPrimitive?.intOrNull ?: 0,
+                    shares = o["shares"]?.jsonPrimitive?.intOrNull ?: 0,
+                    albums = o["albums"]?.jsonPrimitive?.intOrNull ?: 0,
+                    trash = o["trash"]?.jsonPrimitive?.intOrNull ?: 0,
+                    recentUploads = o["recent_uploads"]?.jsonArray?.mapNotNull { item ->
+                        val ru = item.jsonObject
+                        val id = ru["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        RecentUpload(
+                            id = id,
+                            filename = ru["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                            type = ru["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                            size = ru["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                            createdAt = ru["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                        )
+                    } ?: emptyList()
+                )
+            } else {
+                logger.info("MediaService", "getStatSummary status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStatSummary FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V9：stat-summary 的汇总计数（媒体总数与按类型拆分）。 */
+    data class SummaryData(
+        val totalCount: Int,
+        val totalBytes: Long,
+        val imageCount: Int,
+        val videoCount: Int,
+        val liveCount: Int
+    )
+
+    /** V9：stat-summary 的配额子对象（总配额/已用/百分比）。 */
+    data class QuotaData(
+        val quotaBytes: Long,
+        val usedBytes: Long,
+        val usagePercent: Double
+    )
+
+    /** V9：stat-summary 一站式汇总结果。各子统计 best-effort，缺失字段回退零值/空列表。 */
+    data class StatSummary(
+        val summary: SummaryData,
+        val tags: List<TagStat>,
+        val audit: List<AuditLogStat>,
+        val quota: QuotaData,
+        val favorites: Int,
+        val shares: Int,
+        val albums: Int,
+        val trash: Int,
+        val recentUploads: List<RecentUpload>
+    )
 }

@@ -823,6 +823,98 @@ fun SettingsScreen(
                     }
                 }
             }
+            // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
+            // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
+            // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。
+            var statSummary by remember { mutableStateOf<MediaService.StatSummary?>(null) }
+            var statSummaryLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                statSummary = MediaService.getStatSummary()
+                statSummaryLoading = false
+            }
+            SectionTitle("数据概览", iconRes = Res.drawable.ic_info)
+            if (statSummaryLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (statSummary == null) {
+                Text(
+                    "无法获取数据概览",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val s = statSummary!!.summary
+                // 第一行：媒体总数 + 图片/视频/Live 计数
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("媒体总数", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${s.totalCount} 项",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                // 按类型拆分 + 收藏/分享/相册/回收站：多列 Row 布局展示
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatCell(
+                        label = "图片",
+                        value = s.imageCount,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCell(
+                        label = "视频",
+                        value = s.videoCount,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCell(
+                        label = "Live",
+                        value = s.liveCount,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCell(
+                        label = "收藏",
+                        value = statSummary!!.favorites,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatCell(
+                        label = "分享",
+                        value = statSummary!!.shares,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCell(
+                        label = "相册",
+                        value = statSummary!!.albums,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCell(
+                        label = "回收站",
+                        value = statSummary!!.trash,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 配额百分比：占位单元格，使本行与前一行对齐为四列
+                    StatCell(
+                        label = "配额",
+                        valueText = "${statSummary!!.quota.usagePercent.toInt()}%",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
             // V8：操作历史统计卡片（GET /api/media/audit-log/stats）
             var auditStats by remember { mutableStateOf<List<MediaService.AuditLogStat>?>(null) }
             LaunchedEffect(Unit) { auditStats = MediaService.getAuditLogStats() }
@@ -1074,6 +1166,39 @@ private fun StorageBreakdownRow(
         Text(
             "$count 个 · ${formatBytesToMB(bytes)}",
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+    }
+}
+
+/**
+ * 数据概览卡片（V9）的单格：标签在上、数值在下，居中对齐。
+ *
+ * 用于把 stat-summary 返回的多组计数并排展示（图片/视频/Live/收藏/分享/相册/回收站/配额），
+ * 一个 [Row] 内放若干个 [StatCell] + `Modifier.weight(1f)` 即可均分多列。
+ *
+ * [value] 为 Int 整数；需要展示非整数文本（如配额百分比）时改用 [valueText]，
+ * 此时 [value] 留默认 0（仅占位，不参与显示）。
+ */
+@Composable
+private fun StatCell(
+    label: String,
+    value: Int = 0,
+    valueText: String? = null,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            valueText ?: value.toString(),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
     }
