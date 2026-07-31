@@ -529,6 +529,56 @@ private fun AlbumDetailPage(
                     }
                 },
                 actions = {
+                    // V8：重命名相册按钮
+                    var showRenameDialog by remember { mutableStateOf(false) }
+                    var renameError by remember { mutableStateOf<String?>(null) }
+                    IconButton(onClick = { showRenameDialog = true }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_edit),
+                            contentDescription = "重命名相册"
+                        )
+                    }
+                    if (showRenameDialog) {
+                        var newName by remember { mutableStateOf(albumName) }
+                        AlertDialog(
+                            onDismissRequest = { showRenameDialog = false; renameError = null },
+                            title = { Text("重命名相册") },
+                            text = {
+                                Column {
+                                    OutlinedTextField(
+                                        value = newName,
+                                        onValueChange = { newName = it; renameError = null },
+                                        label = { Text("相册名称") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    renameError?.let { e ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(e, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                val scope = rememberCoroutineScope()
+                                TextButton(onClick = {
+                                    if (newName.isBlank()) {
+                                        renameError = "名称不能为空"
+                                        return@TextButton
+                                    }
+                                    scope.launch {
+                                        if (MediaService.renameAlbum(albumId, newName.trim())) {
+                                            showRenameDialog = false
+                                        } else {
+                                            renameError = "重命名失败"
+                                        }
+                                    }
+                                }) { Text("确定") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showRenameDialog = false; renameError = null }) { Text("取消") }
+                            }
+                        )
+                    }
                     // V7 §2.3：分享相册按钮
                     var showShareDialog by remember { mutableStateOf(false) }
                     IconButton(onClick = { showShareDialog = true }) {

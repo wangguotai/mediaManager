@@ -1320,6 +1320,27 @@ object MediaService {
     }
 
     /**
+     * V8：POST /api/media/album/rename — 重命名相册。
+     */
+    suspend fun renameAlbum(albumId: String, newName: String): Boolean {
+        return try {
+            val body = buildJsonObject {
+                put("album_id", albumId)
+                put("name", newName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/rename") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "renameAlbum FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
      * V8：GET /api/media/info/{id} — 返回单个媒体详情。
      */
     suspend fun getMediaInfo(mediaId: String): MediaInfo? {
