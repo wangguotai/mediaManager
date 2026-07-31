@@ -1685,6 +1685,54 @@ object MediaService {
     }
 
     /**
+     * V24：增强搜索建议单项。后端 searchSuggestion JSON 对齐：`{text, source}`。
+     *
+     * - [text] 建议文案（文件名去扩展名 / 标签名 / 相册名）。
+     * - [source] 来源标识，后端返回 "filename" / "tag" / "album" 之一，
+     *   前端据此渲染来源标签图标（📄文件名 / 🏷️标签 / 📷相册）。
+     */
+    data class EnhancedSuggestion(
+        val text: String = "",
+        val source: String = ""
+    )
+
+    /**
+     * V24：GET /api/media/search-suggestions-enhanced?q=xxx — 多源增强搜索建议。
+     *
+     * 后端从文件名、标签、相册名三个来源各自做子串匹配，合并去重后返回带来源标记
+     * 的建议列表（文件名最多 5、标签最多 3、相册名最多 3）。
+     *
+     * 响应：`{suggestions:[{text,source}], total}`。
+     * 成功返回 [EnhancedSuggestion] 列表（可能为空）；失败/非 200 返回 null，
+     * 调用方按 null 降级（隐藏建议区）。鉴权由 [jsonClient] defaultRequest 统一附加。
+     */
+    suspend fun getEnhancedSearchSuggestions(query: String): List<EnhancedSuggestion>? {
+        return try {
+            val q = query.trim()
+            if (q.isEmpty()) return emptyList()
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/search-suggestions-enhanced?q=${q.encodeURLQueryComponent()}") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["suggestions"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    EnhancedSuggestion(
+                        text = o["text"]?.jsonPrimitive?.contentOrNull ?: "",
+                        source = o["source"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getEnhancedSearchSuggestions status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getEnhancedSearchSuggestions FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：GET /api/media/recent-activity — 最近活动
      */
     suspend fun getRecentActivity(): List<ActivityInfo>? {

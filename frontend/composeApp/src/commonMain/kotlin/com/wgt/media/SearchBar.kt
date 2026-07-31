@@ -691,12 +691,14 @@ fun SearchBar(
                 }
             }
         }
-        // V7：搜索建议——展开态且输入非空时，从后端获取文件名建议。
-        var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+        // V24：增强搜索建议——展开态且输入非空时，从后端 GET /api/media/search-suggestions-enhanced
+        // 拉取多源（文件名/标签/相册名）合并去重后的建议，每条带 source 标签，
+        // 以 emoji 区分来源（📄文件名 / 🏷️标签 / 📷相册）。点击建议触发搜索。
+        var suggestions by remember { mutableStateOf<List<MediaService.EnhancedSuggestion>>(emptyList()) }
         LaunchedEffect(queryText) {
             if (expanded && queryText.length >= 2) {
                 delay(SEARCH_DEBOUNCE_MS)
-                suggestions = MediaService.getSearchSuggestions(queryText.trim()) ?: emptyList()
+                suggestions = MediaService.getEnhancedSearchSuggestions(queryText.trim()) ?: emptyList()
             } else {
                 suggestions = emptyList()
             }
@@ -712,14 +714,30 @@ fun SearchBar(
             ) {
                 items(suggestions.size) { index ->
                     val sug = suggestions[index]
+                    // 来源 emoji：filename→📄、tag→🏷️、album→📷，未知回退 •。
+                    val sourceIcon = when (sug.source) {
+                        "filename" -> "📄"
+                        "tag" -> "🏷️"
+                        "album" -> "📷"
+                        else -> "•"
+                    }
                     AssistChip(
                         onClick = {
-                            queryText = sug
+                            // 相册标签来源搜索时加 # 前缀命中标签搜索语义，
+                            // 文件名直接用原文。相册名同样直接用原文。
+                            val query = if (sug.source == "tag") "#${sug.text}" else sug.text
+                            queryText = query
                             queryVisible = true
-                            onDebouncedQueryChange(sug)
-                            SearchHistory.add(sug)
+                            onDebouncedQueryChange(query)
+                            SearchHistory.add(query)
                         },
-                        label = { Text(sug, fontSize = 13.sp) },
+                        label = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(sourceIcon, fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(sug.text, fontSize = 13.sp, maxLines = 1)
+                            }
+                        },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
                         )
