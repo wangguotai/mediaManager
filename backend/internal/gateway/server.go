@@ -427,6 +427,9 @@ func (s *Server) registerRoutes() {
 	// 重复文件组摘要（比 duplicate-report 更轻量，只返回组数+总可回收+最大组信息，
 	// 不展开每组明细，适合前端卡片 / 仪表盘首屏快速展示）
 	s.mux.HandleFunc("/api/media/duplicate-groups-summary", s.handleDuplicateGroupsSummary)
+	// 智能洞察报告——自动分析用户媒体库并给出可操作建议（重复/存储分布/上传习惯/
+	// 未标签/最大相册/存储健康度），一次请求合并多个分析维度，供前端"洞察"卡片展示。
+	s.mux.HandleFunc("/api/media/insights", s.handleMediaInsights)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -10351,4 +10354,309 @@ func (s *Server) handleMimeTypeStats(w http.ResponseWriter, r *http.Request) {
 		"mimes": stats,
 		"total": len(stats),
 	})
+}
+
+// handleMediaInsights GET /api/media/insights — 智能洞察报告。
+//
+// 自动分析当前用户媒体库并给出可操作的智能建议，一次请求合并多个分析维度，
+// 供前端"洞察"卡片展示。与 stat-summary（数据概览）/ storage-health（仅健康度）/
+// storage-recommendations（仅清理建议）互补：本端点把各维度的结论凝练成"洞察条目"，
+// 每条带 type/title/detail/action_url，前端可直接渲染为建议列表，无需自行再聚合。
+//
+// 六类洞察（仅当对应条件成立才产出，避免空建议噪音）：
+//
+//	a) duplicates    — 有重复文件时给出可回收字节数（SHA256 分组，组内保留 1 份）
+//	b) distribution  — 存储类型分布，最大占比类型所占百分比
+//	c) upload_habit  — 最常上传的时段（按 created_at 小时划分 早晨/下午/晚上/深夜）
+//	d) untagged      — 未标签媒体数 > 0 时提示待整理量
+//	e) top_album     — 媒体数最多的相册及其项数（albumStoreProvider 未配置时不产）
+//	f) health        — 存储健康度等级（复用 storage-health 的评分模型：重复率/配额/冷数据）
+//
+// 数据来源：store.ListMediaByUser 一次拉全量未软删媒体 → 单遍历派生重复/类型分布/
+// 时段/健康度；store.ListAllTags + SearchMediaByTag 派生已标签集合算 untagged；
+// albumStoreProvider.ListAlbums 派生最大相册。各维度独立容错（单步失败记 warn 不阻断）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+// 响应：{ insights: [{type, title, detail, action_url?}], total }
+func (s *Server) handleMediaInsights(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 storage-health/stat-summary 一致
+	now := time.Now()
+
+	// 单遍历：总量/字节/类型分布/SHA256 重复/冷数据/上传时段。
+	totalCount := 0
+	var usedBytes int64
+	typeBytes := map[string]int64{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
+	typeCounts := map[string]int{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
+	shaCounts := make(map[string]int)
+	coldCount := 0 // >180 天视为冷数据（同 storage-health 口径）
+	// 上传时段：[6,12)=早晨、[12,18)=下午、[18,24)=晚上、[0,6)=深夜（同 upload-pattern-analysis）。
+	periodCounts := map[string]int{"早晨": 0, "下午": 0, "晚上": 0, "深夜": 0}
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		usedBytes += m.Size
+		if _, ok := typeBytes[m.Type]; ok {
+			typeBytes[m.Type] += m.Size
+			typeCounts[m.Type]++
+		} else {
+			// 未知类型也计入，便于 distribution 占比兜底。
+			typeBytes[m.Type] += m.Size
+			typeCounts[m.Type]++
+		}
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+		hour := m.CreatedAt.Hour()
+		switch {
+		case hour >= 6 && hour < 12:
+			periodCounts["早晨"]++
+		case hour >= 12 && hour < 18:
+			periodCounts["下午"]++
+		case hour >= 18 && hour < 24:
+			periodCounts["晚上"]++
+		default:
+			periodCounts["深夜"]++
+		}
+	}
+
+	// (a) 重复文件份：每个 SHA256 出现 >1，超出 1 份的部分计入重复；同 SHA256 size 一致，
+	// 取首份 size 作每文件字节数：dupReclaimable = (count-1) * size_per_file。
+	dupCount := 0
+	var dupReclaimable int64
+	for sha, c := range shaCounts {
+		if c <= 1 {
+			continue
+		}
+		dupCount += c - 1
+		// 找到该 SHA256 的一个样本来取 size（同组 size 应一致）。
+		var sizePerFile int64
+		for _, m := range mediaList {
+			if m.SHA256 == sha && !m.Deleted {
+				sizePerFile = m.Size
+				break
+			}
+		}
+		dupReclaimable += int64(c-1) * sizePerFile
+	}
+
+	// (b) 存储类型分布：按字节占比找出最大类型。totalBytes>0 才有意义。
+	var dominantType string
+	var dominantTypeBytes int64
+	for t, b := range typeBytes {
+		if b > dominantTypeBytes {
+			dominantTypeBytes = b
+			dominantType = t
+		}
+	}
+	typePercent := 0.0
+	if usedBytes > 0 && dominantTypeBytes > 0 {
+		typePercent = float64(dominantTypeBytes) / float64(usedBytes) * 100
+	}
+
+	// (c) 最常上传的时段：count 最大者，并列时按预定义顺序取第一个。
+	periodOrder := []string{"早晨", "下午", "晚上", "深夜"}
+	var dominantPeriod string
+	maxPeriod := -1
+	for _, p := range periodOrder {
+		if c := periodCounts[p]; c > maxPeriod {
+			maxPeriod = c
+			dominantPeriod = p
+		}
+	}
+
+	// (d) 未标签媒体：total - taggedCount。tagged 来自 ListAllTags + SearchMediaByTag
+	// 汇总成带标签 media_id 集合（同 handleMediaCoverage 口径）。
+	taggedSet := make(map[string]struct{})
+	if totalCount > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		} else {
+			slog.Warn("insights: list all tags failed", "error", terr)
+		}
+	}
+	// 只统计未软删媒体的已标签数（taggedSet 可能含已删媒体的残留 id）。
+	liveTagged := 0
+	liveIDs := make(map[string]struct{}, len(mediaList))
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		liveIDs[m.ID] = struct{}{}
+	}
+	for id := range taggedSet {
+		if _, ok := liveIDs[id]; ok {
+			liveTagged++
+		}
+	}
+	untaggedCount := totalCount - liveTagged
+
+	// (e) 最大相册：albumStoreProvider 未配置时跳过该洞察（不产 out，不报 501，
+	// 与 stat-summary 互为参考——本端点聚焦建议，相册只是其中一条，不该因 provider
+	// 缺位而整端点 501）。
+	var topAlbumName string
+	var topAlbumCount int
+	hasTopAlbum := false
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		for _, a := range provider.ListAlbums(uid) {
+			n := len(a.MediaIDs)
+			if n > topAlbumCount {
+				topAlbumCount = n
+				topAlbumName = a.Name
+				hasTopAlbum = true
+			}
+		}
+	}
+
+	// (f) 存储健康度等级：复用 storage-health 评分模型（重复率/配额/冷数据，权重 30/30/20；
+	// 孤立率需磁盘扫描，本端点默认跳过按 0 计，避免 IO 放大）。
+	duplicateRate := 0.0
+	quotaUsage := 0.0
+	ageScore := 1.0
+	if totalCount > 0 {
+		duplicateRate = float64(dupCount) / float64(totalCount)
+		ageScore = 1.0 - float64(coldCount)/float64(totalCount)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(usedBytes) / float64(defaultQuotaBytes)
+	}
+	dupPenalty := min01(duplicateRate) * 30
+	quotaPenalty := min01(quotaUsage) * 30
+	agePenalty := (1.0 - min01(ageScore)) * 20
+	score := 100.0 - (dupPenalty + quotaPenalty + agePenalty)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	healthGrade := "D"
+	switch {
+	case score >= 85:
+		healthGrade = "A"
+	case score >= 70:
+		healthGrade = "B"
+	case score >= 50:
+		healthGrade = "C"
+	}
+
+	// 汇聚洞察条目：仅当条件成立才产出，避免空建议噪音。
+	type insight struct {
+		Type      string `json:"type"`
+		Title     string `json:"title"`
+		Detail    string `json:"detail"`
+		ActionURL string `json:"action_url,omitempty"`
+	}
+	insights := make([]insight, 0, 6)
+
+	if dupCount > 0 {
+		insights = append(insights, insight{
+			Type:      "duplicates",
+			Title:     fmt.Sprintf("你有 %d 个重复文件，可回收 %s", dupCount, formatBytes(dupReclaimable)),
+			Detail:    fmt.Sprintf("重复文件占用 %s 存储空间，清理后可释放。重复率 %.1f%%。", formatBytes(dupReclaimable), duplicateRate*100),
+			ActionURL: "/api/media/duplicate-cleanup",
+		})
+	}
+
+	if totalCount > 0 && dominantType != "" {
+		typeLabel := map[string]string{
+			"IMAGE": "图片", "VIDEO": "视频", "LIVE_PHOTO": "动态照片",
+		}[dominantType]
+		if typeLabel == "" {
+			typeLabel = dominantType
+		}
+		insights = append(insights, insight{
+			Type:   "distribution",
+			Title:  fmt.Sprintf("你的%s占 %.1f%% 存储空间", typeLabel, typePercent),
+			Detail: fmt.Sprintf("媒体库共 %d 项、占用 %s，其中%s %d 项占 %s（%s）。", totalCount, formatBytes(usedBytes), typeLabel, typeCounts[dominantType], formatBytes(dominantTypeBytes), fmtPercent(typePercent)),
+		})
+	}
+
+	if totalCount > 0 && dominantPeriod != "" {
+		insights = append(insights, insight{
+			Type:   "upload_habit",
+			Title:  fmt.Sprintf("最常上传的时段是%s", dominantPeriod),
+			Detail: fmt.Sprintf("在%s时段上传了 %d 项媒体，占上传总数的 %s。", dominantPeriod, periodCounts[dominantPeriod], fmtPercent(float64(periodCounts[dominantPeriod])/float64(totalCount)*100)),
+		})
+	}
+
+	if untaggedCount > 0 {
+		insights = append(insights, insight{
+			Type:      "untagged",
+			Title:     fmt.Sprintf("你有 %d 个未标签的媒体", untaggedCount),
+			Detail:    fmt.Sprintf("未标签媒体占总数的 %s，建议打标签便于检索与整理。", fmtPercent(float64(untaggedCount)/float64(totalCount)*100)),
+			ActionURL: "/api/media/tag-recommendations",
+		})
+	}
+
+	if hasTopAlbum && topAlbumCount > 0 {
+		insights = append(insights, insight{
+			Type:      "top_album",
+			Title:     fmt.Sprintf("相册'%s'照片最多，有 %d 项", topAlbumName, topAlbumCount),
+			Detail:    fmt.Sprintf("相册'%s'内含 %d 项媒体，是你收录最多的相册。", topAlbumName, topAlbumCount),
+			ActionURL: "/api/media/album/count-ranking",
+		})
+	}
+
+	insights = append(insights, insight{
+		Type:   "health",
+		Title:  fmt.Sprintf("你的存储健康度为%s级", healthGrade),
+		Detail: fmt.Sprintf("综合重复率（%s）、配额使用率（%s）、冷数据占比，存储健康度评分 %d/100，等级 %s。", fmtPercent(duplicateRate*100), fmtPercent(quotaUsage*100), int(score), healthGrade),
+		ActionURL: "/api/media/storage-health",
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"insights": insights,
+		"total":    len(insights),
+		"user_id":  uid,
+	})
+}
+
+// formatBytes 把字节数格式化为人类可读的容量字符串（如 "12.3 MB"），用于洞察详情。
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// fmtPercent 把百分比数值格式化为保留一位小数的字符串（如 "45.2%"），用于洞察详情。
+func fmtPercent(v float64) string {
+	return fmt.Sprintf("%.1f%%", v)
 }
