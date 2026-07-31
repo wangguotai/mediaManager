@@ -3745,6 +3745,59 @@ fun MediaInfoDialog(
                     if (i.takenAt > 0) {
                         InfoRow("拍摄时间", formatPreviewDate(i.takenAt * 1000))
                     }
+                    // V8：标签区域
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("标签:", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    var tags by remember(mediaId) { mutableStateOf<List<String>?>(null) }
+                    var newTag by remember { mutableStateOf("") }
+                    val scope = rememberCoroutineScope()
+                    LaunchedEffect(mediaId) { tags = MediaService.listMediaTags(mediaId) }
+                    tags?.let { tagList ->
+                        if (tagList.isNotEmpty()) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                tagList.forEach { tag ->
+                                    AssistChip(
+                                        onClick = {
+                                            scope.launch {
+                                                if (MediaService.removeMediaTag(mediaId, tag)) {
+                                                    tags = MediaService.listMediaTags(mediaId)
+                                                }
+                                            }
+                                        },
+                                        label = { Text(tag, fontSize = 11.sp) },
+                                        colors = AssistChipDefaults.assistChipColors(
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = newTag,
+                                onValueChange = { newTag = it },
+                                label = { Text("新标签", fontSize = 12.sp) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                textStyle = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            TextButton(onClick = {
+                                if (newTag.isNotBlank()) {
+                                    val t = newTag.trim()
+                                    scope.launch {
+                                        if (MediaService.addMediaTag(mediaId, t)) {
+                                            newTag = ""
+                                            tags = MediaService.listMediaTags(mediaId)
+                                        }
+                                    }
+                                }
+                            }) { Text("添加", fontSize = 12.sp) }
+                        }
+                    }
                 }
             } ?: run {
                 Row(

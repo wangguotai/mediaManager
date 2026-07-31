@@ -1341,6 +1341,78 @@ object MediaService {
     }
 
     /**
+     * V8：POST /api/media/tag/add — 给媒体打标签。
+     */
+    suspend fun addMediaTag(mediaId: String, tagName: String): Boolean {
+        return try {
+            val body = buildJsonObject {
+                put("media_id", mediaId)
+                put("tag_name", tagName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/add") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "addMediaTag FAILED: ${e.message}")
+            false
+        }
+    }
+
+    /** V8：POST /api/media/tag/remove — 移除标签。 */
+    suspend fun removeMediaTag(mediaId: String, tagName: String): Boolean {
+        return try {
+            val body = buildJsonObject {
+                put("media_id", mediaId)
+                put("tag_name", tagName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/remove") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            response.status == HttpStatusCode.OK
+        } catch (e: Exception) {
+            logger.error("MediaService", "removeMediaTag FAILED: ${e.message}")
+            false
+        }
+    }
+
+    /** V8：GET /api/media/tag/list?media_id=xxx — 列出媒体标签。 */
+    suspend fun listMediaTags(mediaId: String): List<String>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/list?media_id=$mediaId") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.map { it.jsonPrimitive.content }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "listMediaTags FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：GET /api/media/tag/all — 列出所有标签。 */
+    suspend fun listAllTags(): List<String>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/all") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.map { it.jsonPrimitive.content }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "listAllTags FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/info/{id} — 返回单个媒体详情。
      */
     suspend fun getMediaInfo(mediaId: String): MediaInfo? {
