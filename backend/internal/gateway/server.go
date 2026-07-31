@@ -258,6 +258,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
 	// V8：批量删除相册
 	s.mux.HandleFunc("/api/media/album/delete-batch", s.handleAlbumDeleteBatch)
+	// V8：复制相册
+	s.mux.HandleFunc("/api/media/album/clone", s.handleAlbumClone)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -3860,6 +3862,69 @@ func (s *Server) handleAlbumDeleteBatch(w http.ResponseWriter, r *http.Request) 
 		"deleted_count": len(succeeded),
 		"deleted":       succeeded,
 		"failed":        failed,
+	})
+}
+
+// handleAlbumClone V8：POST /api/media/album/clone — 复制相册。
+// 请求体: { source_album_id, new_name }
+func (s *Server) handleAlbumClone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		SourceAlbumID string `json:"source_album_id"`
+		NewName       string `json:"new_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.SourceAlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source_album_id required"})
+		return
+	}
+	// 获取源相册
+	source := provider.GetAlbum(uid, req.SourceAlbumID)
+	if source == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "source album not found"})
+		return
+	}
+	// 生成名称
+	name := req.NewName
+	if name == "" {
+		name = source.Name + " (副本)"
+	}
+	// 创建新相册
+	newAlbum, err := provider.CreateAlbum(uid, name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 批量复制 media_ids
+	added := 0
+	if len(source.MediaIDs) > 0 {
+		added, _ = provider.BatchAddToAlbum(uid, newAlbum.ID, source.MediaIDs)
+	}
+	// 复制封面
+	if source.CoverMediaID != "" {
+		_ = provider.SetAlbumCover(uid, newAlbum.ID, source.CoverMediaID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "success",
+		"new_album_id":    newAlbum.ID,
+		"new_album_name":  name,
+		"copied_count":    added,
 	})
 }
 
