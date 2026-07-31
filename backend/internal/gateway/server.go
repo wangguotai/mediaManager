@@ -204,6 +204,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/full-report", s.handleMediaFullReport)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
+	// 整年日历热力数据：按 created_at 日期分组，返回指定年份 12 个月的每日媒体数量与
+	// 字节数（仅含数据天，供前端渲染整年热力图）。默认当年（UTC），?year=2026 指定。
+	s.mux.HandleFunc("/api/media/media-calendar-year", s.handleMediaCalendarYear)
 	// 按 24 小时分布统计上传习惯（created_at 的 UTC 小时，0-23 全槽位返回）。
 	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
@@ -6196,6 +6199,101 @@ func (s *Server) handleMediaHeatmap(w http.ResponseWriter, r *http.Request) {
 		"days":        days,
 		"total_days":  len(days),
 		"total_media": totalMedia,
+	})
+}
+
+// handleMediaCalendarYear GET /api/media/media-calendar-year — 整年日历热力数据。
+//
+// 返回指定年份（默认当年 UTC，?year=2026 指定；非法回退当年）12 个月内每天的
+// 媒体数量与字节数，供前端渲染整年热力图（GitHub 贡献图风格）。
+//
+// 分组依据：media.created_at（上传时间）的 UTC 日期（YYYY-MM-DD）。仅统计未软删
+// （deleted=0，ListMediaByUser 已过滤）且属于目标年份的媒体。只返回有数据的天，
+// 不返回 count=0 的空天，前端按需补 0。
+//
+// 响应结构：
+//
+//	{
+//	  "year":         2026,
+//	  "days":         [{"date":"2026-01-15","count":N,"bytes":M}, ...],  // 按 date 升序
+//	  "total_count":  N,   // 该年媒体总数（= days count 合计）
+//	  "total_bytes":  M    // 该年媒体总字节数（= days bytes 合计）
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaCalendarYear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// year 默认当年（UTC），?year=2026 指定；非法回退到当年。
+	now := time.Now().UTC()
+	year := now.Year()
+	if q := r.URL.Query().Get("year"); q != "" {
+		if y, err := strconv.Atoi(q); err == nil && y >= 1970 && y <= 9999 {
+			year = y
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 created_at 的 UTC 日期分组，只统计目标年份。
+	type dayStat struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	byDay := make(map[string]*dayStat)
+	var totalCount int
+	var totalBytes int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		ca := m.CreatedAt.UTC()
+		if ca.Year() != year {
+			continue
+		}
+		day := ca.Format("2006-01-02")
+		if _, ok := byDay[day]; !ok {
+			byDay[day] = &dayStat{Date: day}
+		}
+		byDay[day].Count++
+		byDay[day].Bytes += m.Size
+		totalCount++
+		totalBytes += m.Size
+	}
+
+	// 按日期升序输出。
+	days := make([]string, 0, len(byDay))
+	for d := range byDay {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+	stats := make([]dayStat, 0, len(days))
+	for _, d := range days {
+		stats = append(stats, *byDay[d])
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"year":        year,
+		"days":        stats,
+		"total_count": totalCount,
+		"total_bytes": totalBytes,
 	})
 }
 
