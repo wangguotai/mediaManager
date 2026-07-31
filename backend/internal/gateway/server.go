@@ -373,6 +373,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
 	// 媒体归档状态（按上传年龄热/温/冷分类：热≤30天 / 温30-180天 / 冷>180天）
 	s.mux.HandleFunc("/api/media/media-archive-status", s.handleMediaArchiveStatus)
+	// 智能归档建议：筛选冷数据（>180天）中的大视频（>50MB），建议移至独立"归档"相册。
+	// 与 media-archive-status（温度档统计）互补：后者只统计分布，本端点给出可操作建议清单。
+	s.mux.HandleFunc("/api/media/archive-suggest", s.handleArchiveSuggest)
 	// V8：同步状态摘要
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
@@ -12628,6 +12631,123 @@ func (s *Server) handleMediaInsights(w http.ResponseWriter, r *http.Request) {
 		"insights": insights,
 		"total":    len(insights),
 		"user_id":  uid,
+	})
+}
+
+// handleArchiveSuggest GET /api/media/archive-suggest — 智能归档建议。
+//
+// 分析用户的冷数据中的大视频，给出"移至独立归档相册"的可操作建议。
+// 一次 ListMediaByUser 拉全量未软删媒体，筛选同时满足以下条件的条目：
+//
+//   - 冷数据：CreatedAt（上传时间）距今 > 180 天
+//   - 大视频：Type == "VIDEO" 且 Size > 50MB
+//
+// 之所以限定为视频：图片体积通常较小，冷图片归档收益低；大视频占用存储主体，
+// 迁移到归档相册能显著释放主视图可见空间。50MB/180天阈值与 storage-recommendations
+// 的 100MB/365天大文件阈值、media-archive-status 的 180天冷数据档保持一致语义。
+//
+// 响应：
+//
+//	{
+//	  "should_archive": bool,         // 是否存在归档候选（= media_to_archive 非空）
+//	  "media_to_archive": [
+//	    {"media_id","filename","size","age_days","type"}
+//	  ],
+//	  "total_count": N,               // 候选媒体数
+//	  "potential_savings_mb": float,  // 候选媒体累计大小（MB，1MB=1024*1024B，保留2位小数）
+//	  "recommendation": {
+//	    "create_archive_album": bool, // 是否建议创建归档相册（= should_archive）
+//	    "media_to_archive": [...],    // 同顶层（便于前端直接取 recommendation 渲染）
+//	    "potential_savings": N        // 候选累计字节数（原始 bytes，便于精确计算）
+//	  },
+//	  "user_id": "..."
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleArchiveSuggest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const (
+		coldThreshold = 180 * 24 * time.Hour // 冷数据：上传超过 180 天
+		largeVideoMB  = 50                   // 大视频：>50MB
+		mbBytes       = 1024 * 1024
+	)
+	largeSizeThreshold := int64(largeVideoMB) * int64(mbBytes)
+
+	// 逐条扫描，筛选冷数据 + 大视频。
+	type archiveItem struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		AgeDays  int64  `json:"age_days"`
+		Type     string `json:"type"`
+	}
+	now := time.Now()
+	var candidates []archiveItem
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		age := now.Sub(m.CreatedAt)
+		if age < coldThreshold {
+			continue // 非冷数据
+		}
+		if m.Type != "VIDEO" {
+			continue
+		}
+		if m.Size <= largeSizeThreshold {
+			continue
+		}
+		candidates = append(candidates, archiveItem{
+			MediaID:  m.ID,
+			Filename: m.Filename,
+			Size:     m.Size,
+			AgeDays:  int64(age / (24 * time.Hour)),
+			Type:     m.Type,
+		})
+	}
+
+	// 按大小倒序：最大文件优先归档，释放空间最显著。
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Size > candidates[j].Size })
+
+	var totalBytes int64
+	for _, c := range candidates {
+		totalBytes += c.Size
+	}
+	shouldArchive := len(candidates) > 0
+
+	// recommendation 结构：与要求中的 create_archive_album/media_to_archive/potential_savings 对齐，
+	// 同时顶层保留 should_archive/total_count/potential_savings_mb 供前端直接消费。
+	recommendation := map[string]any{
+		"create_archive_album": shouldArchive,
+		"media_to_archive":     candidates,
+		"potential_savings":    totalBytes,
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"should_archive":        shouldArchive,
+		"media_to_archive":      candidates,
+		"total_count":           len(candidates),
+		"potential_savings_mb":  round2(float64(totalBytes) / float64(mbBytes)),
+		"recommendation":        recommendation,
+		"user_id":               uid,
 	})
 }
 
