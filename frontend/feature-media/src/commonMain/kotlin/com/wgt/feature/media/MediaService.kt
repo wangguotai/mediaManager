@@ -2353,6 +2353,40 @@ object MediaService {
     data class HourCount(val hour: Int, val count: Int)
 
     /**
+     * V21：GET /api/media/media-age-distribution — 媒体年龄分布。
+     *
+     * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 6 个年龄档：
+     *   <1天 / 1-7天 / 7-30天 / 30-90天 / 90-365天 / >365天
+     * 返回 `{ranges: [{range, count, bytes}], total}`，6 档顺序固定、含 count=0 档。
+     * count/bytes 均为后端 int64（永不为 JSON null），故用 `?: 0` / `?: 0L` 安全默认。
+     * 本方法取 `ranges` 数组解析为 [AgeRange]。失败返回 null，调用方按 null 展示空状态。
+     */
+    suspend fun getMediaAgeDistribution(): List<AgeRange>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-age-distribution") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["ranges"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    AgeRange(
+                        range = o["range"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaAgeDistribution FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V21：媒体年龄分布单档（年龄范围标签 + 该档媒体数 + 累计字节）。 */
+    data class AgeRange(val range: String, val count: Int, val bytes: Long)
+
+    /**
      * V20：GET /api/media/upload-pattern-analysis — 上传模式分析。
      *
      * 后端基于当前用户全部未删除媒体的 created_at/size/type 统计最常上传的：

@@ -1542,6 +1542,68 @@ private fun MyTabContent(
             }
         }
 
+        // V21：媒体年龄分布卡片——在上传习惯之后，展示各年龄档的项数/字节/占比。
+        // 调 GET /api/media/media-age-distribution，total=0 或异常时静默跳过（不渲染占位）。
+        var ageRanges by remember { mutableStateOf<List<MediaService.AgeRange>?>(null) }
+        LaunchedEffect(Unit) { ageRanges = MediaService.getMediaAgeDistribution() }
+        ageRanges?.let { ranges ->
+            val totalItems = ranges.sumOf { it.count }
+            if (totalItems > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("媒体年龄", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val maxCount = ranges.maxOf { it.count }.coerceAtLeast(1)
+                        ranges.forEach { ar ->
+                            val pct = (ar.count.toFloat() / maxCount).coerceIn(0f, 1f)
+                            val mbStr = if (ar.bytes > 0L) {
+                                (ar.bytes.toDouble() / (1024.0 * 1024.0)).toString()
+                                    .let { it.take(it.indexOf('.') + 2) }
+                            } else "0"
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(ar.range, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${ar.count} 项 · ${mbStr} MB",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                            // 比例条
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .padding(vertical = 0.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(pct)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 $totalItems 项（按上传时间到现在的年龄分档）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
         var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
         LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }
