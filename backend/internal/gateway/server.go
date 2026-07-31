@@ -174,6 +174,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
+	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
+	s.mux.HandleFunc("/api/media/quick-stats", s.handleMediaQuickStats)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
 	// 区别于 batch-download 的 zip 流式打包，不创建分享链接）
 	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
@@ -3798,8 +3800,81 @@ func (s *Server) handleMediaStatSummary(w http.ResponseWriter, r *http.Request) 
 		"favorites":      favoriteCount,
 		"shares":         shareCount,
 		"albums":         albumCount,
-		"trash":          trashCount,
+		"trash":         trashCount,
 		"recent_uploads": recentUploads,
+	})
+}
+
+// handleMediaQuickStats V12：GET /api/media/quick-stats — 极简统计端点。
+//
+// 仅返回首页快速加载所需的 6 个数字，区别于 stat-summary 的全量汇总（含
+// tags/audit/quota/shares/recent_uploads 等多块数据）。前端首页只展示总量级概览，
+// 无需 stat-summary 的额外开销（tags/audit 都需要独立的 Store 查询）。
+//
+// 响应结构：
+//
+//	{
+//	  "total_media":    N,   // 未软删媒体总数（含 IMAGE/VIDEO/LIVE_PHOTO 等）
+//	  "total_bytes":    N,   // 未软删媒体字节数累计
+//	  "image_count":    N,
+//	  "video_count":    N,
+//	  "album_count":    N,
+//	  "favorite_count": N
+//	}
+//
+// summary 与 image/video/total_bytes 由 store.ListMediaByUser 一次拉取派生；
+// album_count 与 favorite_count 来自 mediaSvc 的 provider 接口（provider 未实现
+// 时记为 0，不阻断），与 handleMediaStatSummary 的同名字段口径一致。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaQuickStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var totalMedia, imgCount, vidCount int
+	var totalBytes int64
+	if mediaList, err := s.store.ListMediaByUser(r.Context(), uid); err != nil {
+		slog.Warn("quick-stats: list media failed", "error", err)
+	} else {
+		for _, m := range mediaList {
+			totalMedia++
+			totalBytes += m.Size
+			switch m.Type {
+			case "IMAGE":
+				imgCount++
+			case "VIDEO":
+				vidCount++
+			}
+		}
+	}
+
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites(uid))
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_media":    totalMedia,
+		"total_bytes":    totalBytes,
+		"image_count":    imgCount,
+		"video_count":    vidCount,
+		"album_count":    albumCount,
+		"favorite_count": favoriteCount,
 	})
 }
 
