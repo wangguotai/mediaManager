@@ -345,6 +345,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-unpin", s.handleAlbumBatchUnpin)
 	// V9：批量克隆多个相册（逐个 GetAlbum + CreateAlbum + BatchAddToAlbum，返回新相册 id 列表）。
 	s.mux.HandleFunc("/api/media/album/batch-clone", s.handleAlbumBatchClone)
+	// V14：相册媒体数量排行（按相册内媒体数倒序，返回哪些相册照片最多）。
+	s.mux.HandleFunc("/api/media/album/count-ranking", s.handleAlbumCountRanking)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
@@ -6577,6 +6579,49 @@ func (s *Server) handleAlbumBatchClone(w http.ResponseWriter, r *http.Request) {
 		"skipped_count":   skipped,
 		"new_album_ids":   newIDs,
 		"failed_album_ids": failed,
+	})
+}
+
+// handleAlbumCountRanking V14：GET /api/media/album/count-ranking — 按相册内媒体数量
+// 倒序排列，返回哪些相册照片/视频最多。无请求体。
+// 响应: { "ranking": [{ "album_id","name","count","cover_media_id" }], "total_albums": N }。
+func (s *Server) handleAlbumCountRanking(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+	type albumCount struct {
+		AlbumID      string `json:"album_id"`
+		Name         string `json:"name"`
+		Count        int    `json:"count"`
+		CoverMediaID string `json:"cover_media_id"`
+	}
+	ranking := make([]albumCount, 0, len(albums))
+	for _, a := range albums {
+		ranking = append(ranking, albumCount{
+			AlbumID:      a.ID,
+			Name:         a.Name,
+			Count:        len(a.MediaIDs),
+			CoverMediaID: a.CoverMediaID,
+		})
+	}
+	sort.Slice(ranking, func(i, j int) bool {
+		return ranking[i].Count > ranking[j].Count
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ranking":      ranking,
+		"total_albums": len(albums),
 	})
 }
 
