@@ -2710,6 +2710,77 @@ private fun MyTabContent(
             }
         }
 
+        // V9：媒体量报告卡片——在仪表盘概览之后展示全年汇总视角：
+        // 总量（项数+MB）/ 本月增量（环比↑↓%）/ 日均上传统量 / 按当前趋势预测的年底总量。
+        // 后端 handleMediaVolumeReport 返回 {total_media,total_bytes,this_month,last_month,
+        // mom_growth,avg_daily_uploads,projected_year_end}。mom_growth 在上月为 0 时后端返
+        // null → parseNullablePercent 映射为 NaN，此处按"无对比数据"不显示箭头。
+        var mediaVolumeReport by remember { mutableStateOf<MediaService.MediaVolumeReport?>(null) }
+        LaunchedEffect(Unit) { mediaVolumeReport = MediaService.getMediaVolumeReport() }
+        mediaVolumeReport?.let { vr ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "媒体量报告",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 总量：N 项 · X MB
+                    Text(
+                        "总量 ${vr.totalMedia} 项 · ${formatBytesToMB(vr.totalBytes)}",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 本月：N 项 (环比 ↑/↓ X%) / 无对比数据时不显示括号
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "本月 ${vr.thisMonth} 项",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (!vr.momGrowth.isNaN()) {
+                            val isUp = vr.momGrowth >= 0
+                            val pctStr = vr.momGrowth.toString()
+                            val pct1 = pctStr.take(pctStr.indexOf('.') + 2)
+                            val arrow = if (isUp) "↑" else "↓"
+                            val sign = if (isUp) "+" else ""
+                            Text(
+                                "  ($arrow$sign$pct1%)",
+                                fontSize = 12.sp,
+                                color = if (isUp) Color(0xFF2E7D32) else Color(0xFFC62828)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 日均：X 项/天（一位小数截断）
+                    val avgStr = vr.avgDaily.toString()
+                    val avg1 = avgStr.take(avgStr.indexOf('.') + 2)
+                    Text(
+                        "日均 $avg1 项/天",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 预测年底：~N 项
+                    Text(
+                        "预测年底 ~${vr.projectedYearEnd} 项",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    )
+                }
+            }
+        }
+
         // V7：设备列表卡片
         var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
         LaunchedEffect(Unit) { devices = MediaService.listDevices() }

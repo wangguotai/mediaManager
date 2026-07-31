@@ -5286,6 +5286,54 @@ object MediaService {
     }
 
     /**
+     * V9：GET /api/media/media-volume-report — 媒体量报告。
+     *
+     * 后端 handleMediaVolumeReport 返回全年汇总视角：
+     * - [totalMedia] / [totalBytes]：未软删媒体总数与累计字节。
+     * - [thisMonth] / [lastMonth]：本月/上月自然月新增量（仅取 count；bytes 也在响应中备用）。
+     * - [momGrowth]：本月相对上月的环比增长率 (this-last)/last*100。后端在上月为 0 时
+     *   返回 null（除零保护），[parseNullablePercent] 映射为 [Double.NaN]——UI 侧按
+     *   "无对比数据"处理，不显示箭头。与 [GrowthReport.monthChangePercent] 同口径。
+     * - [avgDaily]：自首条上传至当前的日均上传统量（不足 1 天按 1 天计）。
+     * - [projectedYearEnd]：按本年至今日均新增速率外推到年底的预测总量。
+     *
+     * 非 200 或异常返回 null，UI 侧静默跳过卡片。复用 [parsePeriod] / [parseNullablePercent]。
+     */
+    suspend fun getMediaVolumeReport(): MediaVolumeReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-volume-report") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaVolumeReport(
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    thisMonth = parsePeriod(o["this_month"]?.jsonObject).count,
+                    lastMonth = parsePeriod(o["last_month"]?.jsonObject).count,
+                    momGrowth = parseNullablePercent(o["mom_growth"]),
+                    avgDaily = o["avg_daily_uploads"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    projectedYearEnd = o["projected_year_end"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaVolumeReport FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V9：媒体量报告（总量/环比/日均/年底预测）。 */
+    data class MediaVolumeReport(
+        val totalMedia: Int = 0,
+        val totalBytes: Long = 0L,
+        val thisMonth: Int = 0,
+        val lastMonth: Int = 0,
+        val momGrowth: Double = Double.NaN,
+        val avgDaily: Double = 0.0,
+        val projectedYearEnd: Int = 0
+    )
+
+    /**
      * V9：GET /api/media/yearly-review?year=YYYY — 年度回顾。
      *
      * 后端按年聚合当前用户的媒体上传情况，返回字段：
