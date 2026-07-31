@@ -305,6 +305,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/by-resolution", s.handleMediaByResolution)
 	// V8：按文件大小范围统计
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
+	// 媒体年龄分布（按 created_at 到 now 的时间差分组：<1天/1-7天/7-30天/30-90天/90-365天/>365天）
+	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
 	// V8：同步状态摘要
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
@@ -5496,6 +5498,93 @@ func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) 
 		"ranges":      ranges,
 		"range_bytes": rangeBytes,
 		"total":       len(mediaList),
+	})
+}
+
+// handleMediaAgeDistribution GET /api/media/media-age-distribution — 媒体年龄分布。
+//
+// 按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 6 个年龄档：
+//   <1天 / 1-7天 / 7-30天 / 30-90天 / 90-365天 / >365天
+//
+// 每档统计 count 与 bytes（累计该档媒体的 Size），并返回总未软删媒体数 total。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "ranges": [
+//	    {"range":"<1天","count":N,"bytes":N},
+//	    {"range":"1-7天","count":N,"bytes":N},
+//	    {"range":"7-30天","count":N,"bytes":N},
+//	    {"range":"30-90天","count":N,"bytes":N},
+//	    {"range":"90-365天","count":N,"bytes":N},
+//	    {"range":">365天","count":N,"bytes":N}
+//	  ],
+//	  "total": N  // 参与分桶的未软删媒体总数
+//	}
+func (s *Server) handleMediaAgeDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 6 个年龄档，顺序固定，count/bytes 预置 0。用切片而非 map 以保证返回顺序。
+	now := time.Now()
+	type ageBucket struct {
+		Range string `json:"range"`
+		Count int64  `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	buckets := []ageBucket{
+		{Range: "<1天"},
+		{Range: "1-7天"},
+		{Range: "7-30天"},
+		{Range: "30-90天"},
+		{Range: "90-365天"},
+		{Range: ">365天"},
+	}
+	var total int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		age := now.Sub(m.CreatedAt) // 正值=过去上传；零值 time.Time 会落入 >365天
+		var idx int
+		switch {
+		case age < 24*time.Hour:
+			idx = 0
+		case age < 7*24*time.Hour:
+			idx = 1
+		case age < 30*24*time.Hour:
+			idx = 2
+		case age < 90*24*time.Hour:
+			idx = 3
+		case age < 365*24*time.Hour:
+			idx = 4
+		default:
+			idx = 5
+		}
+		buckets[idx].Count++
+		buckets[idx].Bytes += m.Size
+		total++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ranges": buckets,
+		"total":  total,
 	})
 }
 
