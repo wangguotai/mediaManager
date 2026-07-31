@@ -2571,6 +2571,56 @@ object MediaService {
     /** V8：文件类型统计 */
     data class FileTypeStat(val mime: String, val count: Int, val bytes: Long)
 
+    /**
+     * V8：GET /api/media/mime-type-stats — 按 MIME 类型详细统计。
+     *
+     * 与 [getFileTypes]（`/api/media/file-types`）的区别：本端点额外提供
+     * `avg_bytes`（平均大小）与 `earliest`/`latest`（该 MIME 最早/最晚上传时间，
+     * RFC3339 字符串），供前端按 MIME 粒度展示完整大小与时间维度。
+     *
+     * 响应结构：`{mimes: [{mime, count, total_bytes, avg_bytes, earliest, latest}], total}`，
+     * `mimes` 数组按 count 倒序（同序并列按 MIME 字典序），故前端取前若干即数量最多的。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（无 serialization 编译器插件依赖），
+     * `earliest`/`latest` 作为字符串原样透传，不在此处解析为毫秒（前端按需展示）。
+     *
+     * @return 按 count 倒序的统计列表；HTTP 非 200 或网络异常返回 null（调用方按空态跳过）。
+     */
+    suspend fun getMimeTypeStats(): List<MimeStat>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/mime-type-stats") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["mimes"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    MimeStat(
+                        mime = o["mime"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        avgBytes = o["avg_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        earliest = o["earliest"]?.jsonPrimitive?.contentOrNull ?: "",
+                        latest = o["latest"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMimeTypeStats FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：MIME 详细统计项（对齐后端 mime-type-stats 响应字段）。 */
+    data class MimeStat(
+        val mime: String,
+        val count: Int,
+        val totalBytes: Long,
+        val avgBytes: Long,
+        val earliest: String,
+        val latest: String
+    )
+
     /** V8：GET /api/media/extreme-media — 最老和最大媒体。 */
     suspend fun getExtremeMedia(): ExtremeMedia? {
         return try {

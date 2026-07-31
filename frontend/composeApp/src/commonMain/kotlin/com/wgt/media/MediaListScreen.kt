@@ -1787,6 +1787,45 @@ private fun MyTabContent(
             }
         }
 
+        // V8：MIME 详细统计（调 /api/media/mime-type-stats，比文件类型分布更细：
+        // 含 avg_bytes/earliest/latest）。后端未铺量或异常时 getMimeTypeStats 返回 null，
+        // 此处静默跳过不渲染占位。仅展示数量最多的 top 5，避免长列表撑满"我的"页。
+        var mimeStats by remember { mutableStateOf<List<MediaService.MimeStat>?>(null) }
+        LaunchedEffect(Unit) { mimeStats = MediaService.getMimeTypeStats() }
+        mimeStats?.let { stats ->
+            if (stats.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("MIME 统计", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        stats.take(5).forEach { ms ->
+                            val avgMb = formatBytesToMB(ms.avgBytes)
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(
+                                    ms.mime,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "${ms.count} 项 · 均 $avgMb",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：分辨率分布
         var resolutions by remember { mutableStateOf<Map<String, Int>?>(null) }
         LaunchedEffect(Unit) { resolutions = MediaService.getByResolution() }
