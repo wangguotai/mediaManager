@@ -879,12 +879,8 @@ private fun MyTabContent(
             }
         }
 
-        // V7：收藏快速统计
-        var favCount by remember { mutableStateOf<Int?>(null) }
-        LaunchedEffect(Unit) {
-            favCount = MediaService.getFavorites()?.size
-        }
-        favCount?.let { count ->
+        // V7：收藏快速统计（复用 summary.favoriteCount，无需单独请求）
+        mediaSummary?.let { summary ->
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -908,7 +904,7 @@ private fun MyTabContent(
                         )
                     }
                     Text(
-                        "$count",
+                        "${summary.favoriteCount}",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary

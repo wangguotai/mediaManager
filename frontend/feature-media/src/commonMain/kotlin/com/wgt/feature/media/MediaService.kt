@@ -1079,7 +1079,10 @@ object MediaService {
                     videoCount = obj["video_count"]?.jsonPrimitive?.intOrNull ?: 0,
                     liveCount = obj["live_count"]?.jsonPrimitive?.intOrNull ?: 0,
                     earliestTs = obj["earliest_ts"]?.jsonPrimitive?.longOrNull ?: 0L,
-                    latestTs = obj["latest_ts"]?.jsonPrimitive?.longOrNull ?: 0L
+                    latestTs = obj["latest_ts"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    favoriteCount = obj["favorite_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    albumCount = obj["album_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    shareCount = obj["share_count"]?.jsonPrimitive?.intOrNull ?: 0
                 )
             } else null
         } catch (e: Exception) {
@@ -1095,7 +1098,10 @@ object MediaService {
         val videoCount: Int,
         val liveCount: Int,
         val earliestTs: Long,
-        val latestTs: Long
+        val latestTs: Long,
+        val favoriteCount: Int = 0,
+        val albumCount: Int = 0,
+        val shareCount: Int = 0
     ) {
         val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
     }
