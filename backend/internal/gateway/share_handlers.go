@@ -165,6 +165,7 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "create share token: " + err.Error()})
 		return
 	}
+	_ = s.store.AddAuditLog(r.Context(), uid, "share", "", "created share link")
 
 	// 响应 expires_at：永不过期返回空串，否则 RFC3339。
 	expiresStr := ""

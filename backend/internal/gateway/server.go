@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -873,6 +874,7 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil && uid != "" {
 		for _, mid := range req.MediaIds {
 			_ = s.store.MarkDeletedForUser(r.Context(), uid, mid)
+			_ = s.store.AddAuditLog(r.Context(), uid, "delete", mid, "soft delete")
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -2679,6 +2681,7 @@ func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	_ = s.store.AddAuditLog(r.Context(), uid, "rename", req.MediaID, req.Filename)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"media_id": req.MediaID,
