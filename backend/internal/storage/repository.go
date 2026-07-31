@@ -518,6 +518,31 @@ func (s *Store) TagStats(ctx context.Context, userID string) ([]map[string]any, 
 	return out, nil
 }
 
+// RenameTag V8：重命名标签（用户维度，所有包含 old_name 的标签改为 new_name）。
+// 用 INSERT OR IGNORE + DELETE 处理可能的 UNIQUE 冲突。
+func (s *Store) RenameTag(ctx context.Context, userID, oldName, newName string) (int, error) {
+	// 先尝试把 old_name 改为 new_name（UPDATE 可能因 UNIQUE 约束失败）
+	// 用两步：1) INSERT OR IGNORE new_name 行 2) DELETE old_name 行
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO media_tags (id, media_id, user_id, tag_name, created_at)
+		 SELECT 'tag-' || replace(hex(randomblob(8)), '-', '') AS id, media_id, user_id, ?, created_at
+		 FROM media_tags WHERE user_id = ? AND tag_name = ?`,
+		newName, userID, oldName)
+	if err != nil {
+		return 0, fmt.Errorf("rename tag insert: %w", err)
+	}
+	added, _ := res.RowsAffected()
+
+	del, err := s.db.ExecContext(ctx,
+		`DELETE FROM media_tags WHERE user_id = ? AND tag_name = ?`,
+		userID, oldName)
+	if err != nil {
+		return int(added), fmt.Errorf("rename tag delete: %w", err)
+	}
+	deleted, _ := del.RowsAffected()
+	return int(deleted), nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
