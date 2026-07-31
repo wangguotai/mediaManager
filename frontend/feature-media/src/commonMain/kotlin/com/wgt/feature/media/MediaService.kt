@@ -1419,6 +1419,27 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/tag/delete — 删除标签，返回删除数。 */
+    suspend fun deleteTag(tagName: String): Int {
+        return try {
+            val body = buildJsonObject {
+                put("tag_name", tagName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/delete") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["deleted_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "deleteTag FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：GET /api/media/tag/stats — 标签统计。 */
     suspend fun getTagStats(): List<TagStat>? {
         return try {

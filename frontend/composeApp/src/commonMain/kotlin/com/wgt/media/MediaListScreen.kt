@@ -1205,6 +1205,7 @@ private fun MyTabContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        var deleteTagTarget by remember { mutableStateOf<String?>(null) }
                         FlowRow(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1215,9 +1216,33 @@ private fun MyTabContent(
                                     label = { Text("#${s.tag} (${s.count})", fontSize = 12.sp) },
                                     colors = AssistChipDefaults.assistChipColors(
                                         containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                                    ),
+                                    modifier = Modifier.combinedClickable(
+                                        onClick = {},
+                                        onLongClick = { deleteTagTarget = s.tag }
                                     )
                                 )
                             }
+                        }
+                        deleteTagTarget?.let { tag ->
+                            AlertDialog(
+                                onDismissRequest = { deleteTagTarget = null },
+                                title = { Text("删除标签") },
+                                text = { Text("确定删除标签 #$tag？将移除所有相关媒体的此标签。") },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        val t = tag
+                                        deleteTagTarget = null
+                                        scope.launch {
+                                            MediaService.deleteTag(t)
+                                            tagStats = MediaService.getTagStats()
+                                        }
+                                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { deleteTagTarget = null }) { Text("取消") }
+                                }
+                            )
                         }
                     }
                 }
