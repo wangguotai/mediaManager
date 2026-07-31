@@ -363,6 +363,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/activity", s.handleAlbumActivity)
 	// V15：存储清理建议（重复+大文件+旧文件+孤立文件分析，估算可回收空间）。
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
+	// V20：上传模式分析（最常上传的类型/大小范围/时段/星期，基于 created_at）。
+	s.mux.HandleFunc("/api/media/upload-pattern-analysis", s.handleUploadPatternAnalysis)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V16：批量按日期排序多个相册内含照片
@@ -7790,5 +7792,136 @@ func (s *Server) handleStorageRecommendations(w http.ResponseWriter, r *http.Req
 		"total_reclaimable_bytes": totalReclaimable,
 		"recommendation_count":    recommendationCount,
 		"user_id":                 uid,
+	})
+}
+
+// handleUploadPatternAnalysis V20：GET /api/media/upload-pattern-analysis —
+// 上传模式分析。基于当前用户全部未删除媒体的 created_at，统计最常上传的：
+//   - 类型（IMAGE / VIDEO / LIVE_PHOTO）
+//   - 大小范围（<1MB / 1-10MB / 10-50MB / 50-100MB / >100MB）
+//   - 时段（早晨 6-11 / 下午 12-17 / 晚上 18-23 / 深夜 0-5）
+//   - 星期（Sunday..Saturday）
+//
+// 返回 {dominant_type, dominant_size_range, dominant_time_period,
+//       dominant_weekday, total}，每个 dominant_* 形如 {key, count}；
+// 无数据时各 dominant_* 的 count 为 0、key 为空串，total 为 0。
+//
+// 说明：时段划分按任务约定小时位 [6,12)=早晨、[12,18)=下午、[18,24)=晚上、
+// [0,6)=深夜；星期使用 Go time.Weekday 的英文全称（time.January 时
+// Weekday().String() 返回 "Monday" 等），便于前端固定 i18n 映射。
+func (s *Server) handleUploadPatternAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 计数器
+	typeCounts := map[string]int{}
+	sizeRangeOrder := []string{"<1MB", "1-10MB", "10-50MB", "50-100MB", ">100MB"}
+	sizeCounts := map[string]int{}
+	periodOrder := []string{"早晨", "下午", "晚上", "深夜"}
+	periodCounts := map[string]int{}
+	weekdayCounts := map[string]int{}
+
+	total := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		total++
+
+		// (a) 类型：原样使用 DB 中 type 字段（IMAGE/VIDEO/LIVE_PHOTO）。
+		typeCounts[m.Type]++
+
+		// (b) 大小范围：基于字节阈值分桶。
+		var bucket string
+		switch {
+		case m.Size < 1024*1024:
+			bucket = "<1MB"
+		case m.Size < 10*1024*1024:
+			bucket = "1-10MB"
+		case m.Size < 50*1024*1024:
+			bucket = "10-50MB"
+		case m.Size < 100*1024*1024:
+			bucket = "50-100MB"
+		default:
+			bucket = ">100MB"
+		}
+		sizeCounts[bucket]++
+
+		// (c) 时段：按 created_at 本地小时划分（task spec：6-11 早晨、12-17 下午、
+		// 18-23 晚上、0-5 深夜）。区间为半开 [lo,hi)。
+		hour := m.CreatedAt.Hour()
+		var period string
+		switch {
+		case hour >= 6 && hour < 12:
+			period = "早晨"
+		case hour >= 12 && hour < 18:
+			period = "下午"
+		case hour >= 18 && hour < 24:
+			period = "晚上"
+		default: // 0..5
+			period = "深夜"
+		}
+		periodCounts[period]++
+
+		// (d) 星期：使用 Go 的 Weekday().String()（英文全称）。
+		weekdayCounts[m.CreatedAt.Weekday().String()]++
+	}
+
+	// 选出每个维度的众数（count 最大者；并列时按预定义顺序取第一个；
+	// 全 0 则返回 key="" count=0）。
+	type dominant struct {
+		Key   string `json:"key"`
+		Count int    `json:"count"`
+	}
+
+	pickDominant := func(order []string, counts map[string]int) dominant {
+		var best dominant
+		for _, k := range order {
+			if c := counts[k]; c > best.Count {
+				best = dominant{Key: k, Count: c}
+			}
+		}
+		// order 之外的 key（如 type 维度可能有未知值、weekday 维度天然全在 order 内）
+		// 也遍历一次，保证未被 order 列入的取值仍可竞争众数。
+		for k, c := range counts {
+			if c > best.Count {
+				best = dominant{Key: k, Count: c}
+			}
+		}
+		return best
+	}
+
+	weekdayOrder := []string{
+		"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dominant_type":         pickDominant([]string{"IMAGE", "VIDEO", "LIVE_PHOTO"}, typeCounts),
+		"dominant_size_range":   pickDominant(sizeRangeOrder, sizeCounts),
+		"dominant_time_period":  pickDominant(periodOrder, periodCounts),
+		"dominant_weekday":      pickDominant(weekdayOrder, weekdayCounts),
+		"total":                 total,
+		// 详情明细一并返回，便于前端可视化（不增加额外查询成本）。
+		"by_type":         typeCounts,
+		"by_size_range":   sizeCounts,
+		"by_time_period":  periodCounts,
+		"by_weekday":      weekdayCounts,
+		"user_id":         uid,
 	})
 }
