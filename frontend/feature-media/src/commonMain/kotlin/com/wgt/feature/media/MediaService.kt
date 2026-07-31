@@ -1419,6 +1419,38 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/user-quota — 用户存储配额信息。 */
+    suspend fun getUserQuota(): UserQuota? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/user-quota") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                UserQuota(
+                    quotaBytes = o["quota_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    usedBytes = o["used_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    freeBytes = o["free_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    usagePercent = o["usage_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUserQuota FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：用户存储配额 */
+    data class UserQuota(
+        val quotaBytes: Long,
+        val usedBytes: Long,
+        val freeBytes: Long,
+        val usagePercent: Double
+    ) {
+        val usedMB: Double get() = usedBytes.toDouble() / (1024.0 * 1024.0)
+        val quotaGB: Double get() = quotaBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+    }
+
     /** V8：POST /api/media/tag/delete — 删除标签，返回删除数。 */
     suspend fun deleteTag(tagName: String): Int {
         return try {

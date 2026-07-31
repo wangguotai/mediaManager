@@ -815,6 +815,26 @@ private fun MyTabContent(
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    // V8：配额进度条
+                    var quota by remember { mutableStateOf<MediaService.UserQuota?>(null) }
+                    LaunchedEffect(Unit) { quota = MediaService.getUserQuota() }
+                    quota?.let { q ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { (q.usagePercent / 100.0).toFloat() },
+                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                            color = if (q.usagePercent > 90) MaterialTheme.colorScheme.error
+                                   else MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surface
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val usedStr = q.usedMB.toString().let { it.take(it.indexOf('.') + 2) }
+                        Text(
+                            "$usedStr MB / ${q.quotaGB} GB (${q.usagePercent.toString().let { it.take(it.indexOf('.') + 2) }}%)",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
                 }
             }
         }
