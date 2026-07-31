@@ -2352,6 +2352,79 @@ object MediaService {
     /** V9：上传时段单小时（小时 0-23 + 上传数量）。 */
     data class HourCount(val hour: Int, val count: Int)
 
+    /**
+     * V20：GET /api/media/upload-pattern-analysis — 上传模式分析。
+     *
+     * 后端基于当前用户全部未删除媒体的 created_at/size/type 统计最常上传的：
+     *   - 类型（IMAGE / VIDEO / LIVE_PHOTO）
+     *   - 大小范围（<1MB / 1-10MB / 10-50MB / 50-100MB / >100MB）
+     *   - 时段（早晨 6-11 / 下午 12-17 / 晚上 18-23 / 深夜 0-5）
+     *   - 星期（Sunday..Saturday，后端用 time.Weekday().String() 全称）
+     *
+     * 返回结构：`{dominant_type, dominant_size_range, dominant_time_period,
+     * dominant_weekday, total}`，每个 `dominant_*` 形如 `{key, count}`。
+     * 本方法将后端原始 key 映射为前端可读 label（IMAGE→图片、Saturday→周六 等），
+     * 解析为 [UploadPattern]。total=0（无数据）或请求异常时返回 null，调用方静默跳过。
+     */
+    suspend fun getUploadPatternAnalysis(): UploadPattern? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/upload-pattern-analysis")
+            if (response.status != HttpStatusCode.OK) return null
+            val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+            val total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+            if (total == 0) return null
+            // 解析单个 dominant_* 对象为 PatternItem，mapper 将原始 key 转为可读 label。
+            fun item(field: String, mapper: (String) -> String = { it }): PatternItem? {
+                val o = obj[field]?.jsonObject ?: return null
+                val rawKey = o["key"]?.jsonPrimitive?.contentOrNull ?: return null
+                val count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                return PatternItem(label = mapper(rawKey), count = count)
+            }
+            UploadPattern(
+                dominantType = item("dominant_type") { mapTypeLabel(it) } ?: return null,
+                dominantSizeRange = item("dominant_size_range") ?: return null,
+                dominantTimePeriod = item("dominant_time_period") ?: return null,
+                dominantWeekday = item("dominant_weekday") { mapWeekdayLabel(it) } ?: return null,
+                total = total
+            )
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUploadPatternAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 后端类型 key → 前端中文 label。未知类型原样返回。 */
+    private fun mapTypeLabel(key: String): String = when (key) {
+        "IMAGE" -> "图片"
+        "VIDEO" -> "视频"
+        "LIVE_PHOTO" -> "Live Photo"
+        else -> key
+    }
+
+    /** 后端 weekday 全称（time.Weekday().String()） → 中文周X。未知原样返回。 */
+    private fun mapWeekdayLabel(key: String): String = when (key) {
+        "Sunday" -> "周日"
+        "Monday" -> "周一"
+        "Tuesday" -> "周二"
+        "Wednesday" -> "周三"
+        "Thursday" -> "周四"
+        "Friday" -> "周五"
+        "Saturday" -> "周六"
+        else -> key
+    }
+
+    /** V20：上传模式分析结果（最常上传的类型/大小范围/时段/星期 + 总数）。 */
+    data class UploadPattern(
+        val dominantType: PatternItem,
+        val dominantSizeRange: PatternItem,
+        val dominantTimePeriod: PatternItem,
+        val dominantWeekday: PatternItem,
+        val total: Int
+    )
+
+    /** V20：单维度众数项（前端可读 label + 次数）。 */
+    data class PatternItem(val label: String, val count: Int)
+
     /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
     suspend fun orphanCheck(): OrphanCheckResult? {
         return try {

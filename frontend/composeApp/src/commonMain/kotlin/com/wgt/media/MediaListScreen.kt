@@ -1486,6 +1486,62 @@ private fun MyTabContent(
             }
         }
 
+        // V20：上传习惯卡片——在上传时段之后，展示最常上传的类型/大小范围/时段/星期。
+        // 调 GET /api/media/upload-pattern-analysis，total=0 或异常时静默跳过（不渲染占位）。
+        var uploadPattern by remember { mutableStateOf<MediaService.UploadPattern?>(null) }
+        LaunchedEffect(Unit) { uploadPattern = MediaService.getUploadPatternAnalysis() }
+        uploadPattern?.let { p ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("上传习惯", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("📷 最常上传", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${p.dominantType.label}（${p.dominantType.count} 次）",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("📦 大小范围", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${p.dominantSizeRange.label}（${p.dominantSizeRange.count} 次）",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("⏰ 上传时段", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${p.dominantTimePeriod.label}（${p.dominantTimePeriod.count} 次）",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("📅 最多在", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${p.dominantWeekday.label}（${p.dominantWeekday.count} 次）",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "基于 ${p.total} 项上传记录",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+            }
+        }
+
         // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
         var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
         LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }
