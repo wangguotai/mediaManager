@@ -1245,6 +1245,97 @@ private fun MyTabContent(
             }
         }
 
+        // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
+        var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
+        LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }
+        heatmapDays?.let { days ->
+            if (days.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("拍摄热力图", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // GitHub 风格热力图：按 ISO 周（周一起始）排成列，每列 7 行（周一~周日）。
+                        // date 形如 "2026-07-31"，用 Howard Hinnant days_from_civil / civil_from_days
+                        // 纯整数算术算 epoch day——不依赖 java.time / kotlinx-datetime（commonMain 不可用）。
+                        // 注意：days_from_civil 在 Kotlin/Native commonMain 下若用 Int 算术会把 * / 推断为
+                        // BigInteger 操作，故全程用 Long 做运算避免类型推断陷阱。
+                        val dateCountMap = days.associate { it.date to it.count }
+                        val sortedDates = days.map { it.date }.sorted()
+                        val firstDate = sortedDates.first()
+                        // days_from_civil(y, m, d) -> epoch day（Long）
+                        fun civilToEpoch(y: Int, m: Int, d: Int): Long {
+                            val yy: Long = (if (m <= 2) y - 1 else y).toLong()
+                            val mm: Long = (if (m <= 2) m + 12 else m).toLong()
+                            val dd: Long = d.toLong()
+                            return 365L * yy + yy / 4L - yy / 100L + yy / 400L + (153L * (mm - 3L) + 2L) / 5L + dd - 719468L
+                        }
+                        // civil_from_days(epoch day) -> Triple(year, month, day)
+                        fun epochToCivil(z: Long): Triple<Int, Int, Int> {
+                            val zz: Long = z + 719468L
+                            val era: Long = (if (zz >= 0L) zz else zz - 146096L) / 146097L
+                            val doe: Long = zz - era * 146097L
+                            val yoe: Long = (doe - doe / 1460L + doe / 36524L - doe / 146096L) / 365L
+                            val y: Long = yoe + era * 400L
+                            val doy: Long = doe - (365L * yoe + yoe / 4L - yoe / 100L)
+                            val mp: Long = (5L * doy + 2L) / 153L
+                            val d: Int = (doy - (153L * mp + 2L) / 5L + 1L).toInt()
+                            val m: Int = (if (mp < 10L) mp + 3L else mp - 9L).toInt()
+                            val yr: Int = (if (m <= 2) y + 1L else y).toInt()
+                            return Triple(yr, m, d)
+                        }
+                        fun pad2(n: Int): String = if (n < 10) "0$n" else n.toString()
+                        fun dateKey(epochDay: Long): String {
+                            val (yr, m, d) = epochToCivil(epochDay)
+                            return "$yr-${pad2(m)}-${pad2(d)}"
+                        }
+                        val parts0 = firstDate.split("-")
+                        val epochFirst = civilToEpoch(parts0[0].toInt(), parts0[1].toInt(), parts0[2].toInt())
+                        // 1970-01-01 是周四；epochDay=3 是第一个周一（1970-01-05）。
+                        // firstDate 所在周的周一 = epochFirst - ((epochFirst - 3) % 7 + 7) % 7
+                        val weekStartDay = epochFirst - (((epochFirst - 3L) % 7L + 7L) % 7L)
+                        val parts1 = sortedDates.last().split("-")
+                        val epochLast = civilToEpoch(parts1[0].toInt(), parts1[1].toInt(), parts1[2].toInt())
+                        val totalWeeks = ((epochLast - weekStartDay) / 7L + 1L).toInt().coerceAtLeast(1)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            items(totalWeeks) { weekIdx ->
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    for (dow in 0 until 7) {
+                                        val cellDay = weekStartDay + weekIdx * 7 + dow
+                                        val key = dateKey(cellDay)
+                                        val count = dateCountMap[key] ?: 0
+                                        val cellColor = when {
+                                            count == 0 -> MaterialTheme.colorScheme.surface
+                                            count <= 2 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                            count <= 5 -> MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                            else -> MaterialTheme.colorScheme.primary
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .size(12.dp)
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(cellColor)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val daysWithPhotos = days.count { it.count > 0 }
+                        Text(
+                            "共 $daysWithPhotos 天有照片",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V8：文件类型分布
         var fileTypes by remember { mutableStateOf<List<MediaService.FileTypeStat>?>(null) }
         LaunchedEffect(Unit) { fileTypes = MediaService.getFileTypes() }
