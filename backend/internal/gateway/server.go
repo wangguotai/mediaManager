@@ -274,6 +274,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/batch-remove", s.handleMediaTagBatchRemove)
 	// V8：标签统计（每个标签关联的媒体数量）
 	s.mux.HandleFunc("/api/media/tag/stats", s.handleMediaTagStats)
+	// V21：标签详细统计（每个标签的 count + 关联文件总大小 + 最近 media 创建时间）。
+	// 区别于 tag/stats 仅返 count，本端点聚合 size/时间维度，供前端标签管理页展示
+	// 每个标签占用的存储量与活跃度。实现：TagStats 取标签计数，ListMediaByUser 一次拉
+	// 全量 media 建索引，SearchMediaByTag 取每个标签关联的 media_id，汇总落 sum/max。
+	s.mux.HandleFunc("/api/media/tag-stat-detailed", s.handleMediaTagStatDetailed)
 	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
 	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
@@ -2736,9 +2741,9 @@ func (s *Server) handleDuplicateGroupsSummary(w http.ResponseWriter, r *http.Req
 
 	// 按 SHA256 分组（跳过空 SHA256 与已软删的记录），仅记录每组的 count 与 bytes_per_file。
 	type groupInfo struct {
-		Count         int
-		BytesPerFile  int64
-		Reclaimable   int64
+		Count        int
+		BytesPerFile int64
+		Reclaimable  int64
 	}
 	const sha256PrefixLen = 12
 	groups := make(map[string]*groupInfo)
@@ -4565,12 +4570,12 @@ func (s *Server) handleMediaFullReport(w http.ResponseWriter, r *http.Request) {
 		reclaimableBytes += int64(len(items)-1) * items[0].size
 	}
 	duplicates := map[string]any{
-		"groups":             dupGroupCount,
-		"reclaimable_bytes":  reclaimableBytes,
+		"groups":            dupGroupCount,
+		"reclaimable_bytes": reclaimableBytes,
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"year":       year,
+		"year":        year,
 		"quick_stats": quickStats,
 		"yearly":      yearly,
 		"storage":     storageSummary,
@@ -5108,6 +5113,91 @@ func (s *Server) handleMediaTagStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":  stats,
 		"total": len(stats),
+	})
+}
+
+// handleMediaTagStatDetailed V21：GET /api/media/tag-stat-detailed — 标签详细统计。
+// 每个标签返回：tag_name + count（关联媒体数） + total_bytes（关联文件 size 总和）
+// + last_created_at（关联 media 中最近的 created_at）。
+//
+// 实现策略（避免 N+1 查询 media 行）：
+//  1. TagStats 取标签计数（已按 count DESC 排序）。
+//  2. ListMediaByUser 一次拉该用户全量 media，构造 id→*Media 索引。
+//  3. 对每个标签调 SearchMediaByTag 取关联 media_id 列表，用索引汇总 size 求和与
+//     created_at 取最大值。
+//
+// 注意：ListMediaByUser 只返未软删 media，已被软删的 media 不计入 size/时间统计，
+// 但 media_tags 关系行不随软删联动清理，故 count 仍按标签关系表口径。若某 media_id
+// 在索引中缺失（理论上不应发生——软删会从 ListMediaByUser 排除但关系仍在），跳过该 id
+// 不累加 size/时间，best-effort 处理。
+func (s *Server) handleMediaTagStatDetailed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 一次拉全量 media 建索引，避免对每个 media_id 单独 GetMedia。
+	medias, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	idx := make(map[string]*storage.Media, len(medias))
+	for _, m := range medias {
+		idx[m.ID] = m
+	}
+	out := make([]map[string]any, 0, len(stats))
+	for _, st := range stats {
+		tagName, _ := st["tag"].(string)
+		count, _ := st["count"].(int)
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		var totalBytes int64
+		var lastCreated time.Time
+		for _, id := range ids {
+			m, ok := idx[id]
+			if !ok {
+				// 软删或缺失，跳过 size/时间统计（best-effort）。
+				continue
+			}
+			totalBytes += m.Size
+			if m.CreatedAt.After(lastCreated) {
+				lastCreated = m.CreatedAt
+			}
+		}
+		row := map[string]any{
+			"tag_name":    tagName,
+			"count":       count,
+			"total_bytes": totalBytes,
+		}
+		// last_created_at 仅在该标签至少有一个未软删 media 时返回；否则置 null，
+		// 明确区分"无关联媒体"与"1970-01-01"语义。
+		if !lastCreated.IsZero() {
+			row["last_created_at"] = lastCreated.UTC().Format(time.RFC3339)
+		} else {
+			row["last_created_at"] = nil
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       out,
+		"total_tags": len(out),
 	})
 }
 
@@ -6000,7 +6090,8 @@ func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) 
 // handleMediaAgeDistribution GET /api/media/media-age-distribution — 媒体年龄分布。
 //
 // 按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 6 个年龄档：
-//   <1天 / 1-7天 / 7-30天 / 30-90天 / 90-365天 / >365天
+//
+//	<1天 / 1-7天 / 7-30天 / 30-90天 / 90-365天 / >365天
 //
 // 每档统计 count 与 bytes（累计该档媒体的 Size），并返回总未软删媒体数 total。
 // 需认证，按 user_id 隔离；store 未注入返回 503。
@@ -7004,8 +7095,8 @@ func (s *Server) handleAlbumBatchMerge(w http.ResponseWriter, r *http.Request) {
 			added, addErr := provider.BatchAddToAlbum(uid, targetID, source.MediaIDs)
 			if addErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{
-					"error":          addErr.Error(),
-					"failed_source":  srcID,
+					"error":           addErr.Error(),
+					"failed_source":   srcID,
 					"target_album_id": targetID,
 				})
 				return
@@ -7467,9 +7558,9 @@ func (s *Server) handleAlbumBatchUnpin(w http.ResponseWriter, r *http.Request) {
 		unpinned++
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "success",
-		"unpinned_count":  unpinned,
-		"skipped_count":   skipped,
+		"status":         "success",
+		"unpinned_count": unpinned,
+		"skipped_count":  skipped,
 	})
 }
 
@@ -7537,10 +7628,10 @@ func (s *Server) handleAlbumBatchClone(w http.ResponseWriter, r *http.Request) {
 		cloned++
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "success",
-		"cloned_count":    cloned,
-		"skipped_count":   skipped,
-		"new_album_ids":   newIDs,
+		"status":           "success",
+		"cloned_count":     cloned,
+		"skipped_count":    skipped,
+		"new_album_ids":    newIDs,
 		"failed_album_ids": failed,
 	})
 }
@@ -8388,7 +8479,9 @@ func (s *Server) handleStorageRecommendations(w http.ResponseWriter, r *http.Req
 //   - 星期（Sunday..Saturday）
 //
 // 返回 {dominant_type, dominant_size_range, dominant_time_period,
-//       dominant_weekday, total}，每个 dominant_* 形如 {key, count}；
+//
+//	dominant_weekday, total}，每个 dominant_* 形如 {key, count}；
+//
 // 无数据时各 dominant_* 的 count 为 0、key 为空串，total 为 0。
 //
 // 说明：时段划分按任务约定小时位 [6,12)=早晨、[12,18)=下午、[18,24)=晚上、
@@ -8497,16 +8590,16 @@ func (s *Server) handleUploadPatternAnalysis(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"dominant_type":         pickDominant([]string{"IMAGE", "VIDEO", "LIVE_PHOTO"}, typeCounts),
-		"dominant_size_range":   pickDominant(sizeRangeOrder, sizeCounts),
-		"dominant_time_period":  pickDominant(periodOrder, periodCounts),
-		"dominant_weekday":      pickDominant(weekdayOrder, weekdayCounts),
-		"total":                 total,
+		"dominant_type":        pickDominant([]string{"IMAGE", "VIDEO", "LIVE_PHOTO"}, typeCounts),
+		"dominant_size_range":  pickDominant(sizeRangeOrder, sizeCounts),
+		"dominant_time_period": pickDominant(periodOrder, periodCounts),
+		"dominant_weekday":     pickDominant(weekdayOrder, weekdayCounts),
+		"total":                total,
 		// 详情明细一并返回，便于前端可视化（不增加额外查询成本）。
-		"by_type":         typeCounts,
-		"by_size_range":   sizeCounts,
-		"by_time_period":  periodCounts,
-		"by_weekday":      weekdayCounts,
-		"user_id":         uid,
+		"by_type":        typeCounts,
+		"by_size_range":  sizeCounts,
+		"by_time_period": periodCounts,
+		"by_weekday":     weekdayCounts,
+		"user_id":        uid,
 	})
 }
