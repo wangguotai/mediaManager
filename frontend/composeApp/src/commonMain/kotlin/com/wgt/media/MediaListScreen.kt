@@ -1874,6 +1874,92 @@ private fun MyTabContent(
             }
         }
 
+        // V22：上传延迟分析卡片——在上传时段之后，展示拍摄到上传的延迟分布。
+        // 调 GET /api/media/media-time-analysis（后端待实现，404/异常时静默跳过）。
+        // total=0（无样本）或请求失败时 MediaService 返回 null，不渲染占位卡片。
+        var timeAnalysis by remember { mutableStateOf<MediaService.MediaTimeAnalysis?>(null) }
+        LaunchedEffect(Unit) { timeAnalysis = MediaService.getMediaTimeAnalysis() }
+        timeAnalysis?.let { ta ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("上传延迟", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 平均延迟：分钟<60 显示分钟，否则换算为小时/天，便于阅读。
+                    // commonMain 无 String.format，沿用 toString().take 截断一位小数。
+                    val avgMin = ta.avgDelayMinutes
+                    val avgStr = when {
+                        avgMin < 60.0 -> "${avgMin.toInt()} 分钟"
+                        avgMin < 1440.0 -> {
+                            val s = (avgMin / 60.0).toString()
+                            "${s.take(s.indexOf('.') + 2)} 小时"
+                        }
+                        else -> {
+                            val s = (avgMin / 1440.0).toString()
+                            "${s.take(s.indexOf('.') + 2)} 天"
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("⏱ 平均延迟", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(avgStr,
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("📅 同日上传", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${ta.sameDayCount} 项",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("延迟分布", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // 四档延迟分布：固定顺序 + 比例条，每档展示项数与占比条（按最大档归一）。
+                    val bucketList = listOf(
+                        "<1h" to ta.buckets.under1h,
+                        "1-24h" to ta.buckets.h1To24,
+                        "1-7d" to ta.buckets.d1To7,
+                        ">7d" to ta.buckets.over7d
+                    )
+                    val maxBucket = bucketList.maxOf { it.second }.coerceAtLeast(1)
+                    bucketList.forEach { (label, count) ->
+                        val ratio = (count.toFloat() / maxBucket).coerceIn(0f, 1f)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(52.dp))
+                            LinearProgressIndicator(
+                                progress = { ratio },
+                                modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surface
+                            )
+                            Text("$count", fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.width(36.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "基于 ${ta.total} 项记录（拍摄 → 上传）",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+            }
+        }
+
         // V20：上传习惯卡片——在上传时段之后，展示最常上传的类型/大小范围/时段/星期。
         // 调 GET /api/media/upload-pattern-analysis，total=0 或异常时静默跳过（不渲染占位）。
         var uploadPattern by remember { mutableStateOf<MediaService.UploadPattern?>(null) }

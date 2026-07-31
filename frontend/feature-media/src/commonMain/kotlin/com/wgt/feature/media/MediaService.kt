@@ -3608,6 +3608,74 @@ object MediaService {
     data class HourCount(val hour: Int, val count: Int)
 
     /**
+     * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
+     *
+     * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与
+     * [created_at]（上传时间）之差，统计上传相对拍摄的延迟分布。响应结构：
+     *
+     * `{avg_delay_minutes, same_day_count, total, delay_distribution:
+     *   {under_1h, h1_24, d1_7, over_7d}}`
+     *
+     * - [avgDelayMinutes] 平均延迟（分钟，Double，1 天=1440.0）。无有效样本时为 0.0。
+     * - [sameDayCount] 当天上传（delay < 24h）的项数。
+     * - [total] 参与统计的媒体总数。
+     * - [buckets] 延迟分布四档（顺序固定，含 0 档）：&lt;1h / 1-24h / 1-7d / &gt;7d。
+     *
+     * 后端尚未实现该端点时返回 HTTP 404 → 解析路径走 `else null`，调用方静默
+     * 跳过卡片渲染（与 [getUploadPatternAnalysis] 同语义：区分"成功但空"与"失败"）。
+     * total=0（无样本）也返回 null，避免渲染无意义的零分布。
+     *
+     * count 均为后端 int64（永不为 JSON null），用 `?: 0` 安全默认；
+     * avg_delay_minutes 为 double（永不为 JSON null），用 `?: 0.0` 安全默认。
+     */
+    suspend fun getMediaTimeAnalysis(): MediaTimeAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-time-analysis") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                if (total == 0) return null
+                val dist = obj["delay_distribution"]?.jsonObject
+                // 解析延迟分布四档——固定键，缺失时按 0 渲染。
+                fun bucket(key: String): Int =
+                    dist?.get(key)?.jsonPrimitive?.intOrNull ?: 0
+                MediaTimeAnalysis(
+                    avgDelayMinutes = obj["avg_delay_minutes"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    sameDayCount = obj["same_day_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    total = total,
+                    buckets = DelayBuckets(
+                        under1h = bucket("under_1h"),
+                        h1To24 = bucket("h1_24"),
+                        d1To7 = bucket("d1_7"),
+                        over7d = bucket("over_7d")
+                    )
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTimeAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V22：延迟分布四档（<1h / 1-24h / 1-7d / >7d）。 */
+    data class DelayBuckets(
+        val under1h: Int,
+        val h1To24: Int,
+        val d1To7: Int,
+        val over7d: Int
+    )
+
+    /** V22：上传 vs 拍摄延迟分析结果（平均延迟 + 同日上传数 + 总数 + 四档分布）。 */
+    data class MediaTimeAnalysis(
+        val avgDelayMinutes: Double,
+        val sameDayCount: Int,
+        val total: Int,
+        val buckets: DelayBuckets
+    )
+
+    /**
      * V21：GET /api/media/media-age-distribution — 媒体年龄分布。
      *
      * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 6 个年龄档：
