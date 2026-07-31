@@ -1727,11 +1727,22 @@ private fun MyTabContent(
                     )
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            "标签",
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        // V9：标签云卡片标题行——标题 + "管理"按钮（弹标签管理面板）
+                        var showTagManage by remember { mutableStateOf(false) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "标签",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            TextButton(onClick = { showTagManage = true }) {
+                                Text("管理", fontSize = 13.sp)
+                            }
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         // V9：长按 chip 弹出操作菜单的锚点标签 + 菜单展开态
                         var tagMenuAnchor by remember { mutableStateOf<String?>(null) }
@@ -1835,6 +1846,61 @@ private fun MyTabContent(
                                 },
                                 dismissButton = {
                                     TextButton(onClick = { deleteTagTarget = null }) { Text("取消") }
+                                }
+                            )
+                        }
+                        // V9：标签管理面板——"管理"按钮弹出，列出全部标签 (tag+count)，
+                        // 每行配重命名/删除操作（复用上方 renameTarget/deleteTagTarget 对话框流程），
+                        // 操作完成后刷新 tagStats。
+                        if (showTagManage) {
+                            AlertDialog(
+                                onDismissRequest = { showTagManage = false },
+                                title = { Text("标签管理") },
+                                text = {
+                                    val list = tagStats
+                                    if (list.isNullOrEmpty()) {
+                                        Text("暂无标签", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    } else {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .verticalScroll(rememberScrollState())
+                                        ) {
+                                            list.forEach { s ->
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 4.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        "#${s.tag} (${s.count})",
+                                                        fontSize = 14.sp,
+                                                        modifier = Modifier.weight(1f),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    TextButton(
+                                                        onClick = {
+                                                            showTagManage = false
+                                                            renameTarget = s.tag
+                                                            renameText = s.tag
+                                                        }
+                                                    ) { Text("重命名", fontSize = 12.sp) }
+                                                    TextButton(
+                                                        onClick = {
+                                                            showTagManage = false
+                                                            deleteTagTarget = s.tag
+                                                        }
+                                                    ) { Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = { showTagManage = false }) { Text("关闭") }
                                 }
                             )
                         }
