@@ -168,6 +168,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/timeline-calendar", s.handleMediaTimelineCalendar)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
+	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
+	// 区别于 batch-download 的 zip 流式打包，不创建分享链接）
+	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -5699,6 +5702,96 @@ func (s *Server) handleMediaBatchDownload(w http.ResponseWriter, r *http.Request
 		}
 		fw.Write(data)
 	}
+}
+
+// handleMediaBatchDownloadUrls 处理 POST /api/media/batch-download-urls ——
+// 返回多个媒体的直接下载 URL 列表。
+//
+// 与 batch-download（直接 zip 流式打包）和 batch-share（批量创建分享链接）不同：
+// 本端点既不打包文件流，也不创建分享 token，仅返回临时的直接下载 URL
+// （/api/media/download/{id}），前端可据此渲染"复制链接"或并发批量下载。
+//
+// 请求体: {"media_ids": ["id1","id2",...]}
+// 单批最多 100 个 media_ids（与 batch-download 上限一致）。
+// 每个 media_id 均校验格式安全 + 归属当前用户 + 未软删；任一不合法即整体拒绝，
+// 不部分返回，避免向客户端暴露混杂的成败结果。
+//
+// 响应: {"urls": [{"media_id":..., "filename":..., "url":..., "size":...}], "count": N}
+func (s *Server) handleMediaBatchDownloadUrls(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids must not be empty"})
+		return
+	}
+	// 单批上限与 batch-download 一致（100），防止请求体/遍历放大。
+	const batchDownloadURLsMax = 100
+	if len(req.MediaIDs) > batchDownloadURLsMax {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("too many media_ids (max %d)", batchDownloadURLsMax)})
+		return
+	}
+
+	// 单次遍历：校验每个 media_id 格式安全 + 归属当前用户 + 未软删，同时收集 media
+	// 用于生成 URL。任一不合法即整体拒绝——不部分返回，避免半成品响应（与 batch-share 一致）。
+	medias := make([]*storage.Media, 0, len(req.MediaIDs))
+	for _, mid := range req.MediaIDs {
+		if mid == "" || strings.Contains(mid, "..") || strings.Contains(mid, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id in list"})
+			return
+		}
+		m, err := s.store.GetMedia(r.Context(), mid)
+		if err != nil || m == nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "media not accessible"})
+			return
+		}
+		if m.UserID != uid || m.Deleted {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "media not accessible"})
+			return
+		}
+		medias = append(medias, m)
+	}
+
+	// 生成直接下载 URL：/api/media/download/{id}。该路径由 authMiddleware 鉴权，
+	// 仅当前用户可访问；URL 临时有效（随会话/token 失效），不落库、不创建分享 token。
+	type downloadURL struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+		URL      string `json:"url"`
+		Size     int64  `json:"size"`
+	}
+	urls := make([]downloadURL, 0, len(medias))
+	for _, m := range medias {
+		urls = append(urls, downloadURL{
+			MediaID:  m.ID,
+			Filename: m.Filename,
+			URL:      "/api/media/download/" + m.ID,
+			Size:     m.Size,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"urls":  urls,
+		"count": len(urls),
+	})
 }
 
 // ============ Helpers ============
