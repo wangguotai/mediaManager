@@ -2945,7 +2945,7 @@ fun MediaGridItem(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .border(2.dp, borderColor, RoundedCornerShape(16.dp))
+                .border(3.dp, borderColor, RoundedCornerShape(16.dp))
         ) {
             // 媒体缩略图
             Box(
@@ -2986,12 +2986,12 @@ fun MediaGridItem(
                     }
                 }
 
-                // 选中遮罩：轻微暗化 + 边框已突出选中态，双重视觉提示。
+                // 选中遮罩：半透明蓝色覆盖，与边框、左上角勾选圆共同构成选中视觉反馈。
                 if (isSelected) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
                     )
                 }
 
