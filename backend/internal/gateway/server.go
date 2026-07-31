@@ -434,6 +434,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
 	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
+	// 相册封面质量评分：遍历用户所有相册，对有封面的相册按封面 media 的分辨率（width*height）
+	// 评级 A/B/C（A≥1920×1080, B≥1280×720, C 为更低），返每相册评级与全量等级分布。
+	// 只读端点，精确匹配优先于 /api/media/album/ 前缀。
+	s.mux.HandleFunc("/api/media/album-cover-quality", s.handleAlbumCoverQuality)
 	// 相册分享摘要：遍历用户所有相册，返回每个相册的分享状态（是否已分享+分享链接数+
 	// 访问次数）及已分享/未分享总数。只读端点，前端用于相册管理页展示分享概况。
 	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
@@ -10352,6 +10356,103 @@ func (s *Server) handleAlbumAllSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"albums": items,
 		"total":  len(items),
+	})
+}
+
+// handleAlbumCoverQuality 处理 GET /api/media/album-cover-quality — 相册封面质量评分。
+// 遍历当前用户的所有相册，对每个有封面（CoverMediaID 非空）的相册，取封面 media 的
+// 分辨率（width*height）评级：
+//   - A：width*height >= 1920*1080 (FULL HD 及以上)
+//   - B：width*height >= 1280*720  (HD 及以上)
+//   - C：更低分辨率或缺少分辨率信息
+//
+// 返回 {albums:[{album_id,name,cover_id,quality_grade,resolution}], total, grade_distribution:{A,B,C}}。
+// 无封面的相册不出现在 albums 列表中。无 store 配置时返回 503。
+func (s *Server) handleAlbumCoverQuality(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage not configured"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	// 一次拉全量 media 建 id→media 索引，用于按 CoverMediaID 查封面分辨率。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	mediaByID := make(map[string]*storage.Media, len(mediaList))
+	for _, m := range mediaList {
+		if m != nil {
+			mediaByID[m.ID] = m
+		}
+	}
+
+	const (
+		thresholdA = int64(1920) * int64(1080) // 2,073,600
+		thresholdB = int64(1280) * int64(720)  //   921,600
+	)
+
+	type albumCoverQuality struct {
+		AlbumID      string `json:"album_id"`
+		Name         string `json:"name"`
+		CoverID      string `json:"cover_id"`
+		QualityGrade string `json:"quality_grade"`
+		Resolution   string `json:"resolution"`
+	}
+
+	items := make([]albumCoverQuality, 0, len(albums))
+	dist := map[string]int{"A": 0, "B": 0, "C": 0}
+	covered := 0
+	for _, a := range albums {
+		if a.CoverMediaID == "" {
+			continue
+		}
+		covered++
+		m, found := mediaByID[a.CoverMediaID]
+		grade := "C"
+		resolution := "0x0"
+		if found {
+			w, h := int64(m.Width), int64(m.Height)
+			pixels := w * h
+			resolution = strconv.FormatInt(w, 10) + "x" + strconv.FormatInt(h, 10)
+			if pixels >= thresholdA {
+				grade = "A"
+			} else if pixels >= thresholdB {
+				grade = "B"
+			} else {
+				grade = "C"
+			}
+		}
+		dist[grade]++
+		items = append(items, albumCoverQuality{
+			AlbumID:      a.ID,
+			Name:         a.Name,
+			CoverID:      a.CoverMediaID,
+			QualityGrade: grade,
+			Resolution:   resolution,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"albums":             items,
+		"total":              len(items),
+		"covered_albums":     covered,
+		"grade_distribution": dist,
 	})
 }
 
