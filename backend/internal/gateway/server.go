@@ -178,6 +178,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/yearly-review", s.handleMediaYearlyReview)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
+	// 按 24 小时分布统计上传习惯（created_at 的 UTC 小时，0-23 全槽位返回）。
+	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
@@ -3632,6 +3634,62 @@ func (s *Server) handleMediaCountByMonth(w http.ResponseWriter, r *http.Request)
 		"months":       months,
 		"total_months": len(months),
 		"total_media":  totalMedia,
+	})
+}
+
+// handleMediaByHour GET /api/media/media-by-hour — 按 24 小时分布统计上传习惯。
+//
+// 基于 created_at（上传时间）的 UTC 小时数将所有未软删媒体分入 24 个槽位（0-23），
+// 返回每个小时的上传数量，供前端渲染"一天中哪些时段最爱传图"的柱状图/雷达图。
+//
+// 响应结构：
+//
+//	{
+//	  "hours": [{"hour":0,"count":N},{"hour":1,"count":N}, ... {"hour":23,"count":N}],
+//	  "total":  N  // 24 个槽位 count 合计（= 参与分桶的未软删媒体总数）
+//	}
+//
+// 24 个小时槽全部返回（count=0 的也要返回），保证前端无需补齐缺失槽位。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaByHour(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 24 个小时槽位，count 全部初始化为 0。
+	hours := make([]map[string]any, 24)
+	for i := 0; i < 24; i++ {
+		hours[i] = map[string]any{"hour": i, "count": int64(0)}
+	}
+	var total int64
+	for _, m := range mediaList {
+		h := m.CreatedAt.UTC().Hour()
+		if h < 0 || h >= 24 { // 防御性：零值 time.Time 的 Hour()=0，不会越界
+			continue
+		}
+		c, _ := hours[h]["count"].(int64)
+		hours[h]["count"] = c + 1
+		total++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hours": hours,
+		"total": total,
 	})
 }
 
