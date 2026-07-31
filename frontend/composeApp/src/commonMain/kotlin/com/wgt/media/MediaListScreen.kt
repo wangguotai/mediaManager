@@ -2775,6 +2775,9 @@ fun ImagePreviewDialog(
     isFavorite: (MediaMetadata) -> Boolean = { false },
     onSlideshow: () -> Unit = {},
     onRename: (MediaMetadata) -> Unit = {},
+    // V7：设为相册封面。仅在相册上下文（albumId != null）时显示按钮；
+    // 调用方负责传入 albumId 与 onSetCover 实现（通常调 MediaService.setAlbumCover）。
+    albumId: String? = null,
     onSetCover: (MediaMetadata) -> Unit = {},
     onShowInfo: (String) -> Unit = {},
     onRotate: (MediaMetadata) -> Unit = {}
@@ -3102,12 +3105,15 @@ fun ImagePreviewDialog(
                                 label = "重命名",
                                 onClick = { onRename(currentMedia) }
                             )
-                            // V7：设为相册封面（仅在相册上下文有意义）
-                            PreviewActionButton(
-                                iconRes = Res.drawable.ic_image_placeholder,
-                                label = "封面",
-                                onClick = { onSetCover(currentMedia) }
-                            )
+                            // V7：设为相册封面——仅在相册上下文（albumId != null）显示。
+                            // 非相册场景（主媒体列表 Tab）不显示，避免无目标的空操作。
+                            if (albumId != null) {
+                                PreviewActionButton(
+                                    iconRes = Res.drawable.ic_image_placeholder,
+                                    label = "封面",
+                                    onClick = { onSetCover(currentMedia) }
+                                )
+                            }
                             PreviewActionButton(
                                 iconRes = Res.drawable.ic_share,
                                 label = "分享",

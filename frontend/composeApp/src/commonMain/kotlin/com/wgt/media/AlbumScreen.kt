@@ -687,6 +687,7 @@ private fun AlbumDetailPage(
                 onShare = {},
                 onFavoriteToggle = { media -> viewModel.toggleFavorite(media.id) },
                 isFavorite = { media -> viewModel.isFavorite(media.id) },
+                albumId = albumId,
                 onSetCover = { media ->
                     viewModel.setAlbumCover(albumId, media.id) { success ->
                         if (success) viewModel.showErrorMessage("已设为封面")
