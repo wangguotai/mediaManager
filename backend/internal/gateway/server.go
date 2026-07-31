@@ -354,6 +354,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
+	// V16：批量按日期排序多个相册内含照片
+	s.mux.HandleFunc("/api/media/album/batch-sort", s.handleAlbumBatchSort)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
 	s.mux.HandleFunc("/api/media/tag/batch-by-type", s.handleMediaTagBatchByType)
 	// V8：自动清理重复媒体
@@ -6299,6 +6301,95 @@ func (s *Server) handleAlbumSortByDate(w http.ResponseWriter, r *http.Request) {
 		"status":    "success",
 		"order":     req.Order,
 		"reordered": len(newOrder),
+	})
+}
+
+// handleAlbumBatchSort V16：POST /api/media/album/batch-sort — 批量按日期排序
+// 多个相册内含照片。请求体: { "album_ids": ["id1","id2",...], "order": "asc"|"desc" }（默认 desc）。
+// 对每个相册复用 sort-by-date 逻辑（GetAlbum → 获取 media created_at → 排序 → ReorderAlbumMedia）。
+// 跳过不存在/非当前用户所有/无媒体的相册；store 不可用时返回 503（排序依赖 created_at 时间戳）。
+// 返回 { "status": "success", "sorted_count": N, "skipped_count": M }。
+func (s *Server) handleAlbumBatchSort(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+		Order    string   `json:"order"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.AlbumIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids is required"})
+		return
+	}
+	descending := req.Order != "asc"
+	var sorted, skipped int
+	for _, albumID := range req.AlbumIDs {
+		// 校验归属并跳过无媒体相册，不中断整体流程。
+		album := provider.GetAlbum(uid, albumID)
+		if album == nil || len(album.MediaIDs) == 0 {
+			skipped++
+			continue
+		}
+		// 获取每个 media 的 created_at，跳过已删除/缺失元数据的项。
+		type mediaTime struct {
+			ID    string
+			CTime time.Time
+		}
+		var items []mediaTime
+		for _, mid := range album.MediaIDs {
+			m, err := s.store.GetMedia(r.Context(), mid)
+			if err != nil || m == nil || m.Deleted {
+				continue
+			}
+			items = append(items, mediaTime{ID: mid, CTime: m.CreatedAt})
+		}
+		if len(items) == 0 {
+			skipped++
+			continue
+		}
+		// 按日期排序
+		sort.Slice(items, func(i, j int) bool {
+			if descending {
+				return items[i].CTime.After(items[j].CTime)
+			}
+			return items[i].CTime.Before(items[j].CTime)
+		})
+		newOrder := make([]string, len(items))
+		for i, it := range items {
+			newOrder[i] = it.ID
+		}
+		if err := provider.ReorderAlbumMedia(uid, albumID, newOrder); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":    err.Error(),
+				"album_id": albumID,
+			})
+			return
+		}
+		sorted++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"sorted_count":  sorted,
+		"skipped_count": skipped,
 	})
 }
 
