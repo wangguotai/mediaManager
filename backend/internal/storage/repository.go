@@ -543,6 +543,18 @@ func (s *Store) RenameTag(ctx context.Context, userID, oldName, newName string) 
 	return int(deleted), nil
 }
 
+// DeleteTag V8：删除用户的所有带指定标签的记录。
+func (s *Store) DeleteTag(ctx context.Context, userID, tagName string) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM media_tags WHERE user_id = ? AND tag_name = ?`,
+		userID, tagName)
+	if err != nil {
+		return 0, fmt.Errorf("delete tag: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；

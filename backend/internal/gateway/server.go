@@ -226,6 +226,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/stats", s.handleMediaTagStats)
 	// V8：重命名标签
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
+	// V8：删除标签
+	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -2984,6 +2986,44 @@ func (s *Server) handleMediaTagRename(w http.ResponseWriter, r *http.Request) {
 		"old_name":      req.OldName,
 		"new_name":      req.NewName,
 		"renamed_count": count,
+	})
+}
+
+// handleMediaTagDelete V8：POST /api/media/tag/delete — 删除标签。
+// 请求体: { tag_name }
+func (s *Server) handleMediaTagDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.TagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tag_name required"})
+		return
+	}
+	count, err := s.store.DeleteTag(r.Context(), uid, req.TagName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tag":           req.TagName,
+		"deleted_count": count,
 	})
 }
 
