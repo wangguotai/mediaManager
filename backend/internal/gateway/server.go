@@ -248,6 +248,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
+	// V8：按分辨率统计
+	s.mux.HandleFunc("/api/media/by-resolution", s.handleMediaByResolution)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3536,6 +3538,61 @@ func (s *Server) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
 		"free_bytes":    freeBytes,
 		"free_gb":       float64(freeBytes) / (1024 * 1024 * 1024),
 		"usage_percent": float64(usedBytes) / float64(totalBytes) * 100,
+	})
+}
+
+// handleMediaByResolution V8：GET /api/media/by-resolution — 按分辨率统计。
+// 分档：4K(≥3840px) / 2K(≥1920px) / 1080p(≥1280px) / 720p(≥960px) / 其他
+func (s *Server) handleMediaByResolution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	resolutions := map[string]int{
+		"4K":     0,
+		"2K":     0,
+		"1080p":  0,
+		"720p":   0,
+		"其他":    0,
+	}
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		maxDim := int(m.Width)
+		if int(m.Height) > maxDim {
+			maxDim = int(m.Height)
+		}
+		switch {
+		case maxDim >= 3840:
+			resolutions["4K"]++
+		case maxDim >= 1920:
+			resolutions["2K"]++
+		case maxDim >= 1280:
+			resolutions["1080p"]++
+		case maxDim >= 960:
+			resolutions["720p"]++
+		default:
+			resolutions["其他"]++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resolutions": resolutions,
+		"total":       len(mediaList),
 	})
 }
 
