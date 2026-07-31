@@ -318,6 +318,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
 	// V8：按天统计上传量（日历热力图）
 	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
+	// 连续上传天数统计（current/longest streak，类似 GitHub 连续贡献天数）。
+	s.mux.HandleFunc("/api/media/upload-streak", s.handleUploadStreak)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
@@ -6135,6 +6137,104 @@ func (s *Server) handleMediaUploadCalendar(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"days":  stats,
 		"total": len(stats),
+	})
+}
+
+// handleUploadStreak GET /api/media/upload-streak — 连续上传天数统计。
+//
+// 类似 GitHub 连续贡献天数：按 created_at 日期分组后计算：
+//   - current_streak: 从今天往前连续有上传的天数（今天有上传则含今天）
+//   - longest_streak: 历史最长连续天数
+//   - total_active_days: 有上传的总天数
+//   - last_upload_date: 最近一次上传日期（YYYY-MM-DD，无上传则为空串）
+//   - today_count: 今日上传数
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleUploadStreak(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按日期（本地时区 YYYY-MM-DD）分组，记录每个有上传的日期集合。
+	days := make(map[string]bool)
+	today := time.Now().Format("2006-01-02")
+	todayCount := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		day := m.CreatedAt.Format("2006-01-02")
+		days[day] = true
+		if day == today {
+			todayCount++
+		}
+	}
+
+	// 排序日期，便于计算 longest_streak 与 last_upload_date。
+	sorted := make([]string, 0, len(days))
+	for d := range days {
+		sorted = append(sorted, d)
+	}
+	sort.Strings(sorted)
+
+	// longest_streak：遍历有序日期，统计最长连续段。
+	longest := 0
+	curRun := 0
+	var prev time.Time
+	for _, d := range sorted {
+		t, err := time.Parse("2006-01-02", d)
+		if err != nil {
+			continue
+		}
+		if curRun == 0 || t.Sub(prev) == 24*time.Hour {
+			curRun++
+			if curRun > longest {
+				longest = curRun
+			}
+		} else {
+			curRun = 1
+		}
+		prev = t
+	}
+
+	// current_streak：从今天往前连续有上传的天数。
+	// 若今天无上传，则从昨天起算（允许“今天还没传但仍算连续”）。
+	current := 0
+	cursor, _ := time.Parse("2006-01-02", today)
+	if !days[today] {
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	for days[cursor.Format("2006-01-02")] {
+		current++
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+
+	lastUpload := ""
+	if len(sorted) > 0 {
+		lastUpload = sorted[len(sorted)-1]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_streak":    current,
+		"longest_streak":    longest,
+		"total_active_days": len(days),
+		"last_upload_date":  lastUpload,
+		"today_count":       todayCount,
 	})
 }
 
