@@ -386,6 +386,9 @@ func (s *Server) registerRoutes() {
 	// V22：智能标签推荐——基于现有标签和文件名模式（IMG_/VID_/Screenshot/WeChat/camera），
 	// 推荐用户尚未使用的标签及命中的媒体数量，供前端"建议标签"功能展示。只读端点。
 	s.mux.HandleFunc("/api/media/tag-recommendations", s.handleMediaTagRecommendations)
+	// V23：一键应用所有标签推荐——复用 tag-recommendations 的推荐逻辑，对每条推荐的
+	// 匹配媒体调 AddMediaTag 落库，返回已应用关联总数与每个标签的计数。
+	s.mux.HandleFunc("/api/media/apply-tag-recommendations", s.handleApplyTagRecommendations)
 	// V8：自动清理重复媒体
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// 重复文件详细报告（仅报告不删除）
@@ -6830,6 +6833,88 @@ func (s *Server) handleMediaAutoTag(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// rule 为一条标签推荐规则：pattern 匹配文件名（isSub 决定 Contains/HasPrefix），
+// 命中则映射到 tag（中文标签名），reason 是推荐理由文案。
+type rule struct {
+	pattern string
+	isSub   bool // true→Contains, false→HasPrefix
+	tag     string
+	reason  string
+}
+
+// tagRecommendation 为单条推荐结果，含标签名、理由、命中媒体数与命中 media_id 列表。
+// mediaIds 供 apply 端点遍历 AddMediaTag 用；只读端点不序列化它。
+type tagRecommendation struct {
+	TagName             string   `json:"tag_name"`
+	Reason              string   `json:"reason"`
+	SuggestedMediaCount int      `json:"suggested_media_count"`
+	mediaIds            []string // 未导出，避免计入 read-only 响应 JSON
+}
+
+// computeTagRecommendations 复用的推荐核心逻辑（V22/V23 共用）：
+// 扫描用户未删除媒体的 Filename，按常见命名模式（IMG_/VID_/Screenshot/WeChat/camera）
+// 映射到中文标签名；若用户已有该标签则跳过。返回推荐列表，每条携带命中的 media_id
+// 列表供 apply 端点落库使用。调用方需保证 s.store 非 nil。
+func (s *Server) computeTagRecommendations(ctx context.Context, uid string) ([]tagRecommendation, error) {
+	// 用户已有标签集合（用于跳过已存在的推荐）。
+	existingTags, err := s.store.ListAllTags(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("list existing tags: %w", err)
+	}
+	haveTag := make(map[string]bool, len(existingTags))
+	for _, t := range existingTags {
+		haveTag[t] = true
+	}
+	// 拉取所有媒体文件名（ListMediaByUser 仅返回 deleted=0 行，已按 created_at DESC 排序）。
+	mediaList, err := s.store.ListMediaByUser(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("list media: %w", err)
+	}
+	// 推荐规则：匹配模式 → (标签名, 推荐理由)。匹配对文件名与模式都做 ToUpper，
+	// 大小写不敏感，与 handleMediaAutoTag 的 prefix 匹配约定一致。
+	rules := []rule{
+		{"IMG_", false, "照片", "文件名以 IMG_ 开头"},
+		{"VID_", false, "视频", "文件名以 VID_ 开头"},
+		{"Screenshot", true, "截图", "文件名含 Screenshot"},
+		{"WeChat", true, "微信", "文件名含 WeChat"},
+		{"camera", true, "相机", "文件名含 camera"},
+	}
+	// 统计每条规则命中的媒体 id 列表（模式与文件名都 ToUpper 后比较，大小写不敏感）。
+	hits := make([][]string, len(rules))
+	for _, m := range mediaList {
+		nameUpper := strings.ToUpper(m.Filename)
+		for i, rl := range rules {
+			patUpper := strings.ToUpper(rl.pattern)
+			hitted := false
+			if rl.isSub {
+				hitted = strings.Contains(nameUpper, patUpper)
+			} else {
+				hitted = strings.HasPrefix(nameUpper, patUpper)
+			}
+			if hitted {
+				hits[i] = append(hits[i], m.ID)
+			}
+		}
+	}
+	// 组装推荐列表：跳过用户已有标签或零命中的规则。
+	recommendations := make([]tagRecommendation, 0, len(rules))
+	for i, rl := range rules {
+		if len(hits[i]) == 0 {
+			continue
+		}
+		if haveTag[rl.tag] {
+			continue
+		}
+		recommendations = append(recommendations, tagRecommendation{
+			TagName:             rl.tag,
+			Reason:              rl.reason,
+			SuggestedMediaCount: len(hits[i]),
+			mediaIds:            hits[i],
+		})
+	}
+	return recommendations, nil
+}
+
 // handleMediaTagRecommendations V22：GET /api/media/tag-recommendations —
 // 基于现有标签和文件名模式推荐新标签。只读端点，不修改任何媒体。
 //
@@ -6860,77 +6945,83 @@ func (s *Server) handleMediaTagRecommendations(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
 		return
 	}
-	// 用户已有标签集合（用于跳过已存在的推荐）。
-	existingTags, err := s.store.ListAllTags(r.Context(), uid)
+	recommendations, err := s.computeTagRecommendations(r.Context(), uid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
-	}
-	haveTag := make(map[string]bool, len(existingTags))
-	for _, t := range existingTags {
-		haveTag[t] = true
-	}
-	// 拉取所有媒体文件名（ListMediaByUser 仅返回 deleted=0 行，已按 created_at DESC 排序）。
-	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	// 推荐规则：匹配模式 → (标签名, 推荐理由)。匹配对文件名与模式都做 ToUpper，
-	// 大小写不敏感，与 handleMediaAutoTag 的 prefix 匹配约定一致。
-	type rule struct {
-		pattern string
-		isSub   bool // true→Contains, false→HasPrefix
-		tag     string
-		reason  string
-	}
-	rules := []rule{
-		{"IMG_", false, "照片", "文件名以 IMG_ 开头"},
-		{"VID_", false, "视频", "文件名以 VID_ 开头"},
-		{"Screenshot", true, "截图", "文件名含 Screenshot"},
-		{"WeChat", true, "微信", "文件名含 WeChat"},
-		{"camera", true, "相机", "文件名含 camera"},
-	}
-	// 统计每条规则命中的媒体数量（模式与文件名都 ToUpper 后比较，大小写不敏感）。
-	counts := make([]int, len(rules))
-	for _, m := range mediaList {
-		nameUpper := strings.ToUpper(m.Filename)
-		for i, rl := range rules {
-			patUpper := strings.ToUpper(rl.pattern)
-			hitted := false
-			if rl.isSub {
-				hitted = strings.Contains(nameUpper, patUpper)
-			} else {
-				hitted = strings.HasPrefix(nameUpper, patUpper)
-			}
-			if hitted {
-				counts[i]++
-			}
-		}
-	}
-	// 组装推荐列表：跳过用户已有标签或零命中的规则。
-	type recommendation struct {
-		TagName             string `json:"tag_name"`
-		Reason              string `json:"reason"`
-		SuggestedMediaCount int    `json:"suggested_media_count"`
-	}
-	recommendations := make([]recommendation, 0, len(rules))
-	for i, rl := range rules {
-		if counts[i] == 0 {
-			continue
-		}
-		if haveTag[rl.tag] {
-			continue
-		}
-		recommendations = append(recommendations, recommendation{
-			TagName:             rl.tag,
-			Reason:              rl.reason,
-			SuggestedMediaCount: counts[i],
-		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"recommendations": recommendations,
 		"total":           len(recommendations),
+	})
+}
+
+// handleApplyTagRecommendations V23：POST /api/media/apply-tag-recommendations —
+// 一键应用所有标签推荐。复用 computeTagRecommendations 获取推荐，对每条推荐的匹配
+// 媒体逐个调 AddMediaTag 落库（INSERT OR IGNORE 幂等，已存在关联不报错），
+// 返回已应用的标签-Media 关联总数与每个标签的计数。
+//
+// 响应:
+//
+//	{
+//	  "status": "success",
+//	  "applied_count": 18,
+//	  "tags_applied": [
+//	    {"tag_name":"照片","count":12},
+//	    {"tag_name":"截图","count":3},
+//	    ...
+//	  ]
+//	}
+func (s *Server) handleApplyTagRecommendations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	recommendations, err := s.computeTagRecommendations(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 对每条推荐，遍历其命中的 media_id 逐个 AddMediaTag（幂等，INSERT OR IGNORE），
+	// 统计每个标签实际新增的关联计数与累计总数。
+	type tagApplied struct {
+		TagName string `json:"tag_name"`
+		Count   int    `json:"count"`
+	}
+	tagsApplied := make([]tagApplied, 0, len(recommendations))
+	appliedCount := 0
+	for _, rec := range recommendations {
+		count := 0
+		for _, mediaID := range rec.mediaIds {
+			if err := s.store.AddMediaTag(r.Context(), uid, mediaID, rec.TagName); err == nil {
+				count++
+			}
+		}
+		// 即使某标签全部命中已存在关联（count==0），也保留该条目以告知前端"该标签
+		// 已处理"——但零命中通常意味着推荐逻辑已跳过（haveTag 拦截），故此处 count>0。
+		tagsApplied = append(tagsApplied, tagApplied{
+			TagName: rec.TagName,
+			Count:   count,
+		})
+		appliedCount += count
+	}
+	if s.store != nil {
+		_ = s.store.AddAuditLog(r.Context(), uid, "tag", "",
+			fmt.Sprintf("apply-tag-recommendations: applied %d associations across %d tags", appliedCount, len(tagsApplied)))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "success",
+		"applied_count": appliedCount,
+		"tags_applied":  tagsApplied,
 	})
 }
 
