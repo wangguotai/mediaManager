@@ -3137,6 +3137,37 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/media-lifecycle — 媒体生命周期分析。 */
+    suspend fun getMediaLifecycle(): List<LifecycleStage>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-lifecycle") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["lifecycle"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    LifecycleStage(
+                        stage = o["stage"]?.jsonPrimitive?.contentOrNull ?: "",
+                        action = o["action"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaLifecycle FAILED: ${e.message}")
+            null
+        }
+    }
+
+    data class LifecycleStage(
+        val stage: String,
+        val action: String,
+        val count: Int,
+        val percentage: Double
+    )
+
     /**
      * V23：POST /api/media/apply-tag-recommendations — 一键应用全部标签推荐。
      *

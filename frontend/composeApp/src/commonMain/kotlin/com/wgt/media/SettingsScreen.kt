@@ -1092,6 +1092,38 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V8：媒体生命周期卡片
+            var lifecycleData by remember { mutableStateOf<List<MediaService.LifecycleStage>?>(null) }
+            LaunchedEffect(Unit) {
+                orphanScope.launch { lifecycleData = MediaService.getMediaLifecycle() }
+            }
+            SectionTitle("媒体生命周期", iconRes = Res.drawable.ic_info)
+            lifecycleData?.let { stages ->
+                if (stages.isNotEmpty()) {
+                    stages.take(8).forEach { stg ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${stg.stage} (${stg.action})",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "${stg.count} 次 · ${stg.percentage.toInt()}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                } else {
+                    Text("暂无操作记录", fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp))
+                }
+            }
             // V9：年度回顾入口——点击弹 Dialog 展示该年上传统计详情
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
