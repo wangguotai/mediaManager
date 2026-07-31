@@ -1426,6 +1426,66 @@ private fun MyTabContent(
             }
         }
 
+        // V9：上传时段 24h 柱状图（调 media-by-hour）
+        var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
+        LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
+        mediaByHour?.let { hours ->
+            if (hours.isNotEmpty() && hours.sumOf { it.count } > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("上传时段", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 最高峰 3 个时段高亮 primary，其余 onSurfaceVariant
+                        val peakHourValues = hours.sortedByDescending { it.count }
+                            .take(3).filter { it.count > 0 }.map { it.hour }.toSet()
+                        val maxCount = hours.maxOf { it.count }.coerceAtLeast(1)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(hours.size) { idx ->
+                                val item = hours[idx]
+                                val isPeak = item.hour in peakHourValues
+                                val barColor = if (isPeak) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                val barHeight = ((item.count.toFloat() / maxCount) * 80f).coerceAtLeast(2f)
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        if (item.count > 0) "${item.count}" else "",
+                                        fontSize = 9.sp,
+                                        color = barColor
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .width(8.dp)
+                                            .height(barHeight.dp)
+                                            .clip(RoundedCornerShape(2.dp))
+                                            .background(barColor)
+                                    )
+                                    Text(
+                                        "${item.hour}",
+                                        fontSize = 9.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "0h - 23h（上传时间分布）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：拍摄热力图（GitHub 风格贡献图，调 media-heatmap）
         var heatmapDays by remember { mutableStateOf<List<MediaService.HeatmapDay>?>(null) }
         LaunchedEffect(Unit) { heatmapDays = MediaService.getMediaHeatmap() }

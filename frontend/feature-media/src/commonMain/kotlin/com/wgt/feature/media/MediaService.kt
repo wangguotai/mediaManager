@@ -2322,6 +2322,36 @@ object MediaService {
     /** V9：拍摄热力图单日（日期 + 当天拍摄数量）。 */
     data class HeatmapDay(val date: String, val count: Int)
 
+    /**
+     * V9：GET /api/media/media-by-hour — 按 24 小时分布统计上传时段。
+     *
+     * 后端返回 `{hours: [{hour, count}], total}`，24 个小时槽全返回（含 count=0）。
+     * 本方法取 `hours` 数组解析为 [HourCount]。失败返回 null，调用方按 null 展示空状态。
+     */
+    suspend fun getMediaByHour(): List<HourCount>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-by-hour") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["hours"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    HourCount(
+                        hour = o["hour"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaByHour FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V9：上传时段单小时（小时 0-23 + 上传数量）。 */
+    data class HourCount(val hour: Int, val count: Int)
+
     /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
     suspend fun orphanCheck(): OrphanCheckResult? {
         return try {
