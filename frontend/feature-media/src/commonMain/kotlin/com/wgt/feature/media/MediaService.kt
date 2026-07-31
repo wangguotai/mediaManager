@@ -1419,6 +1419,22 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/tag/autocomplete?q=xxx — 标签自动补全。 */
+    suspend fun tagAutocomplete(query: String): List<String>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/autocomplete?q=${query.encodeURLQueryComponent()}") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["suggestions"]?.jsonArray?.map { it.jsonPrimitive.content }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "tagAutocomplete FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/upload-calendar — 按天统计上传量（最近30天）。 */
     suspend fun getUploadCalendar(): List<UploadDay>? {
         return try {

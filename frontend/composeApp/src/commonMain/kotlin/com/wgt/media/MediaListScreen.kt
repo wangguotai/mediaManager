@@ -4118,6 +4118,15 @@ fun BatchTagDialog(
     onConfirm: (String) -> Unit
 ) {
     var tag by remember { mutableStateOf("") }
+    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(tag) {
+        if (tag.length >= 1) {
+            suggestions = MediaService.tagAutocomplete(tag) ?: emptyList()
+        } else {
+            suggestions = emptyList()
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("批量打标签") },
@@ -4132,6 +4141,23 @@ fun BatchTagDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                // V8：标签自动补全建议
+                if (suggestions.isNotEmpty() && tag.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(suggestions.size) { i ->
+                            AssistChip(
+                                onClick = { tag = suggestions[i] },
+                                label = { Text(suggestions[i], fontSize = 11.sp) },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
