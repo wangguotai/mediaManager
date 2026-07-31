@@ -347,6 +347,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-clone", s.handleAlbumBatchClone)
 	// V14：相册媒体数量排行（按相册内媒体数倒序，返回哪些相册照片最多）。
 	s.mux.HandleFunc("/api/media/album/count-ranking", s.handleAlbumCountRanking)
+	// V15：相册活动时间线（每个相册最近一次有媒体加入/其成员最新上传时间，
+	// 按该时间倒序）。与 count-ranking 互补：后者看相册"大小"，本端点看相册"活跃度"。
+	s.mux.HandleFunc("/api/media/album/activity", s.handleAlbumActivity)
 	// V15：存储清理建议（重复+大文件+旧文件+孤立文件分析，估算可回收空间）。
 	s.mux.HandleFunc("/api/media/storage-recommendations", s.handleStorageRecommendations)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
@@ -6624,6 +6627,102 @@ func (s *Server) handleAlbumCountRanking(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ranking":      ranking,
 		"total_albums": len(albums),
+	})
+}
+
+// handleAlbumActivity V15：GET /api/media/album/activity — 相册活动时间线。
+// 遍历当前用户所有相册，对每个相册取其成员媒体中最新的 created_at（上传时间）
+// 作为该相册的"最近活动时间"，按该时间倒序返回。
+//
+// 设计取舍：
+//   - 相册本身无"最后修改时间"字段（Album 仅记录 CreatedAt），故用其成员媒体的
+//     created_at 上界近似"最近一次有内容流入相册的时间"。media 的 created_at 是
+//     上传落库时间，由 store 统一维护，比 audit_log（需显式 record 才有数据、且
+//     album 增删操作当前并未自动写审计）更可靠且无需额外存储。
+//   - 只做一次 ListMediaByUser（按 created_at 降序），在内存里建 mediaID→createdAt
+//     映射后逐相册扫描取最大值，避免对每个相册逐条 GetMedia 打 N 次 DB。
+//
+// 响应:
+//
+//	{
+//	  "activities": [
+//	    {"album_id","name","count","last_activity"}
+//	  ],
+//	  "total": N
+//	}
+//
+// 其中 last_activity 为 RFC3339 字符串；相册无成员媒体时为空串（排序时视作最旧）。
+// store 不可用时回退到相册 CreatedAt（Unix 秒），保证端点在无元数据库场景仍可用。
+func (s *Server) handleAlbumActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	// 一次性拉取用户全部媒体，建立 mediaID → created_at 映射。store 不可用或拉取
+	// 失败时 mediaTS 为空 map，后续回退到相册自身 CreatedAt，端点不会因此报错。
+	mediaTS := make(map[string]time.Time, 0)
+	if s.store != nil {
+		if mediaList, err := s.store.ListMediaByUser(r.Context(), uid); err == nil {
+			for _, m := range mediaList {
+				mediaTS[m.ID] = m.CreatedAt
+			}
+		}
+	}
+
+	type albumActivity struct {
+		AlbumID      string `json:"album_id"`
+		Name         string `json:"name"`
+		Count        int    `json:"count"`
+		LastActivity string `json:"last_activity"`
+	}
+
+	activities := make([]albumActivity, 0, len(albums))
+	for _, a := range albums {
+		// 取该相册所有成员媒体中最新的 created_at；无成员或媒体元数据缺失时
+		// 回退到相册自身创建时间（Unix 秒 → time.Time）。
+		var latest time.Time
+		for _, mid := range a.MediaIDs {
+			if t, ok := mediaTS[mid]; ok && !t.IsZero() {
+				if t.After(latest) {
+					latest = t
+				}
+			}
+		}
+		lastStr := ""
+		if !latest.IsZero() {
+			lastStr = latest.Format(time.RFC3339)
+		} else if a.CreatedAt > 0 {
+			// 无成员媒体时间可参照时，用相册创建时间作回退（至少反映相册何时建立）。
+			lastStr = time.Unix(a.CreatedAt, 0).Format(time.RFC3339)
+		}
+		activities = append(activities, albumActivity{
+			AlbumID:      a.ID,
+			Name:         a.Name,
+			Count:        len(a.MediaIDs),
+			LastActivity: lastStr,
+		})
+	}
+
+	// 按 last_activity 倒序（空串视作最旧，排在最后）。
+	sort.SliceStable(activities, func(i, j int) bool {
+		return activities[i].LastActivity > activities[j].LastActivity
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activities": activities,
+		"total":      len(activities),
 	})
 }
 
