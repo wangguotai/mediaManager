@@ -1169,6 +1169,54 @@ private fun MyTabContent(
             }
         }
 
+        // V8：拍摄时段（按拍摄时段统计媒体数量，调 time-distribution）
+        var timeDist by remember { mutableStateOf<Map<String, Int>?>(null) }
+        LaunchedEffect(Unit) { timeDist = MediaService.getTimeDistribution() }
+        timeDist?.let { dist ->
+            if (dist.values.sum() > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("拍摄时段", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 固定时段顺序 + emoji，后端只返回其中部分键也能稳定渲染；
+                        // 未返回的时段跳过，不强行展示 0 项避免噪音。
+                        val timeSlots = listOf(
+                            "早晨" to "🌅",
+                            "上午" to "☀️",
+                            "下午" to "🌇",
+                            "晚上" to "🌙",
+                            "深夜" to "🌌"
+                        )
+                        val total = dist.values.sum().coerceAtLeast(1)
+                        timeSlots.forEach { (name, emoji) ->
+                            val count = dist[name] ?: return@forEach
+                            if (count <= 0) return@forEach
+                            val ratio = (count.toFloat() / total).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text("$emoji $name", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(64.dp))
+                                LinearProgressIndicator(
+                                    progress = { ratio },
+                                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text("$count", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.width(36.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：文件类型分布
         var fileTypes by remember { mutableStateOf<List<MediaService.FileTypeStat>?>(null) }
         LaunchedEffect(Unit) { fileTypes = MediaService.getFileTypes() }

@@ -1942,6 +1942,37 @@ object MediaService {
         }
     }
 
+    /**
+     * V8：GET /api/media/time-distribution — 按拍摄时段统计媒体数量。
+     *
+     * 后端返回 `{distribution: {"早晨":N,"下午":N,"晚上":N,"深夜":N}, total: N}`，
+     * 本方法仅取 `distribution` 对象解析为 `Map<String, Int>`（键=时段名，值=数量）。
+     * 失败返回 null，调用方按 null 展示空状态。`total` 字段前端不单独透传，
+     * 由 `values.sum()` 推导即可（与 [getByResolution] 同款 Map 解析）。
+     *
+     * 注意：`(v.jsonPrimitive.intOrNull ?: 0)` 外层的括号不可省——Kotlin/Native
+     * 下 `k to v ?: 0` 会把 `?:` 推宽成 `Serializable`，导致 `associate` 返回类型
+     * 不匹配（见 kmp-platform-capabilities 技能「associate + ?: 类型推断」陷阱）。
+     */
+    suspend fun getTimeDistribution(): Map<String, Int>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/time-distribution") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["distribution"]?.jsonObject?.let { distObj ->
+                    distObj.entries.associate { (k, v) ->
+                        k to (v.jsonPrimitive.intOrNull ?: 0)
+                    }
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTimeDistribution FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/disk-usage — 服务器磁盘使用情况。 */
     suspend fun getDiskUsage(): DiskUsage? {
         return try {
