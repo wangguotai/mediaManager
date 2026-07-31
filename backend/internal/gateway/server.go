@@ -389,6 +389,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
 	s.mux.HandleFunc("/api/media/by-resolution", s.handleMediaByResolution)
+	// 增强版分辨率分布：按宽×高分档（低清/标清·高清/超清/4K+）+ 横向·纵向·正方形方向统计
+	// + 最大/最小分辨率。区别于 by-resolution（仅按最大边 maxDim 粗分档）：本端点用
+	// width*height 像素总量分档并补充方向与极值，供前端分辨率分析卡片一次渲染。
+	s.mux.HandleFunc("/api/media/media-resolution-distribution", s.handleMediaResolutionDist)
 	// V8：按文件大小范围统计
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
 	// 媒体年龄分布（按 created_at 到 now 的时间差分组：<1天/1-7天/7-30天/30-90天/90-365天/>365天）
@@ -8783,6 +8787,161 @@ func (s *Server) handleMediaByResolution(w http.ResponseWriter, r *http.Request)
 		"resolutions": resolutions,
 		"total":       len(mediaList),
 	})
+}
+
+// handleMediaResolutionDist GET /api/media/media-resolution-distribution —
+// 增强版分辨率分布统计。
+//
+// 按 width*height 像素总量分四档：
+//
+//	低清          (< 640*480)
+//	标清/高清      (640*480 ~ 1920*1080)
+//	超清          (1920*1080 ~ 3840*2160)
+//	4K+           (>= 3840*2160)
+//
+// 同时统计方向（横向 width>height / 纵向 height>width / 正方形 width==height）
+// 与最大/最小分辨率（按 width*height 像素总量比较，仅纳入有效分辨率 >0 的媒体）。
+//
+// 与 handleMediaByResolution 的区别：后者按最大边 maxDim 粗分 4K/2K/1080p/720p/其他，
+// 仅返 count；本端点按像素总量分档并补充 bytes/方向/极值，供前端分辨率分析卡片一次渲染。
+//
+// 需认证（user_id 从 context 取），按 user_id 隔离；store 未注入返回 503。
+// 软删（deleted=1）媒体跳过。
+//
+// 响应结构：
+//
+//	{
+//	  "tiers": [
+//	    {"tier":"低清","count":N,"bytes":N},
+//	    {"tier":"标清/高清","count":N,"bytes":N},
+//	    {"tier":"超清","count":N,"bytes":N},
+//	    {"tier":"4K+","count":N,"bytes":N}
+//	  ],
+//	  "orientation": {"landscape":N,"portrait":N,"square":N},
+//	  "max_resolution": {"width":N,"height":N,"pixels":N},
+//	  "min_resolution": {"width":N,"height":N,"pixels":N},
+//	  "total": N  // 参与分档的未软删媒体总数
+//	}
+func (s *Server) handleMediaResolutionDist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 像素总量分档阈值。
+	const (
+		pixSDHD = 640 * 480   // 307200：标清/高清下界
+		pixUHD  = 1920 * 1080 // 2073600：超清下界
+		pix4K   = 3840 * 2160 // 8294400：4K+ 下界
+	)
+
+	type tierStat struct {
+		Tier  string `json:"tier"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	tiers := []tierStat{
+		{Tier: "低清"},
+		{Tier: "标清/高清"},
+		{Tier: "超清"},
+		{Tier: "4K+"},
+	}
+	tierIdx := func(pixels int) int {
+		switch {
+		case pixels < pixSDHD:
+			return 0
+		case pixels < pixUHD:
+			return 1
+		case pixels < pix4K:
+			return 2
+		default:
+			return 3
+		}
+	}
+
+	type orient struct {
+		Landscape int `json:"landscape"`
+		Portrait  int `json:"portrait"`
+		Square    int `json:"square"`
+	}
+	o := orient{}
+
+	type resolution struct {
+		Width   int `json:"width"`
+		Height  int `json:"height"`
+		Pixels  int `json:"pixels"`
+	}
+	var maxRes, minRes *resolution
+
+	total := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		w := int(m.Width)
+		h := int(m.Height)
+		if w <= 0 && h <= 0 {
+			// 无分辨率元数据的媒体仍计入方向与极值统计之外，但不参与分档（避免 0 像素归入"低清"造成误导）。
+			continue
+		}
+		pixels := w * h
+		total++
+
+		// 分档
+		tiers[tierIdx(pixels)].Count++
+		tiers[tierIdx(pixels)].Bytes += m.Size
+
+		// 方向
+		switch {
+		case w > h:
+			o.Landscape++
+		case h > w:
+			o.Portrait++
+		default:
+			o.Square++
+		}
+
+		// 极值（按像素总量比较）
+		// 对于 pixels<=0 但 w/h 之一为正的边角情况，仍纳入极值比较以反映真实分辨率分布。
+		cur := &resolution{Width: w, Height: h, Pixels: pixels}
+		if maxRes == nil || pixels > maxRes.Pixels {
+			maxRes = cur
+		}
+		if minRes == nil || pixels < minRes.Pixels {
+			minRes = cur
+		}
+	}
+
+	resp := map[string]any{
+		"tiers":       tiers,
+		"orientation": o,
+		"total":       total,
+	}
+	if maxRes != nil {
+		resp["max_resolution"] = maxRes
+	} else {
+		resp["max_resolution"] = nil
+	}
+	if minRes != nil {
+		resp["min_resolution"] = minRes
+	} else {
+		resp["min_resolution"] = nil
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleMediaBySizeRange V8：GET /api/media/by-size-range — 按文件大小范围统计。
