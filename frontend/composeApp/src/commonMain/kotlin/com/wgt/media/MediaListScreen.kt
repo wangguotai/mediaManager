@@ -3979,13 +3979,23 @@ fun SelectionBottomBar(
     BottomAppBar(
         modifier = Modifier.fillMaxWidth()
     ) {
-        // 全选 / 取消全选
-        IconButton(onClick = { if (isAllSelected) onDeselectAll() else onSelectAll() }) {
+        // 全选 / 取消全选（文字按钮，更直观——参照 Gallery App 风格）
+        TextButton(
+            onClick = { if (isAllSelected) onDeselectAll() else onSelectAll() },
+            enabled = totalCount > 0
+        ) {
             Icon(
                 painterResource(Res.drawable.ic_check_circle),
                 contentDescription = if (isAllSelected) "取消全选" else "全选",
                 tint = if (isAllSelected) MaterialTheme.colorScheme.primary
-                       else MaterialTheme.colorScheme.onSurfaceVariant
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = if (isAllSelected) "取消全选" else "全选",
+                color = if (isAllSelected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
