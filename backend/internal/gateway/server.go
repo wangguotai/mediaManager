@@ -1468,8 +1468,8 @@ func (s *Server) handleAlbumBatchAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and media_ids are required"})
 		return
 	}
-	if len(req.MediaIDs) > 100 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 100 media per batch"})
+	if len(req.MediaIDs) > 200 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 200 media per batch"})
 		return
 	}
 	uid := userIDFromContext(r.Context())
