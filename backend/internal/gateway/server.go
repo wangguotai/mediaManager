@@ -341,6 +341,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/pinned", s.handleAlbumPinned)
 	// V9：批量置顶多个相册（遍历 PinAlbum，返回实际置顶计数）。
 	s.mux.HandleFunc("/api/media/album/batch-pin", s.handleAlbumBatchPin)
+	// V9：批量取消置顶多个相册（遍历 UnpinAlbum，返回实际取消计数）。
+	s.mux.HandleFunc("/api/media/album/batch-unpin", s.handleAlbumBatchUnpin)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
@@ -6448,6 +6450,59 @@ func (s *Server) handleAlbumBatchPin(w http.ResponseWriter, r *http.Request) {
 		"status":        "success",
 		"pinned_count":  pinned,
 		"skipped_count": skipped,
+	})
+}
+
+// handleAlbumBatchUnpin V9：POST /api/media/album/batch-unpin — 批量取消置顶多个相册。
+// 请求体: { "album_ids": ["id1","id2",...] } → 逐个 UnpinAlbum →
+// { "status": "success", "unpinned_count": N, "skipped_count": M }
+// 对不存在/非当前用户所属的相册跳过（GetAlbum 校验归属），不中断整体流程。
+func (s *Server) handleAlbumBatchUnpin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if len(req.AlbumIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids is required"})
+		return
+	}
+	unpinned, skipped := 0, 0
+	for _, albumID := range req.AlbumIDs {
+		// 先校验相册归属，跳过不存在/非当前用户所有的相册，不中断整体流程。
+		if provider.GetAlbum(uid, albumID) == nil {
+			skipped++
+			continue
+		}
+		if err := provider.UnpinAlbum(uid, albumID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":    err.Error(),
+				"album_id": albumID,
+			})
+			return
+		}
+		unpinned++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "success",
+		"unpinned_count":  unpinned,
+		"skipped_count":   skipped,
 	})
 }
 
