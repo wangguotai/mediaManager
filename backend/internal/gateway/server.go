@@ -256,6 +256,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
 	s.mux.HandleFunc("/api/media/album/all-summary", s.handleAlbumAllSummary)
+	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
+	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3740,6 +3742,58 @@ func (s *Server) handleAlbumAllSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"albums": items,
 		"total":  len(items),
+	})
+}
+
+// handleMediaCleanupOrphan V8：POST /api/media/cleanup-orphan — 清理孤立记录。
+// 扫描 DB 中的媒体记录，将磁盘文件缺失的记录标记为已删除。
+func (s *Server) handleMediaCleanupOrphan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage not configured"})
+		return
+	}
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "uploads dir not configured"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	checked := 0
+	cleaned := 0
+	var cleanedIDs []string
+	for _, m := range mediaList {
+		if m.Deleted || checked >= 500 {
+			continue
+		}
+		checked++
+		pattern := filepath.Join(uploadsDir, m.ID+".*")
+		files, _ := filepath.Glob(pattern)
+		if len(files) == 0 {
+			// 软删除孤立记录
+			m.Deleted = true
+			if err := s.store.UpdateMedia(r.Context(), m); err == nil {
+				cleaned++
+				cleanedIDs = append(cleanedIDs, m.ID)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"checked":       checked,
+		"cleaned_count": cleaned,
+		"cleaned_ids":   cleanedIDs,
 	})
 }
 
