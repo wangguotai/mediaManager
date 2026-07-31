@@ -1305,18 +1305,30 @@ class MediaViewModel {
 
     /**
      * V8：批量重命名选中项——调后端 /api/media/batch-rename。
-     * 成功后刷新列表并退出选择模式。
+     * 用户输入前缀 prefix + 起始序号 startIndex；pattern 在内部拼成 `{prefix}{seq}`，
+     * 由后端按 start_seq 起递增替换。
+     * 成功后刷新列表、退出选择模式，并 Snackbar 提示「已重命名 N 项」。
      */
-    fun batchRenameSelected(pattern: String) {
+    fun batchRenameSelected(prefix: String, startIndex: Int) {
         if (selectedMediaIds.isEmpty()) return
+        if (prefix.isBlank() || startIndex < 1) {
+            errorMessage = "前缀不能为空，且起始序号须为正整数"
+            return
+        }
         val ids = selectedMediaIds.toList()
+        val pattern = "${prefix}{seq}"
+        val startSeq = startIndex
         viewModelScope.launch {
-            val result = MediaService.batchRename(ids, pattern)
+            val result = MediaService.batchRename(ids, pattern, startSeq)
             if (result != null) {
                 // 刷新云端列表
                 loadCloudMediaList()
                 // 退出选择模式
                 deselectAll()
+                // Snackbar 成功提示（errorMessage 复用为通用 snackbar 通道）
+                errorMessage = "已重命名 ${result.renamedCount} 项"
+            } else {
+                errorMessage = "批量重命名失败，请稍后重试"
             }
         }
     }

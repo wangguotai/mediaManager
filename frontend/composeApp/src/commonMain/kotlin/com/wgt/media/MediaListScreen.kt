@@ -414,9 +414,9 @@ fun MediaListScreen(
         BatchRenameDialog(
             selectedCount = viewModel.selectedCount,
             onDismiss = { showBatchRenameDialog = false },
-            onConfirm = { pattern ->
+            onConfirm = { prefix, startIndex ->
                 showBatchRenameDialog = false
-                viewModel.batchRenameSelected(pattern)
+                viewModel.batchRenameSelected(prefix, startIndex)
             }
         )
     }
@@ -7374,22 +7374,25 @@ private fun ShareLinkConfigDialog(
 }
 
 /**
- * V8：批量重命名对话框 — 输入文件名模板，{seq} 占位符自动递增。
- * 预览前几个结果。
+ * V8：批量重命名对话框 — 输入 prefix + 起始序号，自动递增生成新文件名。
+ * 预览前几个结果（prefix + seq 递增）。后端按 startIndex 开始递增。
  */
 @Composable
 fun BatchRenameDialog(
     selectedCount: Int,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onConfirm: (prefix: String, startIndex: Int) -> Unit
 ) {
-    var pattern by remember { mutableStateOf("photo_{seq}") }
-    val hasSeq = pattern.contains("{seq}")
+    var prefix by remember { mutableStateOf("photo_") }
+    // 文本输入框保留字符串形式，便于编辑（避免解析报错吃掉字符）。
+    var startIndexText by remember { mutableStateOf("1") }
+    val startIndex = startIndexText.trim().toIntOrNull()
+    val valid = prefix.isNotBlank() && startIndex != null && startIndex > 0 && selectedCount > 0
+
     // 预览前 3 个文件名
-    val previews = if (hasSeq) {
-        (1..minOf(3, selectedCount)).map { i ->
-            val name = pattern.replace("{seq}", i.toString())
-            "$name.ext"
+    val previews = if (valid && startIndex != null) {
+        (0 until minOf(3, selectedCount)).map { i ->
+            "${prefix}${startIndex + i}.ext"
         }
     } else emptyList()
 
@@ -7401,29 +7404,43 @@ fun BatchRenameDialog(
                 Text("已选 $selectedCount 个文件", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
-                    value = pattern,
-                    onValueChange = { pattern = it },
-                    label = { Text("文件名模板") },
+                    value = prefix,
+                    onValueChange = { prefix = it },
+                    label = { Text("文件名前缀") },
                     singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = startIndexText,
+                    onValueChange = { s ->
+                        // 仅保留数字，避免非数字输入导致 toIntOrNull 反复失败
+                        startIndexText = s.filter { it.isDigit() }.take(6)
+                    },
+                    label = { Text("起始序号") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    ),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "使用 {seq} 作为序号占位符，序号从 1 开始",
+                    "序号从起始值开始递增，最终文件名为「前缀+序号」",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
-                if (hasSeq && previews.isNotEmpty()) {
+                if (previews.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("预览:", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                     previews.forEach { p ->
                         Text("  $p", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                if (!hasSeq) {
+                if (!valid && prefix.isNotBlank() && startIndex == null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "⚠ 模板必须包含 {seq}",
+                        "⚠ 起始序号须为正整数",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -7432,8 +7449,8 @@ fun BatchRenameDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(pattern) },
-                enabled = hasSeq && selectedCount > 0
+                onClick = { onConfirm(prefix.trim(), startIndex ?: 1) },
+                enabled = valid
             ) { Text("重命名") }
         },
         dismissButton = {
