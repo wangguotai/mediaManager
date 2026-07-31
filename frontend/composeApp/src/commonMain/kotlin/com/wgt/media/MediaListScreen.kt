@@ -3050,26 +3050,26 @@ fun MediaGridItem(
                 }
             }
 
-            // 收藏星标按钮：右上角，半透明背景圆形，点击切换收藏状态。
-            // 不受选中状态影响，始终可点；与左上角的选中勾选徽标互不干扰。
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(4.dp)
-                    .size(28.dp)
-                    .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                    .clickable { onFavoriteToggle() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    painter = painterResource(
-                        if (isFavorite) Res.drawable.ic_star_filled
-                        else Res.drawable.ic_star_outline
-                    ),
-                    contentDescription = if (isFavorite) "取消收藏" else "收藏",
-                    tint = if (isFavorite) Color(0xFFFFD700) else Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
+            // 已收藏星标指示器：右上角，仅在媒体已收藏时才显示。
+            // 20dp 半透明圆形背景 + 金色实心星标，点击可快速取消收藏。
+            // 未收藏时不渲染，保持网格干净；与左上角的选中勾选徽标互不干扰。
+            if (isFavorite) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(20.dp)
+                        .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                        .clickable { onFavoriteToggle() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_star_filled),
+                        contentDescription = "已收藏",
+                        tint = Color(0xFFFFD700),
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
             }
 
             // 媒体信息
