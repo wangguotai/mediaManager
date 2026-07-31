@@ -232,6 +232,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
 	// V8：最近上传的媒体
 	s.mux.HandleFunc("/api/media/recent-uploads", s.handleMediaRecentUploads)
+	// V8：极端媒体（最老+最大）
+	s.mux.HandleFunc("/api/media/extreme-media", s.handleMediaExtremeMedia)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -3127,6 +3129,56 @@ func (s *Server) handleMediaRecentUploads(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items,
 		"count": len(items),
+	})
+}
+
+// handleMediaExtremeMedia V8：GET /api/media/extreme-media — 返回最老和最大的媒体。
+func (s *Server) handleMediaExtremeMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var oldest, largest *storage.Media
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		if oldest == nil || m.CreatedAt.Before(oldest.CreatedAt) {
+			oldest = m
+		}
+		if largest == nil || m.Size > largest.Size {
+			largest = m
+		}
+	}
+	mediaToMap := func(m *storage.Media) map[string]any {
+		if m == nil {
+			return nil
+		}
+		return map[string]any{
+			"id":         m.ID,
+			"filename":   m.Filename,
+			"type":       m.Type,
+			"size":       m.Size,
+			"created_at": m.CreatedAt.Format(time.RFC3339),
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"oldest":  mediaToMap(oldest),
+		"largest": mediaToMap(largest),
 	})
 }
 
