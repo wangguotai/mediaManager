@@ -161,6 +161,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/batch-rename", s.handleMediaBatchRename)
 	// V8：单个媒体详情
 	s.mux.HandleFunc("/api/media/info/", s.handleMediaInfo)
+	// V9：完整 EXIF/metadata（合并 SQLite 持久化字段 + 文件实时解析的 EXIF 标签）
+	s.mux.HandleFunc("/api/media/exif/", s.handleMediaExif)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -3250,6 +3252,112 @@ func (s *Server) handleMediaInfo(w http.ResponseWriter, r *http.Request) {
 		"taken_at":   media.TakenAt,
 		"deleted":    media.Deleted,
 	})
+}
+
+// handleMediaExif V9：GET /api/media/exif/{id} — 返回单个媒体的完整 EXIF/metadata。
+//
+// 合并两个数据源：
+//  1. s.store.GetMedia：SQLite 持久化字段（含 taken_at 拍摄时间、orientation 旋转角度、
+//     sha256 指纹、width/height 等入库时记录的元数据）。
+//  2. s.mediaSvc.GetMediaMetadata：实时从磁盘文件解析出的 EXIF 标签 map（相机型号、
+//     ISO、光圈、快门速度、GPS 等原始 EXIF 条目，由 service 层 parseTIFFExif 提取）。
+//
+// 任一数据源失败时降级：store 命中即返回 basic info（exif 为空 map），store 未命中
+// 则回退单独调 mediaSvc 取文件级 metadata。保证端点始终可用。鉴权与 handleMediaInfo
+// 一致：需有效 token，且 media.UserID 必须匹配当前 user_id。
+func (s *Server) handleMediaExif(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/exif/")
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	// 基础信息：从 SQLite 取持久化字段（含 taken_at / orientation / sha256）。
+	// store 未注入或未命中时不阻断——降级为仅返回文件级 metadata（见下方回退）。
+	var media *storage.Media
+	if s.store != nil {
+		m, err := s.store.GetMedia(r.Context(), mediaID)
+		if err == nil && m != nil {
+			media = m
+		}
+	}
+	if media != nil && media.UserID != uid {
+		// 越权防护：store 命中且归属不匹配直接 403，避免泄露他人媒体元数据。
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not owner"})
+		return
+	}
+
+	// EXIF 标签：实时从磁盘文件解析（service 层 parseTIFFExif 提取 IFD0/ExifIFD 条目）。
+	// 该调用按 user_id 隔离（service.UserIDFromContext 从 context 取 uid），故即便 store
+	// 未命中也能保证只读本人 uploads 目录下的文件。
+	exifData := map[string]string{}
+	var fileMeta *gen.MediaMetadata
+	if s.mediaSvc != nil {
+		resp, err := s.mediaSvc.GetMediaMetadata(r.Context(), &gen.GetMediaMetadataRequest{MediaId: mediaID})
+		if err == nil && resp != nil && resp.Metadata != nil {
+			fileMeta = resp.Metadata
+			if ed := resp.Metadata.GetExifData(); ed != nil {
+				exifData = ed
+			}
+		}
+	}
+
+	// store 未命中且 mediaSvc 也未取到文件 → 404。
+	if media == nil && fileMeta == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+		return
+	}
+
+	// 组装响应：优先用 store 持久化字段（更准确，含 orientation/taken_at/sha256），
+	// 缺失时用文件级 metadata 补齐。
+	resp := map[string]any{
+		"media_id": mediaID,
+		"exif":     exifData,
+		"source":   "basic_info",
+	}
+	if len(exifData) > 0 {
+		resp["source"] = "basic_info+exif"
+	}
+	if media != nil {
+		resp["filename"] = media.Filename
+		resp["type"] = media.Type
+		resp["size"] = media.Size
+		resp["mime"] = media.Mime
+		resp["width"] = media.Width
+		resp["height"] = media.Height
+		resp["sha256"] = media.SHA256
+		resp["taken_at"] = media.TakenAt
+		resp["orientation"] = media.Orientation
+		resp["deleted"] = media.Deleted
+		resp["client_id"] = media.ClientID
+		resp["created_at"] = media.CreatedAt.Format(time.RFC3339)
+		resp["updated_at"] = media.UpdatedAt.Format(time.RFC3339)
+	} else if fileMeta != nil {
+		// 回退：store 未注入/未命中，仅用文件级 metadata。
+		resp["filename"] = fileMeta.GetFilename()
+		resp["type"] = gen.MediaType_name[int32(fileMeta.GetType())]
+		resp["size"] = fileMeta.GetSize()
+		resp["mime"] = fileMeta.GetMimeType()
+		resp["width"] = fileMeta.GetWidth()
+		resp["height"] = fileMeta.GetHeight()
+		resp["sha256"] = ""
+		resp["taken_at"] = int64(0)
+		resp["orientation"] = 0
+		resp["deleted"] = false
+		resp["client_id"] = ""
+		resp["created_at"] = time.Unix(fileMeta.GetCreatedAt(), 0).Format(time.RFC3339)
+		resp["updated_at"] = time.Unix(fileMeta.GetUpdatedAt(), 0).Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleMediaTagAdd V8：POST /api/media/tag/add — 给媒体打标签。
