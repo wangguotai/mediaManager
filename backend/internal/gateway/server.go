@@ -152,6 +152,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
 	s.mux.HandleFunc("/api/media/batch-rename", s.handleMediaBatchRename)
+	// V8：单个媒体详情
+	s.mux.HandleFunc("/api/media/info/", s.handleMediaInfo)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -2483,6 +2485,47 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 		"renamed_count": len(succeeded),
 		"renamed":       succeeded,
 		"failed":        failed,
+	})
+}
+
+// handleMediaInfo V8：GET /api/media/info/{id} — 返回单个媒体详情。
+func (s *Server) handleMediaInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/info/")
+	if mediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media id required"})
+		return
+	}
+	media, err := s.store.GetMedia(r.Context(), mediaID)
+	if err != nil || media == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+		return
+	}
+	if media.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not owner"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         media.ID,
+		"filename":   media.Filename,
+		"type":       media.Type,
+		"size":       media.Size,
+		"mime":       media.Mime,
+		"width":      media.Width,
+		"height":     media.Height,
+		"sha256":     media.SHA256,
+		"created_at": media.CreatedAt.Format(time.RFC3339),
+		"updated_at": media.UpdatedAt.Format(time.RFC3339),
+		"taken_at":   media.TakenAt,
+		"deleted":    media.Deleted,
 	})
 }
 
