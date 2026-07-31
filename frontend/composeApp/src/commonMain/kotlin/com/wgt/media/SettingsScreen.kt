@@ -17,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -1205,6 +1206,44 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V23：媒体覆盖率卡片（GET /api/media/media-coverage）
+            // 显示标签/收藏/分享/相册 4 个维度的覆盖率，每行带 LinearProgressIndicator。
+            var mediaCoverage by remember { mutableStateOf<MediaService.MediaCoverage?>(null) }
+            var mediaCoverageLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                mediaCoverage = MediaService.getMediaCoverage()
+                mediaCoverageLoading = false
+            }
+            SectionTitle("媒体覆盖率", iconRes = Res.drawable.ic_info)
+            if (mediaCoverageLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (mediaCoverage == null) {
+                Text(
+                    "无法获取媒体覆盖率",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val mc = mediaCoverage!!
+                val total = mc.total
+                val rows = listOf(
+                    Triple("🏷️", "已标签", mc.tagged),
+                    Triple("⭐", "已收藏", mc.favorited),
+                    Triple("🔗", "已分享", mc.shared),
+                    Triple("📁", "在相册", mc.inAlbum)
+                )
+                rows.forEach { (icon, label, item) ->
+                    CoverageRow(icon, label, item.count, total, item.percent)
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
             // V8：存储分析卡片（GET /api/media/storage-breakdown）
             var storageBreakdown by remember { mutableStateOf<MediaService.StorageBreakdown?>(null) }
             var storageLoading by remember { mutableStateOf(true) }
@@ -1662,6 +1701,45 @@ private fun HealthRatioBar(
                     .background(barColor)
             )
         }
+    }
+}
+
+/**
+ * 媒体覆盖率卡片（V23）的单行：emoji + 维度名 + "count/total (percent%)" 在上一行，
+ * 下方一条 [LinearProgressIndicator] 按 percent/100 填充。
+ *
+ * [percent] 为 0-100 的百分比数值（后端给定），内部转 0.0-1.0 的进度小数并 [coerceIn]
+ * 兜底，避免后端越界（>100 或 <0）撑破指示器。total<=0 时进度置 0，避免除零。
+ */
+@Composable
+private fun CoverageRow(
+    icon: String,
+    label: String,
+    count: Int,
+    total: Int,
+    percent: Double
+) {
+    val progress = if (total > 0) (percent / 100.0).toFloat().coerceIn(0f, 1f) else 0f
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("$icon $label", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "$count/$total (${percent.toInt()}%)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant
+        )
     }
 }
 

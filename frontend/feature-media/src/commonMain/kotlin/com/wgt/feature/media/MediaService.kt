@@ -4559,4 +4559,86 @@ object MediaService {
         val ageScore: Double,
         val suggestions: List<String>
     )
+
+    /**
+     * V23：GET /api/media/media-coverage — 媒体覆盖率分析。
+     *
+     * 后端按 4 个维度统计媒体覆盖情况：已标签、已收藏、已分享、在相册；并给出未标签数。
+     * 设置页"媒体覆盖率"卡片据此渲染 4 行进度条（标签/收藏/分享/相册）。
+     *
+     * 后端响应结构：
+     * ```
+     * { "total": 1234,
+     *   "tagged":     { "count": 800,  "percent": 64.8 },
+     *   "favorited":  { "count": 120,  "percent": 9.7 },
+     *   "shared":     { "count": 45,   "percent": 3.6 },
+     *   "in_album":   { "count": 300,  "percent": 24.3 },
+     *   "untagged":   { "count": 434,  "percent": 35.2 } }
+     * ```
+     *
+     * 解析宽容：缺字段回退零值（count=0 / percent=0.0），保证 UI 永不崩。
+     * HTTP 非 200 或网络异常返回 null，调用方按空态提示"无法获取媒体覆盖率"。
+     * 鉴权头由 defaultRequest 统一注入（与 [getStorageHealth] 同款，此处不重复附加）。
+     *
+     * @return 覆盖率对象；失败返回 null
+     */
+    suspend fun getMediaCoverage(): MediaCoverage? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-coverage")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                fun parseItem(key: String): CoverageItem {
+                    val item = o[key]?.jsonObject
+                    return CoverageItem(
+                        count = item?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        percent = item?.get("percent")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+                MediaCoverage(
+                    total = o["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    tagged = parseItem("tagged"),
+                    favorited = parseItem("favorited"),
+                    shared = parseItem("shared"),
+                    inAlbum = parseItem("in_album"),
+                    untagged = parseItem("untagged")
+                )
+            } else {
+                logger.info("MediaService", "getMediaCoverage status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaCoverage FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V23：media-coverage 响应体。
+     *
+     * @param total 媒体总数
+     * @param tagged 已标签维度
+     * @param favorited 已收藏维度
+     * @param shared 已分享维度
+     * @param inAlbum 在相册维度
+     * @param untagged 未标签维度（剩余参考）
+     */
+    data class MediaCoverage(
+        val total: Int,
+        val tagged: CoverageItem,
+        val favorited: CoverageItem,
+        val shared: CoverageItem,
+        val inAlbum: CoverageItem,
+        val untagged: CoverageItem
+    )
+
+    /**
+     * V23：单维度覆盖率。
+     *
+     * @param count 已覆盖计数
+     * @param percent 百分比（0.0-100.0，非小数）
+     */
+    data class CoverageItem(
+        val count: Int,
+        val percent: Double
+    )
 }
