@@ -4,7 +4,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,9 +17,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,6 +50,7 @@ import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
 import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_search
+import mediamanager.composeapp.generated.resources.ic_sort
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 import androidx.compose.foundation.lazy.LazyRow
@@ -53,6 +60,158 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.TextButton
 
 private const val SEARCH_DEBOUNCE_MS = 300L
+
+/**
+ * 高级搜索条件面板 —— 由搜索栏的"高级搜索"图标按钮触发，弹出 [AlertDialog]。
+ *
+ * 收集多条件：类型（全部/图片/视频/Live）/ 最小大小（MB）/ 标签 / 日期范围（YYYY-MM-DD），
+ * 点击"搜索"以 [Map] 形式回调 [onSearch]，调用方据此调用 `MediaService.advancedSearch(opts)`
+ * 并把结果灌入 ViewModel。点击"取消"或外部返回关闭，不影响列表。
+ *
+ * 保持简单：四个 [OutlinedTextField] + 一个类型下拉，全部本地状态，无外部分页。
+ * 与搜索栏本地搜索语义独立：本地搜索对当前列表做即时过滤，高级搜索请求后端命中全集后
+ * 替换当前列表内容（调用方负责清空 searchQuery，避免双重过滤）。
+ *
+ * @param onSearch 用户点击"搜索"时回调，参数为已清洗的条件 map（空值过滤掉，日期已补 RFC3339）。
+ *                 可能的键：type / min_size / max_size / tag / date_from / date_to / limit。
+ * @param onDismiss 关闭回调（"取消"或对话框外部 dismiss 都触发）。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+fun AdvancedSearchDialog(
+    onSearch: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // 类型选项：与后端 AdvancedSearchOpts.Type 字符串口径一致（IMAGE/VIDEO/LIVE_PHOTO）。
+    // "全部"不传 type 参数。
+    val typeOptions = listOf("" to "全部", "IMAGE" to "图片", "VIDEO" to "视频", "LIVE_PHOTO" to "Live")
+    var selectedType by remember { mutableStateOf("") }
+    var minSizeMb by remember { mutableStateOf("") }
+    var maxSizeMb by remember { mutableStateOf("") }
+    var tag by remember { mutableStateOf("") }
+    var dateFrom by remember { mutableStateOf("") }
+    var dateTo by remember { mutableStateOf("") }
+    var typeMenuExpanded by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("高级搜索") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // 类型下拉：用暴露式下拉菜单（点击文本+箭头展开列表）。保持实现简单，无 ExposedDropdownBox 的繁复状态。
+                Text("类型", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Box {
+                    OutlinedTextField(
+                        value = typeOptions.firstOrNull { it.first == selectedType }?.second ?: "全部",
+                        onValueChange = { /* 只读，点击触发下拉 */ },
+                        readOnly = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { typeMenuExpanded = true },
+                        trailingIcon = {
+                            IconButton(onClick = { typeMenuExpanded = true }) {
+                                Icon(
+                                    painter = painterResource(Res.drawable.ic_sort),
+                                    contentDescription = "选择类型",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        singleLine = true
+                    )
+                    DropdownMenu(
+                        expanded = typeMenuExpanded,
+                        onDismissRequest = { typeMenuExpanded = false }
+                    ) {
+                        typeOptions.forEach { (value, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    selectedType = value
+                                    typeMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // 大小范围（MB）：两个并行输入框。留空表示不施加该侧条件。
+                Text("大小范围（MB）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = minSizeMb,
+                        onValueChange = { v -> minSizeMb = v.filter { it.isDigit() } },
+                        label = { Text("最小") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = maxSizeMb,
+                        onValueChange = { v -> maxSizeMb = v.filter { it.isDigit() } },
+                        label = { Text("最大") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // 标签：后端按精确 tag_name 匹配（media_tags 表 EXISTS 子查询）。
+                OutlinedTextField(
+                    value = tag,
+                    onValueChange = { tag = it },
+                    label = { Text("标签") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 日期范围（YYYY-MM-DD）：OutlinedTextField 直接接受；提交前由调用方
+                // 或 MediaService.advancedSearch 补成 RFC3339。
+                Text("日期范围（YYYY-MM-DD）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = dateFrom,
+                        onValueChange = { dateFrom = it },
+                        label = { Text("从") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = dateTo,
+                        onValueChange = { dateTo = it },
+                        label = { Text("到") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !searching,
+                onClick = {
+                    // 组装条件 map：仅纳入非空项；大小 MB → 字节字符串。
+                    val opts = LinkedHashMap<String, String>()
+                    if (selectedType.isNotEmpty()) opts["type"] = selectedType
+                    if (minSizeMb.isNotEmpty()) opts["min_size"] = (minSizeMb.toLong() * 1024L * 1024L).toString()
+                    if (maxSizeMb.isNotEmpty()) opts["max_size"] = (maxSizeMb.toLong() * 1024L * 1024L).toString()
+                    if (tag.trim().isNotEmpty()) opts["tag"] = tag.trim()
+                    if (dateFrom.trim().isNotEmpty()) opts["date_from"] = dateFrom.trim()
+                    if (dateTo.trim().isNotEmpty()) opts["date_to"] = dateTo.trim()
+                    searching = true
+                    onSearch(opts)
+                    onDismiss()
+                }
+            ) {
+                Text(if (searching) "搜索中…" else "搜索")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
 
 /**
  * 可展开搜索栏。
@@ -77,6 +236,7 @@ fun SearchBar(
     onExpandedChange: (Boolean) -> Unit,
     onDebouncedQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit = {},
+    onAdvancedSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // 输入框本地文案：即时跟随键盘输入。
@@ -207,6 +367,17 @@ fun SearchBar(
                             )
                         }
                     }
+
+                    // 高级搜索入口：点击弹出高级搜索面板（类型/大小/标签/日期多条件），
+                    // 走后端 /api/media/advanced-search 命中全集后替换列表。
+                    // 无论展开/收起态均可见，便于在任何状态下都能进入高级搜索。
+                    IconButton(onClick = onAdvancedSearch) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_sort),
+                            contentDescription = "高级搜索",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     // 收起态占位文案：提示可点击搜索图标开始过滤。
                     Spacer(modifier = Modifier.width(8.dp))
@@ -215,6 +386,15 @@ fun SearchBar(
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
+                    // 收起态同样提供高级搜索入口，右对齐（占位文案后用 weight spacer 推到行尾）。
+                    Spacer(modifier = Modifier.weight(1f))
+                    IconButton(onClick = onAdvancedSearch) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_sort),
+                            contentDescription = "高级搜索",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

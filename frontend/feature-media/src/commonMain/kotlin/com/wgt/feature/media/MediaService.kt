@@ -492,6 +492,150 @@ object MediaService {
         }
     }
 
+    // ---- 高级搜索 ----
+
+    /**
+     * V8：高级多条件搜索 —— GET /api/media/advanced-search。
+     *
+     * 与 [getMediaList] 走的 `/api/media/list` 不同，本端点由后端 `AdvancedSearchMedia` 直接
+     * 序列化 `storage.Media` 结构体，因而 JSON 字段口径**不同于** [parseMediaList]：
+     * - `mime` 而非 `mime_type`；
+     * - `created_at` / `updated_at` 是 Go time.Time 序列化的 RFC3339 字符串，而非毫秒数；
+     * - 多 `total` 字段；
+     * - 顶层 `media` 数组（非 `media_list`）。
+     * 故用专属 [parseAdvancedSearchList] 解析，不复用 [parseMediaList]。
+     *
+     * 日期参数：用户在 UI 输入 `YYYY-MM-DD`，本方法转成 RFC3339（`date_from` 取当天 00:00 UTC，
+     * `date_to` 取当天 23:59:59 UTC），让后端 SQL 字符串比较正确覆盖全天的 created_at。
+     *
+     * @param opts 条件 map，可能键：type / mime / min_size / max_size / date_from / date_to / tag / limit；
+     *             值均为字符串，空串/缺失表示不施加该条件。日期形如 `YYYY-MM-DD`。
+     * @return 命中的媒体列表；HTTP 非 200 或网络异常返回 null（调用方据空态提示）。
+     */
+    suspend fun advancedSearch(opts: Map<String, String>): List<MediaMetadata>? {
+        // 预处理：日期补全为 RFC3339，便于后端字符串比较覆盖整天。
+        val params = LinkedHashMap<String, String>()
+        for ((k, v) in opts) {
+            val tv = v.trim()
+            if (tv.isEmpty()) continue
+            when (k) {
+                "date_from" -> params[k] = rfc3339StartOfDay(tv)
+                "date_to" -> params[k] = rfc3339EndOfDay(tv)
+                else -> params[k] = tv
+            }
+        }
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/advanced-search") {
+                params.forEach { (k, v) -> parameter(k, v) }
+                // 未显式给 limit 时给 100，与后端默认一致；调用方传 smaller 也透传。
+                if (!params.containsKey("limit")) parameter("limit", "100")
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val parsed = parseAdvancedSearchList(body)
+                logger.info(
+                    "MediaService",
+                    "advancedSearch params=$params status=${response.status} parsed=${parsed.size}"
+                )
+                parsed
+            } else {
+                logger.info("MediaService", "advancedSearch params=$params status=${response.status} (non-OK)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "advancedSearch FAILED params=$params: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 把 `YYYY-MM-DD` 补成 RFC3339 当天起始：`YYYY-MM-DDT00:00:00Z`。
+     * 非预期格式原样返回，交由后端兜底（不抛错）。
+     */
+    private fun rfc3339StartOfDay(date: String): String {
+        if (date.length == 10 && date[4] == '-' && date[7] == '-') {
+            return "${date}T00:00:00Z"
+        }
+        return date
+    }
+
+    /**
+     * 把 `YYYY-MM-DD` 补成 RFC3339 当天结尾：`YYYY-MM-DDT23:59:59Z`，
+     * 使后端 `created_at <= ?` 字符串比较覆盖当天全部记录。
+     */
+    private fun rfc3339EndOfDay(date: String): String {
+        if (date.length == 10 && date[4] == '-' && date[7] == '-') {
+            return "${date}T23:59:59Z"
+        }
+        return date
+    }
+
+    /**
+     * 解析 `/api/media/advanced-search` 响应为 [MediaMetadata] 列表。
+     *
+     * 与 [parseMediaList] 区别：
+     * - 顶层 `media` 数组（非 `media_list`）；
+     * - MIME 取 `mime` 字段；
+     * - `created_at` / `updated_at` 为 RFC3339 字符串 → 转为 epoch 毫秒存入 [MediaMetadata]，
+     *   解析失败回退 0L（与既有 [parseMediaList] 缺字段时的回退一致）。
+     */
+    private fun parseAdvancedSearchList(json: String): List<MediaMetadata> {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        return obj["media"]?.jsonArray?.map { item ->
+            val m = item.jsonObject
+            MediaMetadata(
+                id = m["id"]?.jsonPrimitive?.content ?: "",
+                filename = m["filename"]?.jsonPrimitive?.content ?: "",
+                type = parseMediaType(m["type"]?.jsonPrimitive?.content),
+                size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                mime_type = m["mime"]?.jsonPrimitive?.contentOrNull
+                    ?: m["mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
+                created_at = rfc3339ToMillis(m["created_at"]?.jsonPrimitive?.contentOrNull),
+                updated_at = rfc3339ToMillis(m["updated_at"]?.jsonPrimitive?.contentOrNull),
+                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull
+                    ?: (m["type"]?.jsonPrimitive?.contentOrNull?.equals("LIVE_PHOTO", ignoreCase = true) == true),
+                live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
+                width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * 把 RFC3339 字符串解析为 epoch 毫秒。失败/空串返回 0L。
+     * 用纯字符串切片手工解析，避免引入 kotlinx-datetime 依赖（feature-media 未引入）。
+     * 支持形如 `2026-07-31T08:30:00Z` 与 `2026-07-31T08:30:00.123456789Z`。
+     */
+    private fun rfc3339ToMillis(s: String?): Long {
+        if (s.isNullOrBlank()) return 0L
+        // 仅取 `YYYY-MM-DDTHH:MM:SS` 部分（前 19 字符），忽略秒以下精度与时区偏移。
+        if (s.length < 19) return 0L
+        return try {
+            val year = s.substring(0, 4).toInt()
+            val month = s.substring(5, 7).toInt()
+            val day = s.substring(8, 10).toInt()
+            val hour = s.substring(11, 13).toInt()
+            val minute = s.substring(14, 16).toInt()
+            val second = s.substring(17, 19).toInt()
+            // 校验通过则按民用历转 epoch 毫秒（UTC 假定；后端 timeToVal 已 UTC 落库，吻合）。
+            civilToEpochMillis(year, month, day, hour, minute, second)
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    /** 公历 → epoch 毫秒（UTC），无外部依赖。范围 1970 起算。 */
+    private fun civilToEpochMillis(y: Int, m: Int, d: Int, h: Int, mi: Int, s: Int): Long {
+        // Howard Hinnant 的 days_from_civil 算法（无损整数转换，支持任意公历日）。
+        val yy = if (m <= 2) y - 1 else y
+        val era = (if (yy >= 0) yy else yy - 399) / 400
+        val yoe = yy - era * 400
+        val doy = (153 * (if (m > 2) m - 3 else m + 9) + 2) / 5 + d - 1
+        val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        val days = era.toLong() * 146097L + doe - 719468L
+        return days * 86400_000L + (h.toLong() * 3600L + mi.toLong() * 60L + s.toLong()) * 1000L
+    }
+
     // ---- 相册 API ----
 
     /**

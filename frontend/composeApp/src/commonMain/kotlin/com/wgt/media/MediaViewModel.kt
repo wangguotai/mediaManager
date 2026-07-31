@@ -185,6 +185,22 @@ class MediaViewModel {
         filterType = MediaFilterType.ALL
     }
 
+    /**
+     * V8：高级搜索命中后，把后端返回的列表直接灌入 [mediaList]，并清空本地
+     * 文案/类型双层过滤（[searchQuery] / [filterType]），避免本地过滤再裁剪后端结果。
+     * 同时把 [currentSource] 切到 [MediaSource.BACKEND]，使网格用 HTTP 缩略图加载器
+     * 而非本地相册加载器渲染结果。
+     *
+     * 调用方负责在调用前执行 `MediaService.advancedSearch(opts)` 并处理空结果提示；
+     * 本方法不做网络请求，仅做状态切换。空列表也接受（表示后端命中 0 条，UI 走空态）。
+     */
+    fun applyAdvancedSearchResults(results: List<MediaMetadata>) {
+        searchQuery = ""
+        filterType = MediaFilterType.ALL
+        currentSource = MediaSource.BACKEND
+        mediaList = results
+    }
+
     // 选中的媒体ID列表
     val selectedMediaIds = mutableStateListOf<String>()
 
