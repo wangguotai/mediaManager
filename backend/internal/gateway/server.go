@@ -375,6 +375,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/batch-by-type", s.handleMediaTagBatchByType)
 	// V8：自动清理重复媒体
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
+	// 重复文件详细报告（仅报告不删除）
+	s.mux.HandleFunc("/api/media/duplicate-report", s.handleMediaDuplicateReport)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -2591,6 +2593,96 @@ func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
 		"wasted_bytes": totalWasted,
 		"wasted_mb":    float64(totalWasted) / (1024 * 1024),
 		"user_id":      uid,
+	})
+}
+
+// handleMediaDuplicateReport 处理 GET /api/media/duplicate-report，
+// 返回按 SHA256 分组的重复媒体详细报告（仅报告，不删除）。
+// 相比 /api/media/duplicates：返回每组 reclaimable_bytes 与全局汇总，
+// 且不给出 keep_id/delete_ids 建议（纯报告用途），便于前端展示与审计。
+func (s *Server) handleMediaDuplicateReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 直接从 DB 获取全部媒体（含 SHA256），避免 proto 层无 SHA256 的问题
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 SHA256 分组（跳过空 SHA256 与已软删的记录）
+	type mediaItem struct {
+		ID        string `json:"id"`
+		Filename  string `json:"filename"`
+		Size      int64  `json:"size"`
+		CreatedAt int64  `json:"created_at"`
+	}
+	type dupGroup struct {
+		SHA256           string      `json:"sha256"`
+		Count            int         `json:"count"`
+		Media            []mediaItem `json:"media"`
+		ReclaimableBytes int64       `json:"reclaimable_bytes"`
+	}
+	groups := make(map[string][]mediaItem)
+	for _, m := range mediaList {
+		if m.SHA256 == "" || m.Deleted {
+			continue
+		}
+		groups[m.SHA256] = append(groups[m.SHA256], mediaItem{
+			ID:        m.ID,
+			Filename:  m.Filename,
+			Size:      m.Size,
+			CreatedAt: m.CreatedAt.Unix(),
+		})
+	}
+
+	// 只保留 count > 1 的组；同一 SHA256 内容相同，文件 size 应一致，
+	// 取首份 size 作为每文件字节数：reclaimable_bytes = (count-1) * bytes_per_file
+	dups := make([]dupGroup, 0, len(groups))
+	var totalReclaimable int64
+	totalDupCount := 0
+	for sha, items := range groups {
+		if len(items) < 2 {
+			continue
+		}
+		// 组内按 created_at 降序，输出稳定（最新的在前）
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].CreatedAt > items[j].CreatedAt
+		})
+		bytesPerFile := items[0].Size
+		reclaimable := int64(len(items)-1) * bytesPerFile
+		totalReclaimable += reclaimable
+		totalDupCount += len(items)
+		dups = append(dups, dupGroup{
+			SHA256:           sha,
+			Count:            len(items),
+			Media:            items,
+			ReclaimableBytes: reclaimable,
+		})
+	}
+	// 按 SHA256 排序保证输出稳定
+	sort.Slice(dups, func(i, j int) bool {
+		return dups[i].SHA256 < dups[j].SHA256
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"duplicates":              dups,
+		"total_groups":            len(dups),
+		"total_reclaimable_bytes": totalReclaimable,
+		"total_duplicate_count":   totalDupCount,
+		"user_id":                 uid,
 	})
 }
 
