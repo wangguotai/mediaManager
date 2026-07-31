@@ -174,6 +174,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
+	// V13：年度回顾报告（某年媒体统计摘要：总览/月分布/类型分布/收藏数/上传最忙日）。
+	s.mux.HandleFunc("/api/media/yearly-review", s.handleMediaYearlyReview)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
@@ -3842,6 +3844,160 @@ func (s *Server) handleMediaGrowthReport(w http.ResponseWriter, r *http.Request)
 		"last_month":           map[string]any{"count": lmCount, "bytes": lmBytes},
 		"month_change_percent": monthChange,
 		"this_year":            map[string]any{"count": tyCount, "bytes": tyBytes},
+	})
+}
+
+// handleMediaYearlyReview GET /api/media/yearly-review — 年度回顾报告。
+//
+// 返回某年的媒体统计摘要（类似各 App 的年度报告）：
+//   - summary：total_count / total_bytes（该年媒体总量）
+//   - by_month：1..12 各月上传统数 [{month,count}, ...]（固定 12 项，含 0）
+//   - by_type：按媒体类型分桶 {image,video,live}（小写键名，便于前端展示）
+//   - first_upload / last_upload：该年最早与最晚上传时间（ISO 字符串）
+//   - top_day：该年单日上传最多的日子 {date,count}；无数据时 date="" count=0
+//   - favorites：该年被标记为收藏的媒体数（need mediaSvc 实现 favoriteProvider）
+//
+// 年筛选以 created_at（上传时间）的 UTC 年份为准；?year=2026 默认当前 UTC 年。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "year": 2026,
+//	  "summary": {"total_count":N,"total_bytes":N},
+//	  "by_month": [{"month":1,"count":N}, ... 12],
+//	  "by_type":  {"image":N,"video":N,"live":N},
+//	  "first_upload": "2026-04-13T10:11:12Z" 或 null,
+//	  "last_upload":  "2026-12-..Z" 或 null,
+//	  "top_day":      {"date":"2026-07-04","count":N} 或 {"date":"","count":0},
+//	  "favorites":    N
+//	}
+func (s *Server) handleMediaYearlyReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// year 默认当年（UTC），?year=2026 指定；非法回退到当年。
+	now := time.Now().UTC()
+	year := now.Year()
+	if q := r.URL.Query().Get("year"); q != "" {
+		if y, err := strconv.Atoi(q); err == nil && y >= 1970 && y <= 9999 {
+			year = y
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 聚合：按月/类型分桶 + 总量 + 首末上传 + 单日最高。
+	var totalCount, totalBytes int64
+	var imageCount, videoCount, liveCount int64
+	monthCounts := make([]int64, 12) // index 0=1月
+	dayCounts := make(map[string]int64)
+	var firstUpload, lastUpload time.Time
+	yearIDs := make(map[string]struct{}, len(mediaList))
+
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		if ca.Year() != year {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+		yearIDs[m.ID] = struct{}{}
+
+		monthCounts[ca.Month()-1]++
+		dayKey := ca.Format("2006-01-02")
+		dayCounts[dayKey]++
+
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			imageCount++
+		case "VIDEO":
+			videoCount++
+		case "LIVE_PHOTO", "LIVE":
+			liveCount++
+		}
+
+		if firstUpload.IsZero() || ca.Before(firstUpload) {
+			firstUpload = ca
+		}
+		if lastUpload.IsZero() || ca.After(lastUpload) {
+			lastUpload = ca
+		}
+	}
+
+	// by_month 固定 12 项，便于前端无脑渲染。
+	byMonth := make([]map[string]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		byMonth = append(byMonth, map[string]any{
+			"month": i + 1,
+			"count": monthCounts[i],
+		})
+	}
+
+	// top_day：上传最多的日子；多个并列取日期最早者（稳定输出）。
+	var topDay string
+	var topCount int64
+	for d, c := range dayCounts {
+		if c > topCount || (c == topCount && (topDay == "" || d < topDay)) {
+			topDay = d
+			topCount = c
+		}
+	}
+
+	// 首末上传时间格式化为 RFC3339（UTC "Z"）。
+	var firstISO, lastISO any
+	if totalCount > 0 {
+		firstISO = firstUpload.UTC().Format(time.RFC3339)
+		lastISO = lastUpload.UTC().Format(time.RFC3339)
+	} else {
+		firstISO = nil
+		lastISO = nil
+	}
+
+	// favorites：该年被收藏的媒体数。favoriteProvider 可能未实现（返回 0）。
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favIDs := fav.ListFavorites(uid)
+		if len(favIDs) > 0 && len(yearIDs) > 0 {
+			favSet := make(map[string]struct{}, len(favIDs))
+			for _, id := range favIDs {
+				favSet[id] = struct{}{}
+			}
+			for id := range yearIDs {
+				if _, ok := favSet[id]; ok {
+					favoriteCount++
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"year": year,
+		"summary": map[string]any{
+			"total_count": totalCount,
+			"total_bytes": totalBytes,
+		},
+		"by_month":     byMonth,
+		"by_type":      map[string]any{"image": imageCount, "video": videoCount, "live": liveCount},
+		"first_upload": firstISO,
+		"last_upload":  lastISO,
+		"top_day":      map[string]any{"date": topDay, "count": topCount},
+		"favorites":    favoriteCount,
 	})
 }
 
