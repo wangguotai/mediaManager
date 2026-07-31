@@ -1314,6 +1314,73 @@ object MediaService {
     }
 
     /**
+     * 相册分享摘要项——GET /api/media/album-sharing-summary 返回的单条相册分享信息。
+     *
+     * 与后端 [handleAlbumSharingSummary] 返回字段对齐：
+     * album_id / name / shared / share_count / access_count。
+     */
+    data class AlbumShareInfo(
+        val albumId: String = "",
+        val name: String = "",
+        val shared: Boolean = false,
+        val shareCount: Int = 0
+    )
+
+    /**
+     * 相册分享摘要——GET /api/media/album-sharing-summary 返回的聚合数据。
+     *
+     * 后端返回 `{albums:[{album_id,name,shared,share_count,access_count}], shared_total, unshared_total}`。
+     * [sharedTotal] / [unsharedTotal] 分别为已分享/未分享的相册数；
+     * [albums] 为各相册的分享详情列表。
+     *
+     * 后端不可用/出错时返回 null（与 [getAlbumStatsSummary] 同语义）。
+     */
+    data class AlbumSharingSummary(
+        val sharedTotal: Int = 0,
+        val unsharedTotal: Int = 0,
+        val albums: List<AlbumShareInfo> = emptyList()
+    )
+
+    /**
+     * GET /api/media/album-sharing-summary — 获取相册分享摘要
+     * （已分享/未分享相册数 + 各相册分享详情）。
+     *
+     * 后端返回 `{albums:[{album_id,name,shared,share_count,access_count}], shared_total, unshared_total}`。
+     * 失败时返回 null（与 [getAlbumStatsSummary] 同语义——区分"成功但空"与"网络失败"）。
+     *
+     * @return 相册分享摘要，或 null（失败）
+     */
+    suspend fun getAlbumSharingSummary(): AlbumSharingSummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-sharing-summary")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["albums"]?.jsonArray ?: JsonArray(emptyList())
+                val infos = arr.map { el ->
+                    val o = el.jsonObject
+                    AlbumShareInfo(
+                        albumId = o["album_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        shared = o["shared"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        shareCount = o["share_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+                AlbumSharingSummary(
+                    sharedTotal = obj["shared_total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    unsharedTotal = obj["unshared_total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    albums = infos
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumSharingSummary FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头

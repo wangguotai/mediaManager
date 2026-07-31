@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -311,6 +312,34 @@ private fun AlbumListPage(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            // V21：分享概览统计行——显示已分享/未分享相册数。
+            // 仅在 total > 0 时显示（无相册时隐藏，避免空噪音）。
+            var sharingSummary by remember { mutableStateOf<MediaService.AlbumSharingSummary?>(null) }
+            LaunchedEffect(albums) {
+                if (albums.isNotEmpty()) {
+                    sharingSummary = MediaService.getAlbumSharingSummary()
+                } else {
+                    sharingSummary = null
+                }
+            }
+            sharingSummary?.let { s ->
+                val total = s.sharedTotal + s.unsharedTotal
+                if (total > 0) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "🔗 已分享 ${s.sharedTotal} · 未分享 ${s.unsharedTotal}",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             // V7 §2.3：我的相册 / 共享相册 Tab 切换
             val sharedAlbums = viewModel.sharedAlbumList
             var selectedTab by remember { mutableStateOf(0) }
