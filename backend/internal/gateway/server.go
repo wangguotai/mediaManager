@@ -146,6 +146,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V7：最近活动（合并最近上传/收藏/分享）
 	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
+	// V7：存储增长趋势（按月份累计）
+	s.mux.HandleFunc("/api/media/storage-trend", s.handleMediaStorageTrend)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V7：批量下载（zip）
@@ -2268,6 +2270,63 @@ func (s *Server) handleMediaRecentActivity(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"activities": activities,
 		"total":      len(activities),
+	})
+}
+
+// handleMediaStorageTrend V7：GET /api/media/storage-trend
+// 按月份返回存储增长趋势（每月新增媒体数+新增字节数），月份正序。
+func (s *Server) handleMediaStorageTrend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type monthTrend struct {
+		Month     string `json:"month"`
+		AddedCount int   `json:"added_count"`
+		AddedBytes int64 `json:"added_bytes"`
+		CumBytes   int64 `json:"cum_bytes"`
+	}
+	byMonth := make(map[string]*monthTrend)
+	var order []string
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		month := m.CreatedAt.Format("2006-01")
+		if _, ok := byMonth[month]; !ok {
+			byMonth[month] = &monthTrend{Month: month}
+			order = append(order, month)
+		}
+		byMonth[month].AddedCount++
+		byMonth[month].AddedBytes += m.Size
+	}
+	// 月份正序 + 累计
+	sort.Strings(order)
+	var cum int64
+	var trends []monthTrend
+	for _, mo := range order {
+		cum += byMonth[mo].AddedBytes
+		t := *byMonth[mo]
+		t.CumBytes = cum
+		trends = append(trends, t)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"trends": trends,
 	})
 }
 
