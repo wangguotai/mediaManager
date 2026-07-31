@@ -7443,14 +7443,15 @@ fun BatchRenameDialog(
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = {
-                        if (!valid || startIndex == null) return@OutlinedButton
+                        // enabled 已保证 valid && startIndex != null；非空断言安全。
+                        val start = startIndex ?: return@OutlinedButton
                         previewLoading = true
                         previewError = null
                         suggestions = null
                         // 取 min(selectedCount, 10) 条建议，与 UI 展示上限一致。
                         val limit = minOf(selectedCount, 10)
                         coroutineScope.launch {
-                            val result = MediaService.getBatchRenameSuggest(prefix.trim(), startIndex, limit)
+                            val result = MediaService.getBatchRenameSuggest(prefix.trim(), start, limit)
                             previewLoading = false
                             if (result != null) {
                                 suggestions = result
