@@ -195,6 +195,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/quick-stats", s.handleMediaQuickStats)
 	// 媒体覆盖率报告：已标记标签/已收藏/已分享/在相册中的媒体占比，供前端展示媒体整理完成度。
 	s.mux.HandleFunc("/api/media/media-coverage", s.handleMediaCoverage)
+	// 用户活跃度评分（基于 upload/favorite/share/tag/rename/rotate 各维度加权打分+等级+明细）。
+	// 数据来源：audit_log 操作统计（AuditLogStats）+ ListMediaByUser 取上传数 +
+	// favoriteProvider.ListFavorites 取当前收藏数（audit_log 仅记录 unfavorite）。
+	s.mux.HandleFunc("/api/media/user-activity-score", s.handleUserActivityScore)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
 	// 区别于 batch-download 的 zip 流式打包，不创建分享链接）
 	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
@@ -9892,6 +9896,142 @@ func isAllowedMethod(m string) bool {
 func isJSONContentType(ct string) bool {
 	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	return ct == "application/json" || strings.HasSuffix(ct, "+json")
+}
+
+// handleUserActivityScore GET /api/media/user-activity-score — 用户活跃度评分。
+//
+// 基于各操作维度的加权累计分数，并映射到等级（新手/活跃/达人/专家），
+// 附带各维度明细（action + count + points）与总操作数：
+//
+//	score = upload_count*3 + favorite_count*2 + share_count*4 +
+//	        tag_count*1 + rename_count*1 + rotate_count*1
+//
+// 等级映射：新手(0-10) / 活跃(11-50) / 达人(51-100) / 专家(101+)。
+//
+// 数据来源：
+//   - audit_log 操作统计（store.AuditLogStats 返回 [{action,count}]），用于
+//     share/share_toggle/tag/rename/rotate 等已埋点的操作。upload 操作未在
+//     上传路径埋点，故 upload_count 取自 ListMediaByUser 的未软删媒体数。
+//   - favorite 维度：audit_log 仅记录 unfavorite（取消收藏），无法表达累计收藏
+//     活跃度，故优先用 favoriteProvider.ListFavorites 的当前收藏数；该能力未
+//     配置（mediaSvc 未实现 favoriteProvider）时回退到 audit_log 中 "favorite"
+//     动作计数（兼容用户自行 record 的情况），仍不可得则记 0。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。响应：
+//
+//	{score, level, breakdown:[{action,count,points}], total_actions, user_id}
+func (s *Server) handleUserActivityScore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 1. audit_log 操作统计 → action→count 映射。
+	stats, err := s.store.AuditLogStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	actionCount := make(map[string]int, len(stats))
+	for _, st := range stats {
+		action, _ := st["action"].(string)
+		cnt, _ := st["count"].(int)
+		if action == "" {
+			continue
+		}
+		actionCount[action] += cnt
+	}
+
+	// 2. upload_count：取未软删媒体总数（upload 未埋点，以存量代表上传活跃度）。
+	uploadCount := 0
+	if mediaList, merr := s.store.ListMediaByUser(r.Context(), uid); merr == nil {
+		for _, m := range mediaList {
+			if !m.Deleted {
+				uploadCount++
+			}
+		}
+	}
+
+	// 3. favorite_count：优先 favoriteProvider.ListFavorites；否则回退 audit_log
+	//    的 "favorite" 动作计数。
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites(uid))
+	}
+	if favoriteCount == 0 {
+		favoriteCount = actionCount["favorite"]
+	}
+
+	// 4. 各维度数值。share 合并 share + share_toggle 两个埋点动作。
+	shareCount := actionCount["share"] + actionCount["share_toggle"]
+	tagCount := actionCount["tag"]
+	renameCount := actionCount["rename"]
+	rotateCount := actionCount["rotate"]
+
+	// 5. 加权打分（按任务指定权重）。
+	weights := map[string]int{
+		"upload":   3,
+		"favorite": 2,
+		"share":    4,
+		"tag":      1,
+		"rename":   1,
+		"rotate":   1,
+	}
+	counts := map[string]int{
+		"upload":   uploadCount,
+		"favorite": favoriteCount,
+		"share":    shareCount,
+		"tag":      tagCount,
+		"rename":   renameCount,
+		"rotate":   rotateCount,
+	}
+	// 保持展示顺序稳定（upload → favorite → share → tag → rename → rotate）。
+	order := []string{"upload", "favorite", "share", "tag", "rename", "rotate"}
+
+	score := 0
+	totalActions := 0
+	breakdown := make([]map[string]any, 0, len(order))
+	for _, act := range order {
+		c := counts[act]
+		w := weights[act]
+		points := c * w
+		score += points
+		totalActions += c
+		breakdown = append(breakdown, map[string]any{
+			"action": act,
+			"count":  c,
+			"weight": w,
+			"points": points,
+		})
+	}
+
+	// 6. 等级映射：新手(0-10) / 活跃(11-50) / 达人(51-100) / 专家(101+)。
+	level := "新手"
+	switch {
+	case score >= 101:
+		level = "专家"
+	case score >= 51:
+		level = "达人"
+	case score >= 11:
+		level = "活跃"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"score":         score,
+		"level":         level,
+		"breakdown":     breakdown,
+		"total_actions": totalActions,
+		"user_id":       uid,
+	})
 }
 
 // handleStorageHealth V25：GET /api/media/storage-health — 存储健康度评分。
