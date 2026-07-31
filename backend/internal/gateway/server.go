@@ -294,6 +294,11 @@ func (s *Server) registerRoutes() {
 	// 标签共现分析（哪些标签经常一起出现在同一 media 上）。
 	// 对每对标签统计同时拥有两者的 media 数量，只返回 co-occurrence >= 2 的标签对。
 	s.mux.HandleFunc("/api/media/tag-co-occurrence", s.handleTagCoOccurrence)
+	// 标签网络图数据（节点+边）：标签作为节点（count=关联媒体数），共现关系作为边
+	// （weight=同时拥有两标签的 media 数）。供前端可视化标签关联图（力导向/弦图等）。
+	// 与 tag-co-occurrence 互补：后者只返 co>=2 的标签对（列表视角），本端点返完整
+	// 图结构（nodes+edges），所有共现 >=1 均纳入以便前端按权重过滤渲染。
+	s.mux.HandleFunc("/api/media/tag-network", s.handleTagNetwork)
 	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
 	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
@@ -5825,6 +5830,89 @@ func (s *Server) handleTagCoOccurrence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pairs":       pairs,
 		"total_pairs": len(pairs),
+	})
+}
+
+// handleTagNetwork GET /api/media/tag-network — 标签网络图数据（节点+边）。
+// 标签作为节点（count=关联媒体数），共现关系作为边（weight=同时拥有两标签的 media 数）。
+// 所有共现 >=1 的标签对均纳入边集，供前端按权重过滤渲染力导向/弦图等可视化。
+// 响应: { nodes: [{id, count}], edges: [{source, target, weight}], total_nodes, total_edges }。
+//
+// 实现：ListAllTags 取全量标签，对每个标签调 SearchMediaByTag 取关联 media_id 集合
+// （同时得到节点 count = 集合大小），再对每对 (i<j) 求交集大小作为边权重。与
+// handleTagCoOccurrence 同构，但输出图结构而非标签对列表，且纳管全部共现 >=1 的边。
+func (s *Server) handleTagNetwork(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 为每个标签构造 media_id 集合，供后续求交集；集合大小即节点 count。
+	type netNode struct {
+		ID    string `json:"id"`
+		Count int    `json:"count"`
+	}
+	type netEdge struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+		Weight int    `json:"weight"`
+	}
+	tagMedia := make(map[string]map[string]struct{}, len(tags))
+	nodes := make([]netNode, 0, len(tags))
+	for _, t := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		tagMedia[t] = set
+		nodes = append(nodes, netNode{ID: t, Count: len(set)})
+	}
+	edges := make([]netEdge, 0)
+	for i := 0; i < len(tags); i++ {
+		a := tags[i]
+		setA := tagMedia[a]
+		for j := i + 1; j < len(tags); j++ {
+			b := tags[j]
+			setB := tagMedia[b]
+			// 求交集大小：遍历较小的集合查较大的集合。
+			small, large := setA, setB
+			if len(small) > len(large) {
+				small, large = large, small
+			}
+			weight := 0
+			for id := range small {
+				if _, ok := large[id]; ok {
+					weight++
+				}
+			}
+			if weight >= 1 {
+				edges = append(edges, netEdge{Source: a, Target: b, Weight: weight})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes":       nodes,
+		"edges":       edges,
+		"total_nodes": len(nodes),
+		"total_edges": len(edges),
 	})
 }
 
