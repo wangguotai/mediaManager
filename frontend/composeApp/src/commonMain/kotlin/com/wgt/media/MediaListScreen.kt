@@ -1061,6 +1061,81 @@ private fun MyTabContent(
             }
         }
 
+        // V9：年度回顾卡片——在增长报告之后，展示该年总上传量 + 12 月柱状图 + 最忙的一天。
+        // 后端 GET /api/media/yearly-review 返回 null（未铺量/异常）时静默跳过。
+        var yearlyReview by remember { mutableStateOf<MediaService.YearlyReview?>(null) }
+        LaunchedEffect(Unit) { yearlyReview = MediaService.getYearlyReview() }
+        yearlyReview?.let { yr ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "${yr.year} 年度回顾",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 总项数 + 收藏数
+                    val yrMbStr = yr.totalMB.toString()
+                    Text(
+                        "共 ${yr.totalCount} 项 · " +
+                            "${yrMbStr.take(yrMbStr.indexOf('.') + 2)} MB" +
+                            (if (yr.favorites > 0) " · ❤ ${yr.favorites}" else ""),
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // 12 个月柱状图：FlowRow 方块深浅表示当月上传统计强度。
+                    val maxMonthCount = yr.byMonth.maxOf { it.count }.coerceAtLeast(1)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        yr.byMonth.forEach { mc ->
+                            // 无上传的月份用极淡色（保持 12 格占位连续性），有上传则按强度着色。
+                            val intensity = if (mc.count == 0) 0.08f
+                            else (mc.count.toFloat() / maxMonthCount).coerceIn(0.15f, 1f)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(22.dp)
+                                        .height(36.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = intensity)
+                                        )
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    "${mc.month}月",
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                    // 最忙的一天
+                    if (yr.topDay.date.isNotEmpty() && yr.topDay.count > 0) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "最忙的一天：${yr.topDay.date}（${yr.topDay.count} 项）",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V7：媒体库综合摘要（时间跨度）
         var mediaSummary by remember { mutableStateOf<MediaService.MediaSummary?>(null) }
         LaunchedEffect(Unit) { mediaSummary = MediaService.getMediaSummary() }

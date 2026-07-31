@@ -2756,6 +2756,92 @@ object MediaService {
         val mb: Double get() = bytes.toDouble() / (1024.0 * 1024.0)
     }
 
+    /**
+     * V9：GET /api/media/yearly-review?year=YYYY — 年度回顾。
+     *
+     * 后端按年聚合当前用户的媒体上传情况，返回字段：
+     * - [total_count] / [total_bytes]：该年上传总项数 / 总字节数
+     * - [byMonth]：1~12 月每月上传统计（[MonthCount]），缺失月份 count=0
+     * - [byType]：按类型汇总（[TypeCount]）
+     * - [firstUpload] / [lastUpload]：该年首/末上传的 RFC3339 时间串（空串表无数据）
+     * - [topDay]：该年上传最多的一天（[TopDay]），无数据时 date 空串 count 0
+     * - [favorites]：该年收藏数
+     *
+     * 非 200 或异常返回 null，UI 侧静默跳过卡片。与 [getGrowthReport] 同款解析：
+     * 走运行时 [Json.parseToJsonElement]，不依赖 kotlinx.serialization 编译器插件。
+     */
+    suspend fun getYearlyReview(year: Int = 2026): YearlyReview? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/yearly-review") {
+                parameter("year", year)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val monthsArr = o["by_month"]?.jsonArray
+                val byMonth = (1..12).map { m ->
+                    val mc = monthsArr?.firstOrNull {
+                        it.jsonObject["month"]?.jsonPrimitive?.intOrNull == m
+                    }?.jsonObject
+                    MonthCount(
+                        month = m,
+                        count = mc?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+                val typeObj = o["by_type"]?.jsonObject
+                YearlyReview(
+                    year = o["year"]?.jsonPrimitive?.intOrNull ?: year,
+                    totalCount = o["total_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    byMonth = byMonth,
+                    byType = TypeCount(
+                        image = typeObj?.get("image")?.jsonPrimitive?.intOrNull ?: 0,
+                        video = typeObj?.get("video")?.jsonPrimitive?.intOrNull ?: 0,
+                        live = typeObj?.get("live")?.jsonPrimitive?.intOrNull
+                            ?: typeObj?.get("live_photo")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    firstUpload = o["first_upload"]?.jsonPrimitive?.contentOrNull ?: "",
+                    lastUpload = o["last_upload"]?.jsonPrimitive?.contentOrNull ?: "",
+                    topDay = o["top_day"]?.jsonObject?.let { td ->
+                        TopDay(
+                            date = td["date"]?.jsonPrimitive?.contentOrNull ?: "",
+                            count = td["count"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    } ?: TopDay("", 0),
+                    favorites = o["favorites"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getYearlyReview FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V9：年度回顾响应体。 */
+    data class YearlyReview(
+        val year: Int,
+        val totalCount: Int,
+        val totalBytes: Long,
+        val byMonth: List<MonthCount>,
+        val byType: TypeCount,
+        val firstUpload: String,
+        val lastUpload: String,
+        val topDay: TopDay,
+        val favorites: Int
+    ) {
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /** V9：单月上传统计。 */
+    data class MonthCount(val month: Int, val count: Int)
+
+    /** V9：按类型汇总的年度统计。 */
+    data class TypeCount(val image: Int, val video: Int, val live: Int) {
+        val total: Int get() = image + video + live
+    }
+
+    /** V9：年度上传最多的一天。 */
+    data class TopDay(val date: String, val count: Int)
+
     // ---- 解析 ----
 
     /**
