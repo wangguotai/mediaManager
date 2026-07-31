@@ -50,6 +50,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.TextButton
 
 private const val SEARCH_DEBOUNCE_MS = 300L
 
@@ -221,9 +222,32 @@ fun SearchBar(
         // 搜索历史：仅展开态且输入为空时显示，位于搜索框正下方，用 Spacer 明确分隔。
         // remember 缓存避免每次重组都重读 SettingsStorage。
         if (expanded && queryText.isEmpty()) {
-            val history = remember { SearchHistory.load() }
+            // 用 var + by remember 让清空操作能触发重组，隐藏历史区。
+            var history by remember { mutableStateOf(SearchHistory.load()) }
             if (history.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(2.dp))
+                // 历史标题行："搜索历史"文案 + 右侧"清空"按钮。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "搜索历史",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    TextButton(
+                        onClick = {
+                            SearchHistory.clear()
+                            history = emptyList()
+                        }
+                    ) {
+                        Text("清空", fontSize = 12.sp)
+                    }
+                }
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
