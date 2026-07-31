@@ -378,6 +378,10 @@ func (s *Server) registerRoutes() {
 	// V17：搜索历史端点——从 audit_log 中提取 action="search" 的记录。
 	// 当前无 search 类埋点时，回退返回全部 audit log 作为"最近操作历史"。
 	s.mux.HandleFunc("/api/media/search-history", s.handleMediaSearchHistory)
+	// V19：搜索查询统计——热词频率 + 最近7天搜索趋势。
+	// 从 audit_log 中提取 action="search" 记录统计；无 search 埋点时分析
+	// detail 字段作为回退。无任何搜索记录时返回空列表。
+	s.mux.HandleFunc("/api/media/media-query-stats", s.handleMediaQueryStats)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V18：批量合并多个相册到第一个（album_ids[0] 为目标，其余为源）
@@ -8262,6 +8266,137 @@ func (s *Server) handleMediaSearchHistory(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"history": out,
 		"total":   len(out),
+	})
+}
+
+// handleMediaQueryStats V19：GET /api/media/media-query-stats — 搜索查询统计。
+// 返回搜索关键词频率（热词 top10）+ 最近7天每天的搜索次数趋势。
+//
+// 数据来源口径（与 handleMediaSearchHistory 一致）：
+//   - 首选：audit_log 中 action="search" 的记录，detail 字段视为搜索关键词。
+//   - 回退：当前搜索端点尚未埋点（无 search 类 audit log）。此时分析全部
+//     audit log 的 detail 字段，按空格切分取非空 token 作为"关键词"近似，
+//     以保证端点可用（返回基于操作详情的词频，而非空）。
+//   - 全无记录：返回 total_searches=0 + 空列表。
+//
+// 响应:
+//
+//	{
+//	  total_searches: N,
+//	  top_keywords:   [{keyword, count}, ...],   // top 10，count 降序
+//	  search_trend:   [{date, count}, ...]        // 最近7天（含今天），日期升序
+//	}
+//
+// 未登录 401；store 不可用 503。取最近 5000 条 audit log（ListAuditLogs limit）。
+func (s *Server) handleMediaQueryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 收集搜索记录：优先 action="search"，回退分析全部 detail。
+	type searchEntry struct {
+		detail string
+		when   time.Time
+	}
+	var entries []searchEntry
+	for _, a := range logs {
+		if a.Action == "search" {
+			entries = append(entries, searchEntry{detail: a.Detail, when: a.CreatedAt})
+		}
+	}
+	fallback := len(entries) == 0
+	if fallback {
+		// 无 search 埋点：用全部 audit log 的 detail 字段近似。
+		for _, a := range logs {
+			if strings.TrimSpace(a.Detail) == "" {
+				continue
+			}
+			entries = append(entries, searchEntry{detail: a.Detail, when: a.CreatedAt})
+		}
+	}
+
+	// 关键词计数。search 类记录：detail 整体作为一个关键词。
+	// 回退模式：detail 按空格切分，每个非空 token 作为一个关键词。
+	keywordCount := make(map[string]int)
+	for _, e := range entries {
+		kw := strings.TrimSpace(e.detail)
+		if kw == "" {
+			continue
+		}
+		if fallback {
+			for _, tok := range strings.Fields(kw) {
+				keywordCount[tok]++
+			}
+		} else {
+			keywordCount[kw]++
+		}
+	}
+
+	// top 10 关键词（count 降序，同 count 按关键词字母序稳定排序）。
+	type kwEntry struct {
+		Keyword string `json:"keyword"`
+		Count   int    `json:"count"`
+	}
+	topKeywords := make([]kwEntry, 0, len(keywordCount))
+	for kw, c := range keywordCount {
+		topKeywords = append(topKeywords, kwEntry{Keyword: kw, Count: c})
+	}
+	sort.Slice(topKeywords, func(i, j int) bool {
+		if topKeywords[i].Count != topKeywords[j].Count {
+			return topKeywords[i].Count > topKeywords[j].Count
+		}
+		return topKeywords[i].Keyword < topKeywords[j].Keyword
+	})
+	if len(topKeywords) > 10 {
+		topKeywords = topKeywords[:10]
+	}
+
+	// 最近7天趋势（含今天，UTC 日期，升序）。无记录的日期 count=0。
+	now := time.Now().UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	dayStart := todayStart.AddDate(0, 0, -6) // 7 天窗口：[today-6, today]
+	type trendEntry struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	trend := make([]trendEntry, 0, 7)
+	for i := 0; i < 7; i++ {
+		ds := dayStart.AddDate(0, 0, i)
+		trend = append(trend, trendEntry{Date: ds.Format("2006-01-02"), Count: 0})
+	}
+	// trend[i] 对应 [dayStart+i, dayStart+i+1)。
+	for _, e := range entries {
+		d := e.when.UTC()
+		ds := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+		if ds.Before(dayStart) {
+			continue // 超出7天窗口
+		}
+		idx := int(ds.Sub(dayStart).Hours() / 24)
+		if idx < 0 || idx >= len(trend) {
+			continue
+		}
+		trend[idx].Count++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_searches": len(entries),
+		"top_keywords":   topKeywords,
+		"search_trend":   trend,
 	})
 }
 
