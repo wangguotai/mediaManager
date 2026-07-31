@@ -421,6 +421,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/batch-share", s.handleMediaBatchShare)
 	// 分享分析统计（分享总数/活跃/过期/密码保护/即将过期的占比），只读端点。
 	s.mux.HandleFunc("/api/media/share-analytics", s.handleShareAnalytics)
+	// 即将过期分享列表（7 天内将过期的分享链接明细，只读端点）。
+	// 与 share-analytics（只返聚合数字）互补：本端点返每条即将过期分享的 token/
+	// expires_at/days_left/media_id，供前端"即将过期"提醒列表渲染并引导用户续期。
+	s.mux.HandleFunc("/api/media/share-expiring", s.handleShareExpiring)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：审计日志——列表/统计/记录
@@ -9251,6 +9255,91 @@ func (s *Server) handleShareAnalytics(w http.ResponseWriter, r *http.Request) {
 		"total_shares":   total,
 		"active_shares":  active,
 		"expired_shares": expired,
+	})
+}
+
+// handleShareExpiring 处理 GET /api/media/share-expiring — 返回当前用户 7 天内将过期的
+// 分享链接明细列表（不含已过期与永不过期）。
+//
+// 与 /api/media/share-analytics 的差异：后者只返 expiring_soon 计数（聚合数字）；
+// 本端点返每条即将过期分享的具体信息（token/expires_at/days_left/media_id），
+// 供前端"即将过期分享"提醒列表渲染并引导用户逐条续期（调 /api/share/extend）。
+//
+// 筛选规则（与 share-analytics 的 expiring_soon 口径一致）：
+//   - ExpiresAt 零值（永不过期）跳过；
+//   - 已过期（expires_at 早于 now）跳过；
+//   - expires_at 落在 [now, now+7d] 区间内的纳入返回。
+//
+// 返回: {"expiring":[{"token","expires_at","days_left","media_id?"}],"total":N}
+//   - expires_at : RFC3339（UTC）；
+//   - days_left  : 距过期剩余整天数，向上取整并钳制下界为 1（即过期当天也显示 1，避免 0 误导）；
+//   - media_id   : ShareToken.MediaIDs（JSON 数组字符串）的第一个元素；无媒体或解析失败时省略。
+// 鉴权：/api/media/ 前缀由 authMiddleware 自动注入 user_id（与 share-analytics 同路径族）。
+func (s *Server) handleShareExpiring(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	tokens, err := s.store.ListShareTokensByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	now := time.Now().UTC()
+	soonCutoff := now.AddDate(0, 0, 7)
+
+	type expiringItem struct {
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
+		DaysLeft  int    `json:"days_left"`
+		MediaID   string `json:"media_id,omitempty"`
+	}
+	items := make([]expiringItem, 0, len(tokens))
+	for _, st := range tokens {
+		if st.ExpiresAt.IsZero() {
+			continue // 永不过期
+		}
+		expiresUTC := st.ExpiresAt.UTC()
+		if expiresUTC.Before(now) {
+			continue // 已过期
+		}
+		if expiresUTC.After(soonCutoff) {
+			continue // 超出 7 天窗口
+		}
+		// 剩余天数：向上取整（不足 1 天算 1 天），下界钳为 1。
+		daysLeft := int(expiresUTC.Sub(now).Hours()/24) + 1
+		if daysLeft < 1 {
+			daysLeft = 1
+		}
+		item := expiringItem{
+			Token:     st.Token,
+			ExpiresAt: expiresUTC.Format(time.RFC3339),
+			DaysLeft:  daysLeft,
+		}
+		// MediaIDs 是 JSON 数组字符串（如 ["id1","id2"]）；取首个 media_id 便于前端跳转。
+		if st.MediaIDs != "" {
+			var ids []string
+			if jerr := json.Unmarshal([]byte(st.MediaIDs), &ids); jerr == nil && len(ids) > 0 {
+				item.MediaID = ids[0]
+			}
+		}
+		items = append(items, item)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expiring": items,
+		"total":    len(items),
 	})
 }
 
