@@ -1833,6 +1833,33 @@ fun ImagePreviewDialog(
                             media = currentMedia,
                             sourceLabel = sourceLabel
                         )
+                        // V8：显示当前媒体的标签
+                        if (useBackendLoader) {
+                            var tags by remember(currentMedia.id) { mutableStateOf<List<String>?>(null) }
+                            LaunchedEffect(currentMedia.id) { tags = MediaService.listMediaTags(currentMedia.id) }
+                            tags?.takeIf { it.isNotEmpty() }?.let { tagList ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    tagList.take(5).forEach { tag ->
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                "#$tag",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Surface(
