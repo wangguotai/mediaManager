@@ -897,6 +897,75 @@ fun SettingsScreen(
                     }
                 }
             }
+            // V23：智能洞察卡片 —— 调 /api/media/insights 显示自动分析建议（重复/存储/习惯/未标签/相册/健康度）。
+            // 放在"存储健康度"前，作为首屏可操作洞察汇总；后端即将提供该端点（端点未上线时按空态提示）。
+            var mediaInsights by remember { mutableStateOf<List<MediaService.Insight>?>(null) }
+            var mediaInsightsLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                mediaInsights = MediaService.getMediaInsights()
+                mediaInsightsLoading = false
+            }
+            SectionTitle("💡 智能洞察", iconRes = Res.drawable.ic_info)
+            if (mediaInsightsLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (mediaInsights == null) {
+                Text(
+                    "无法获取智能洞察",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (mediaInsights!!.isEmpty()) {
+                Text(
+                    "暂无洞察建议",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                mediaInsights!!.forEach { ins ->
+                    // type → emoji 映射：duplicate→🔄, storage→📦, habit→⏰, untagged→🏷️, album→📁, health→❤️
+                    val emoji = when (ins.type) {
+                        "duplicate" -> "🔄"
+                        "storage" -> "📦"
+                        "habit" -> "⏰"
+                        "untagged" -> "🏷️"
+                        "album" -> "📁"
+                        "health" -> "❤️"
+                        else -> "💡"
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(emoji, style = MaterialTheme.typography.titleMedium)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                ins.title,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        if (ins.detail.isNotEmpty()) {
+                            Text(
+                                ins.detail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(start = 28.dp, top = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V22：存储健康度卡片 —— 调 /api/media/storage-health 显示评分+等级+比例条+建议。
             // 放在"数据概览"前，作为首屏健康度总览；后端即将提供该端点。
             var storageHealth by remember { mutableStateOf<MediaService.StorageHealth?>(null) }

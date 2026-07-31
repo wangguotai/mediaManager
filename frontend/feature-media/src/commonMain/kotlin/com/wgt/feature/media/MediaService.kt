@@ -4851,4 +4851,70 @@ object MediaService {
         val count: Int,
         val percent: Double
     )
+
+    /**
+     * V23：GET /api/media/insights — 智能洞察。
+     *
+     * 后端聚合多种自动分析（重复文件、存储占用、上传习惯、未标签、相册整理、
+     * 健康度等），返回一组带类型标签的建议。设置页"智能洞察"卡片据此渲染：每条
+     * 按 [Insight.type] 匹配 emoji，展示 [Insight.title] + [Insight.detail]。
+     *
+     * 后端响应结构（即将提供，当前端点尚未上线）：
+     * ```
+     * { "insights": [
+     *     { "type": "duplicate", "title": "发现 12 组重复媒体", "detail": "可释放 240 MB", "action_url": "/media/duplicates" },
+     *     { "type": "storage",   "title": "...",               "detail": "...",           "action_url": null },
+     *     ...
+     *   ],
+     *   "total": 5 }
+     * ```
+     *
+     * 解析宽容：缺字段回退空串，[Insight.actionUrl] 可空（type 不带 action_url 时为 null）。
+     * HTTP 非 200 或网络异常返回 null，调用方按空态提示"无法获取智能洞察"。
+     * 鉴权头由 defaultRequest 统一注入（与 [getStorageHealth] 同款，此处不重复附加）。
+     *
+     * @return 洞察列表；失败返回 null
+     */
+    suspend fun getMediaInsights(): List<Insight>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/insights")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["insights"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val type = item["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    Insight(
+                        type = type,
+                        title = item["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = item["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        actionUrl = item["action_url"]?.let {
+                            if (it is JsonNull) null else it.jsonPrimitive?.contentOrNull
+                        }
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaInsights status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaInsights FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V23：insights 响应体单条洞察。
+     *
+     * @param type 洞察类型：duplicate（重复）/ storage（存储）/ habit（习惯）/
+     *             untagged（未标签）/ album（相册）/ health（健康度）；前端按类型映射 emoji
+     * @param title 标题（一句话概要）
+     * @param detail 详情（量化说明，如"可释放 240 MB"）
+     * @param actionUrl 可选的跳转路径（null 表示无快捷动作）
+     */
+    data class Insight(
+        val type: String,
+        val title: String,
+        val detail: String,
+        val actionUrl: String? = null
+    )
 }
