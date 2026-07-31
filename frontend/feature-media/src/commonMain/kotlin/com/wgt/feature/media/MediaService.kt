@@ -1066,6 +1066,62 @@ object MediaService {
     )
 
     /**
+     * V20：相册智能建议——GET /api/media/album-suggestions 返回的单条建议。
+     *
+     * 后端基于当前用户**未分类**媒体（不在任何相册中），按日期/类型/标签分组生成
+     * 可一键创建的相册建议。字段与后端 `albumSuggestion` 结构对齐：
+     * - [name] 建议相册名（形如"2026年7月的照片"/"视频合集"/"旅行"）
+     * - [mediaCount] 该建议覆盖的未分类媒体数
+     * - [type] 分组类型：`by_month` / `by_type` / `by_tag`
+     * - [previewIds] 封面预览 media id（最多 4 个，按 created_at 降序），供前端渲染缩略图
+     */
+    data class AlbumSuggestion(
+        val name: String,
+        val mediaCount: Int = 0,
+        val type: String = "",
+        val previewIds: List<String> = emptyList()
+    )
+
+    /**
+     * V20：GET /api/media/album-suggestions — 获取相册智能建议。
+     *
+     * 基于当前用户未分类媒体，后端按 月份/类型/标签 分组产出可一键创建的相册建议。
+     * 只读端点，不修改数据。响应：
+     *
+     * `{ "suggestions":[{"name","media_count","type","preview_ids":[...]}], "total":N }`
+     *
+     * 后端不可用/出错时返回 null（与 [getAlbumCountRanking] 同语义——区分"成功但空"
+     * 与"网络失败"），调用方据此决定是否渲染推荐区。
+     *
+     * @return 建议列表（成功，可能为空），或 null（失败）
+     */
+    suspend fun getAlbumSuggestions(): List<AlbumSuggestion>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-suggestions")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["suggestions"]?.jsonArray ?: JsonArray(emptyList())
+                arr.map { el ->
+                    val o = el.jsonObject
+                    AlbumSuggestion(
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        previewIds = o["preview_ids"]?.jsonArray?.map { it.jsonPrimitive.content }
+                            ?: emptyList()
+                    )
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumSuggestions FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/album/count-ranking — 获取按媒体项数降序排列的相册排行榜。
      *
      * 后端返回 `{"ranking":[{album_id,name,count,cover_media_id}], "total_albums":N}`。

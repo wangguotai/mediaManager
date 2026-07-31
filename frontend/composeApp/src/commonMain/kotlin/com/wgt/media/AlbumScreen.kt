@@ -21,8 +21,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -203,6 +205,8 @@ private fun AlbumListPage(
     val selectedAlbumIds = remember { mutableStateListOf<String>() }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
     val batchScope = rememberCoroutineScope()
+    // V20：智能建议区用的协程作用域（拉取建议 + 一键创建相册并批量加图）
+    val suggestionScope = rememberCoroutineScope()
 
     // V9：置顶相册 id 集合（从后端 /api/media/album/pinned 拉取）。空集合表示无置顶
     // 或拉取失败（UI 降级为不显示置顶标记）。长按菜单据此显示"置顶/取消置顶"。
@@ -337,26 +341,33 @@ private fun AlbumListPage(
                     }
                     displayAlbums.isEmpty() -> {
                         // 空状态
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Text("📷", fontSize = 64.sp)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                if (selectedTab == 1) "还没有共享相册" else "还没有相册",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (selectedTab == 0) {
+                            AlbumEmptyStateWithSuggestions(
+                                viewModel = viewModel,
+                                suggestionScope = suggestionScope,
+                                onSuggestionCreated = { viewModel.loadAlbums(forceRefresh = true) }
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                if (selectedTab == 1) "其他用户共享给你的相册会显示在这里"
-                                else "点击右下角创建你的第一个相册",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
+                        } else {
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text("📷", fontSize = 64.sp)
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    "还没有共享相册",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "其他用户共享给你的相册会显示在这里",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
                         }
                     }
                     else -> {
@@ -497,6 +508,182 @@ private fun AlbumListPage(
                 TextButton(onClick = { pendingActionAlbum = null }) { Text("关闭") }
             }
         )
+    }
+}
+
+/**
+ * V20：相册列表空状态 —— 带智能建议。
+ *
+ * 在"还没有相册"提示下方，调 [MediaService.getAlbumSuggestions] 获取基于未分类媒体
+ * 生成的推荐相册（按月份/类型/标签分组），每个建议显示名称 + 媒体数 + "创建"按钮。
+ *
+ * 点击"创建"：调 [MediaService.createAlbum] 建相册，再调 [MediaService.batchAddMediaToAlbum]
+ * 把建议的 [MediaService.AlbumSuggestion.previewIds] 一次性加入新相册，成功后回调
+ * [onSuggestionCreated]（上层刷新相册列表，空状态退出）。
+ *
+ * 建议拉取失败（返回 null）或为空时，仅显示原空状态提示，不渲染推荐区——
+ * 避免网络异常时给用户造成"加载中"卡死观感。
+ *
+ * @param viewModel 媒体视图模型（用于错误提示 [MediaViewModel.showErrorMessage]）
+ * @param suggestionScope 协程作用域（由 [AlbumListPage] 提供，与其生命周期一致）
+ * @param onSuggestionCreated 一键创建成功后的刷新回调
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun AlbumEmptyStateWithSuggestions(
+    viewModel: MediaViewModel,
+    suggestionScope: kotlinx.coroutines.CoroutineScope,
+    onSuggestionCreated: () -> Unit
+) {
+    // suggestions: null=未加载或失败（不显示推荐区）；空 list=已加载但无建议；非空=有建议
+    var suggestions by remember { mutableStateOf<List<MediaService.AlbumSuggestion>?>(null) }
+    var suggestionsLoading by remember { mutableStateOf(true) }
+    // 正在创建中的建议名集合，用于禁用对应"创建"按钮防重复点击
+    val creatingNames = remember { mutableStateListOf<String>() }
+
+    // 进入空状态时拉取智能建议（仅一次）。失败置 suggestions=null 静默降级。
+    LaunchedEffect(Unit) {
+        suggestionsLoading = true
+        suggestions = try {
+            MediaService.getAlbumSuggestions()
+        } catch (e: Exception) {
+            null
+        } finally {
+            suggestionsLoading = false
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // ---- 原空状态提示 ----
+        Text("📷", fontSize = 64.sp)
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            "还没有相册",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            "点击右下角创建你的第一个相册",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+
+        // ---- 智能推荐区 ----
+        // 仅在建议非空时渲染：加载中显示小提示，失败/为空不显示。
+        if (suggestionsLoading) {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                "正在分析推荐相册…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+        } else if (!suggestions.isNullOrEmpty()) {
+            Spacer(modifier = Modifier.height(28.dp))
+            Text(
+                "✨ 推荐创建的相册",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "基于未分类照片自动生成，点击创建即整理",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 建议列表：每条一个 Card，含名称 + N 项 + 创建按钮
+            suggestions!!.forEach { suggestion ->
+                val isCreating = suggestion.name in creatingNames
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 类型图标：by_month 📅 / by_type 🎬 / by_tag 🏷，其余用 📁
+                        Text(
+                            when (suggestion.type) {
+                                "by_month" -> "📅"
+                                "by_type" -> "🎬"
+                                "by_tag" -> "🏷️"
+                                else -> "📁"
+                            },
+                            fontSize = 22.sp
+                        )
+                        Spacer(modifier = Modifier.size(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                suggestion.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${suggestion.mediaCount} 项",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                        Spacer(modifier = Modifier.size(8.dp))
+                        TextButton(
+                            onClick = {
+                                if (isCreating) return@TextButton
+                                creatingNames.add(suggestion.name)
+                                suggestionScope.launch {
+                                    try {
+                                        // 1. 创建相册
+                                        val album = MediaService.createAlbum(suggestion.name)
+                                        if (album == null) {
+                                            viewModel.showErrorMessage("创建相册失败")
+                                            creatingNames.remove(suggestion.name)
+                                            return@launch
+                                        }
+                                        // 2. 批量加入建议的预览媒体（previewIds 最多 4 个，
+                                        //    但后端 batch-add 接受任意数量，这里全量加入）
+                                        if (suggestion.previewIds.isNotEmpty()) {
+                                            MediaService.batchAddMediaToAlbum(
+                                                album.id,
+                                                suggestion.previewIds
+                                            )
+                                        }
+                                        viewModel.showErrorMessage("已创建「${album.name}」并加入 ${suggestion.previewIds.size} 项")
+                                        // 3. 刷新相册列表 —— 空状态将退出，列表显示新相册
+                                        onSuggestionCreated()
+                                    } catch (e: Exception) {
+                                        viewModel.showErrorMessage("创建失败：${e.message}")
+                                    } finally {
+                                        creatingNames.remove(suggestion.name)
+                                    }
+                                }
+                            },
+                            enabled = !isCreating
+                        ) {
+                            Text(if (isCreating) "创建中…" else "创建")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
