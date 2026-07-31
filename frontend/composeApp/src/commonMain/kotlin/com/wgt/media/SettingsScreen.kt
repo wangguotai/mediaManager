@@ -1287,6 +1287,116 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V25：完整性报告卡片 —— 调 /api/media/media-integrity-report 显示综合完整性
+            // 评分 + A/B/C/D 等级 + 四维度（孤立/错误/重复/总媒体）统计。放在"媒体错误检查"
+            // 之后、"数据概览"之前，作为存储健康类卡片的总结收尾。
+            var integrityReport by remember { mutableStateOf<MediaService.MediaIntegrityReport?>(null) }
+            var integrityLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) {
+                integrityReport = MediaService.getMediaIntegrityReport()
+                integrityLoading = false
+            }
+            SectionTitle("🛡️ 完整性报告", iconRes = Res.drawable.ic_info)
+            if (integrityLoading) {
+                Text(
+                    "加载中...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else if (integrityReport == null) {
+                Text(
+                    "无法获取完整性报告",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+                )
+            } else {
+                val rep = integrityReport!!
+                // 等级颜色：A 绿 / B 蓝 / C 橙 / D 红
+                val gradeColor = when (rep.grade) {
+                    "A" -> Color(0xFF2E7D32)
+                    "B" -> Color(0xFF1565C0)
+                    "C" -> Color(0xFFE65100)
+                    else -> MaterialTheme.colorScheme.error
+                }
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    // 大字号：评分 + 等级 徽章
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Text(
+                            "${rep.integrityScore}",
+                            fontSize = 48.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = gradeColor
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            "/ 100",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text(
+                            rep.grade,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = gradeColor
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // 进度条：score / 100
+                    LinearProgressIndicator(
+                        progress = { (rep.integrityScore / 100.0).toFloat().coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = gradeColor,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // 四维度统计行
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${rep.orphans.count}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("孤立", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        }
+                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${rep.errors.count}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("错误", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        }
+                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${rep.duplicates.groups}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("重复组", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        }
+                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${rep.totalMedia}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("总媒体", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        }
+                    }
+                    // 重复可回收空间（仅有重复时显示）
+                    if (rep.duplicates.reclaimableBytes > 0) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "重复可回收 ${formatBytesToMB(rep.duplicates.reclaimableBytes)} MB（${rep.duplicates.count} 份）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
             // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
             // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。

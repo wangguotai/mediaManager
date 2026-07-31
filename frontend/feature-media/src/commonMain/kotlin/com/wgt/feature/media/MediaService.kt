@@ -3254,6 +3254,84 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-integrity-report — 媒体完整性综合报告。
+     *
+     * 后端单次遍历合并 orphan-check + error-check + duplicate-report，并据此计算
+     * 0-100 完整性评分与 A/B/C/D 等级（>=85 A / 70-84 B / 50-69 C / <50 D）。
+     * 响应结构（见后端 [handleMediaIntegrityReport]）：
+     *   { integrity_score:N, grade:"A"|"B"|"C"|"D",
+     *     orphans:{count,samples}, errors:{count,samples},
+     *     duplicates:{groups,count,reclaimable_bytes}, total_media:N, disk_check:bool }
+     * 前端仅取评分/等级 + 四维度计数，不渲染 samples（错误详情已在"媒体错误检查"卡片展示）。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization 编译器插件）。
+     * 失败（HTTP 非 200 或网络异常）返回 null，调用方 null-skip 静默跳过卡片。
+     */
+    suspend fun getMediaIntegrityReport(): MediaIntegrityReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-integrity-report") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val orp = o["orphans"]?.jsonObject
+                val err = o["errors"]?.jsonObject
+                val dup = o["duplicates"]?.jsonObject
+                MediaIntegrityReport(
+                    integrityScore = o["integrity_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = o["grade"]?.jsonPrimitive?.contentOrNull ?: "D",
+                    orphans = IntegritySection(
+                        count = orp?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        samples = orp?.get("samples")?.jsonArray?.mapNotNull { s ->
+                            s.jsonObject["filename"]?.jsonPrimitive?.contentOrNull
+                                ?: s.jsonObject["media_id"]?.jsonPrimitive?.contentOrNull
+                        } ?: emptyList()
+                    ),
+                    errors = IntegritySection(
+                        count = err?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        samples = err?.get("samples")?.jsonArray?.mapNotNull { s ->
+                            s.jsonObject["filename"]?.jsonPrimitive?.contentOrNull
+                                ?: s.jsonObject["media_id"]?.jsonPrimitive?.contentOrNull
+                        } ?: emptyList()
+                    ),
+                    duplicates = DupSection(
+                        groups = dup?.get("groups")?.jsonPrimitive?.intOrNull ?: 0,
+                        count = dup?.get("count")?.jsonPrimitive?.intOrNull ?: 0,
+                        reclaimableBytes = dup?.get("reclaimable_bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                    ),
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaIntegrityReport FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 完整性报告（[getMediaIntegrityReport] 返回）。 */
+    data class MediaIntegrityReport(
+        val integrityScore: Int,
+        val grade: String,
+        val orphans: IntegritySection,
+        val errors: IntegritySection,
+        val duplicates: DupSection,
+        val totalMedia: Int
+    )
+
+    /** 孤立/错误维度的计数与示例文件名列表。 */
+    data class IntegritySection(
+        val count: Int,
+        val samples: List<String>
+    )
+
+    /** 重复维度的组数、总重复份数、可回收字节数。 */
+    data class DupSection(
+        val groups: Int,
+        val count: Int,
+        val reclaimableBytes: Long
+    )
+
+    /**
      * GET /api/media/favorite-timeline — 收藏时间线，按收藏时间倒序。
      *
      * 后端返回 `{favorites:[{media_id,filename,type,favorited_at}],total}`，其中
