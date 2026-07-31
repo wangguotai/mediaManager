@@ -158,6 +158,9 @@ fun MediaListScreen(
     // V8：媒体详情对话框
     var mediaInfoTarget by remember { mutableStateOf<String?>(null) }
 
+    // 批量分享进行中标记：防止重复点击，由 onBatchShare 协程读写。
+    var isBatchSharing by remember { mutableStateOf(false) }
+
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
     // 监听错误信息并显示 Snackbar
@@ -484,6 +487,7 @@ fun MediaListScreen(
                     showBatchRenameButton = selectedTab != 0, // V8：仅云端源显示批量重命名
                     showBatchTagButton = selectedTab != 0, // V8：仅云端源显示批量标签
                     showBatchUnfavoriteButton = selectedTab != 0, // V8：仅云端源显示批量取消收藏
+                    showBatchShareButton = selectedTab != 0, // 仅云端源显示批量分享
                     onCreateShareLink = {
                         // V7 §1.2：打开配置对话框（密码可选 + 有效期选择）
                         shareLinkError = null
@@ -504,6 +508,29 @@ fun MediaListScreen(
                     onBatchRotate = {
                         // V8：批量旋转选中项（顺时针 90°）
                         viewModel.batchRotateSelectedMedia(90)
+                    },
+                    onBatchShare = {
+                        // 批量分享：调 /api/media/batch-share 为每个选中项各生成一条分享链接。
+                        // 成功后 snackbar 提示创建数量并清空选择；失败提示错误。
+                        val ids = viewModel.selectedMediaIds.toList()
+                        if (ids.isEmpty()) {
+                            advancedSearchScope.launch { snackbarHostState.showSnackbar("请先选择媒体") }
+                        } else if (!isBatchSharing) {
+                            isBatchSharing = true
+                            advancedSearchScope.launch(dispatchers.io) {
+                                val results = MediaService.batchShare(ids)
+                                isBatchSharing = false
+                                val msg = when {
+                                    results == null -> "批量分享失败，请稍后重试"
+                                    results.isEmpty() -> "未创建分享链接"
+                                    else -> {
+                                        viewModel.deselectAll()
+                                        "已创建 ${results.size} 个分享链接"
+                                    }
+                                }
+                                snackbarHostState.showSnackbar(msg)
+                            }
+                        }
                     },
                     showBatchRotateButton = selectedTab != 0 // V8：仅云端源显示批量旋转
                 )
@@ -3570,6 +3597,7 @@ fun SelectionBottomBar(
     onBatchTag: () -> Unit = {},
     onBatchUnfavorite: () -> Unit = {},
     onBatchRotate: () -> Unit = {},
+    onBatchShare: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
@@ -3578,7 +3606,8 @@ fun SelectionBottomBar(
     showBatchRenameButton: Boolean = false,
     showBatchTagButton: Boolean = false,
     showBatchUnfavoriteButton: Boolean = false,
-    showBatchRotateButton: Boolean = false
+    showBatchRotateButton: Boolean = false,
+    showBatchShareButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3620,6 +3649,16 @@ fun SelectionBottomBar(
                 painterResource(Res.drawable.ic_share),
                 contentDescription = "分享选中项"
             )
+        }
+
+        // 批量分享（调 /api/media/batch-share，为每个选中项各生成一条分享链接，仅云端源显示）
+        if (showBatchShareButton) {
+            IconButton(onClick = onBatchShare) {
+                Icon(
+                    painterResource(Res.drawable.ic_cloud_upload),
+                    contentDescription = "批量分享"
+                )
+            }
         }
 
         // 生成分享链接（V7 §1.2，仅云端源显示）

@@ -2777,6 +2777,57 @@ object MediaService {
         }
     }
 
+    /**
+     * 批量分享结果项（与后端 batch-share 响应 `links` 元素对齐）。
+     *
+     * 后端为每个 media_id 各自生成一条分享记录，返回 token + 可访问 url。
+     */
+    data class BatchShareResult(
+        val mediaId: String,
+        val token: String,
+        val url: String
+    )
+
+    /**
+     * POST /api/media/batch-share — 为多个媒体各自创建分享链接。
+     *
+     * 请求体 `{ "media_ids": [...] }`；响应
+     * `{ "links": [{ "media_id","token","url" }], "created_count" }`。
+     *
+     * 与 [createShareLink] 区别：后者为多个媒体创建**单条**聚合分享链接（一个 token
+     * 指向一组媒体）；本方法为每个媒体**各自**生成独立链接（N 个 token）。
+     *
+     * @return 生成的链接列表（可能为空表示后端未创建任何链接）；网络/HTTP 失败返回 null，
+     *         由调用方按空状态降级提示。
+     */
+    suspend fun batchShare(mediaIds: List<String>): List<BatchShareResult>? {
+        if (mediaIds.isEmpty()) return null
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-share") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_ids", Json.encodeToJsonElement(mediaIds))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["links"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val token = o["token"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val url = o["url"]?.jsonPrimitive?.contentOrNull ?: ""
+                    BatchShareResult(mediaId, token, url)
+                }
+            } else {
+                logger.info("MediaService", "batchShare status=${response.status} (non-OK)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchShare failed: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     // ---- V8 审计日志 API ----
 
     /** V8：审计日志条目（与后端 audit_log 表对齐）。 */
