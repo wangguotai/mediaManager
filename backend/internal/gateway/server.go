@@ -315,6 +315,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
 	// 媒体年龄分布（按 created_at 到 now 的时间差分组：<1天/1-7天/7-30天/30-90天/90-365天/>365天）
 	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
+	// 媒体归档状态（按上传年龄热/温/冷分类：热≤30天 / 温30-180天 / 冷>180天）
+	s.mux.HandleFunc("/api/media/media-archive-status", s.handleMediaArchiveStatus)
 	// V8：同步状态摘要
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
@@ -6175,6 +6177,81 @@ func (s *Server) handleMediaAgeDistribution(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ranges": buckets,
 		"total":  total,
+	})
+}
+
+// handleMediaArchiveStatus GET /api/media/media-archive-status — 媒体归档状态（热/温/冷分类）。
+//
+// 按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：
+//
+//	hot  热数据（最近 30 天内上传）
+//	warm 温数据（30-180 天内上传）
+//	cold 冷数据（上传超过 180 天）
+//
+// 每档统计 count 与 bytes（累计该档媒体的 Size），并返回总未软删媒体数 total。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "hot":  {"count":N,"bytes":N},
+//	  "warm":{"count":N,"bytes":N},
+//	  "cold":{"count":N,"bytes":N},
+//	  "total": N  // 参与分类的未软删媒体总数
+//	}
+func (s *Server) handleMediaArchiveStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 3 个归档温度档，count/bytes 预置 0。
+	now := time.Now()
+	type tier struct {
+		Count int64 `json:"count"`
+		Bytes int64 `json:"bytes"`
+	}
+	hot := tier{}
+	warm := tier{}
+	cold := tier{}
+	var total int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		age := now.Sub(m.CreatedAt) // 正值=过去上传
+		switch {
+		case age < 30*24*time.Hour:
+			hot.Count++
+			hot.Bytes += m.Size
+		case age < 180*24*time.Hour:
+			warm.Count++
+			warm.Bytes += m.Size
+		default:
+			cold.Count++
+			cold.Bytes += m.Size
+		}
+		total++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hot":   hot,
+		"warm":  warm,
+		"cold":  cold,
+		"total": total,
 	})
 }
 
