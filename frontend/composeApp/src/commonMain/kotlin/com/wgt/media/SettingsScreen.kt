@@ -898,6 +898,12 @@ fun SettingsScreen(
                     }
                 }
             }
+            // V24：仪表盘概览卡片 —— 一次调 /api/media/user-dashboard-v2 拿全部6维度数据。
+            // 实现（含加载/空态/六维度渲染）抽到 [DashboardOverviewV2Card] 独立 @Composable，
+            // 避免 SettingsScreen 主函数体过大触发 JVM 方法 64KB 上限（MethodTooLargeException）。
+            DashboardOverviewV2Card()
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V23：智能洞察卡片 —— 调 /api/media/insights 显示自动分析建议（重复/存储/习惯/未标签/相册/健康度）。
             // 放在"存储健康度"前，作为首屏可操作洞察汇总；后端即将提供该端点（端点未上线时按空态提示）。
             var mediaInsights by remember { mutableStateOf<List<MediaService.Insight>?>(null) }
@@ -2384,6 +2390,146 @@ fun SettingsScreen(
                 Text("OpenClaw 命令桥梁", style = MaterialTheme.typography.bodyLarge)
                 OutlinedButton(onClick = { showOpenClawDialog = true }) {
                     Text("打开")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V24：仪表盘概览卡片 —— 一次调 [MediaService.getUserDashboardV2] 拿全部6维度数据，
+ * 聚合展示健康度/活跃度/覆盖率/连续上传天数/Top1洞察。
+ *
+ * 抽成独立 @Composable 而非内联进 [SettingsScreen]，避免主函数体过大触发 JVM 方法
+ * 64KB 上限（MethodTooLargeException）。加载中/失败/成功三态自洽，调用方无需传参。
+ *
+ * 渲染项（对齐任务规格）：
+ * - 健康度：score/100 + grade（A绿/B蓝/C橙/D红，配色与进度条联动）
+ * - 活跃度：score + level（新手/活跃/达人/专家）
+ * - 覆盖率：tagged% + favorited%
+ * - 连续：🔥 N 天（附最长记录）
+ * - 洞察：top 1 insight 的 title + detail
+ */
+@Composable
+private fun DashboardOverviewV2Card() {
+    var dashboardV2 by remember { mutableStateOf<MediaService.UserDashboardV2?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        dashboardV2 = MediaService.getUserDashboardV2()
+        loading = false
+    }
+    SectionTitle("📊 仪表盘概览", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (dashboardV2 == null) {
+        Text(
+            "无法获取仪表盘数据",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val db = dashboardV2!!
+        // 健康度：score/100 + grade（A绿色/B蓝色/C橙色/D红色）
+        val gradeColor = when (db.health.grade) {
+            "A" -> Color(0xFF4CAF50)
+            "B" -> Color(0xFF2196F3)
+            "C" -> Color(0xFFFF9800)
+            else -> Color(0xFFF44336)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("健康度", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "${db.health.score}/100  ${db.health.grade}级",
+                style = MaterialTheme.typography.bodyLarge,
+                color = gradeColor,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        LinearProgressIndicator(
+            progress = { (db.health.score / 100.0).toFloat().coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(6.dp),
+            color = gradeColor,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+        // 活跃度：score + level
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("活跃度", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "${db.activity.score} 分  ${db.activity.level}",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        // 覆盖率：tagged% + favorited%
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("覆盖率", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "标签 ${db.coverage.taggedPercent}% · 收藏 ${db.coverage.favoritedPercent}%",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        // 连续上传天数
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("连续上传", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "🔥 ${db.streak.currentStreak} 天" +
+                    if (db.streak.longestStreak > 0) "（最长 ${db.streak.longestStreak}）" else "",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        // 洞察：top 1 insight
+        db.insights.firstOrNull()?.let { ins ->
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Text("💡", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text(
+                        ins.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (ins.detail.isNotEmpty()) {
+                        Text(
+                            ins.detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

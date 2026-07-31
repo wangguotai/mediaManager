@@ -6889,4 +6889,173 @@ object MediaService {
         val detail: String,
         val actionUrl: String? = null
     )
+
+    /**
+     * V24：GET /api/media/user-dashboard-v2 — 增强用户仪表盘（一次请求合并6维度）。
+     *
+     * 后端 [handleUserDashboardV2] 将 quick_stats / health / activity / coverage /
+     * streak / insights 六大维度合并为单一 JSON 对象，前端一次拉取即可渲染首页/
+     * 设置页全部关键卡片，区别于 [getDashboardOverview]（前端组合3路请求）与
+     * [getMediaInsights]（仅洞察单维度）。
+     *
+     * 响应结构：
+     * ```
+     * {
+     *   "quick_stats": { total_media, total_bytes, image_count, video_count, album_count, favorite_count },
+     *   "health":      { score:0-100, grade:"A"/"B"/"C"/"D", duplicate_rate, quota_usage, ... },
+     *   "activity":    { score, level:"新手"/"活跃"/"达人"/"专家", breakdown, total_actions },
+     *   "coverage":    { total, tagged_count, tagged_percent, fav_count, favorited_percent },
+     *   "streak":      { current_streak, longest_streak, total_active_days, last_upload_date, today_count },
+     *   "insights":    [ { type, title, detail, action_url? }, ... ],   // top 3
+     *   "user_id":     "..."
+     * }
+     * ```
+     *
+     * 解析宽容：各子对象缺字段回退 0/空串，[insights] 缺失返回空列表。HTTP 非 200
+     * 或网络异常返回 null，调用方按空态处理（不展示卡片或提示"无法获取"）。
+     * 鉴权头由 defaultRequest 统一注入，此处不重复附加。
+     *
+     * @return 合并6维度仪表盘数据；失败返回 null
+     */
+    suspend fun getUserDashboardV2(): UserDashboardV2? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/user-dashboard-v2")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // quick_stats
+                val qs = o["quick_stats"]?.jsonObject
+                val quickStats = UserDashboardV2.QuickStats(
+                    totalMedia = qs?.get("total_media")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = qs?.get("total_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                    imageCount = qs?.get("image_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    videoCount = qs?.get("video_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    albumCount = qs?.get("album_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    favoriteCount = qs?.get("favorite_count")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                // health
+                val h = o["health"]?.jsonObject
+                val health = UserDashboardV2.Health(
+                    score = h?.get("score")?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = h?.get("grade")?.jsonPrimitive?.contentOrNull ?: "D",
+                    duplicateRate = h?.get("duplicate_rate")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    quotaUsage = h?.get("quota_usage")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    duplicateCount = h?.get("duplicate_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    coldCount = h?.get("cold_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    usedBytes = h?.get("used_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                    quotaBytes = h?.get("quota_bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                )
+                // activity
+                val a = o["activity"]?.jsonObject
+                val activity = UserDashboardV2.Activity(
+                    score = a?.get("score")?.jsonPrimitive?.intOrNull ?: 0,
+                    level = a?.get("level")?.jsonPrimitive?.contentOrNull ?: "新手",
+                    totalActions = a?.get("total_actions")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                // coverage
+                val c = o["coverage"]?.jsonObject
+                val coverage = UserDashboardV2.Coverage(
+                    total = c?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
+                    taggedCount = c?.get("tagged_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    taggedPercent = c?.get("tagged_percent")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    favCount = c?.get("fav_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    favoritedPercent = c?.get("favorited_percent")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+                // streak
+                val s = o["streak"]?.jsonObject
+                val streak = UserDashboardV2.Streak(
+                    currentStreak = s?.get("current_streak")?.jsonPrimitive?.intOrNull ?: 0,
+                    longestStreak = s?.get("longest_streak")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalActiveDays = s?.get("total_active_days")?.jsonPrimitive?.intOrNull ?: 0,
+                    lastUploadDate = s?.get("last_upload_date")?.jsonPrimitive?.contentOrNull ?: "",
+                    todayCount = s?.get("today_count")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                // insights（top 3）—— 复用 [Insight] 结构解析
+                val insights = o["insights"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val type = item["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    Insight(
+                        type = type,
+                        title = item["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = item["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        actionUrl = item["action_url"]?.let {
+                            if (it is JsonNull) null else it.jsonPrimitive?.contentOrNull
+                        }
+                    )
+                } ?: emptyList()
+                UserDashboardV2(quickStats, health, activity, coverage, streak, insights)
+            } else {
+                logger.info("MediaService", "getUserDashboardV2 status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUserDashboardV2 FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * V24：user-dashboard-v2 响应体。一次请求合并6维度数据。
+     *
+     * @param quickStats 6个核心计数（总媒体/字节数/图片/视频/相册/收藏）
+     * @param health 存储健康度评分（0-100）+ 等级（A/B/C/D）
+     * @param activity 用户活跃度评分 + 等级（新手/活跃/达人/专家）
+     * @param coverage 媒体整理覆盖率（已打标签% + 已收藏%）
+     * @param streak 上传连续天数（current/longest/total/today）
+     * @param insights 智能洞察 top 3（复用 [Insight] 结构）
+     */
+    data class UserDashboardV2(
+        val quickStats: QuickStats,
+        val health: Health,
+        val activity: Activity,
+        val coverage: Coverage,
+        val streak: Streak,
+        val insights: List<Insight>
+    ) {
+        /** quick_stats 子对象。 */
+        data class QuickStats(
+            val totalMedia: Int = 0,
+            val totalBytes: Long = 0L,
+            val imageCount: Int = 0,
+            val videoCount: Int = 0,
+            val albumCount: Int = 0,
+            val favoriteCount: Int = 0
+        )
+
+        /** health 子对象：存储健康度。 */
+        data class Health(
+            val score: Int = 0,
+            val grade: String = "D",
+            val duplicateRate: Double = 0.0,
+            val quotaUsage: Double = 0.0,
+            val duplicateCount: Int = 0,
+            val coldCount: Int = 0,
+            val usedBytes: Long = 0L,
+            val quotaBytes: Long = 0L
+        )
+
+        /** activity 子对象：用户活跃度。 */
+        data class Activity(
+            val score: Int = 0,
+            val level: String = "新手",
+            val totalActions: Int = 0
+        )
+
+        /** coverage 子对象：媒体整理覆盖率。 */
+        data class Coverage(
+            val total: Int = 0,
+            val taggedCount: Int = 0,
+            val taggedPercent: Double = 0.0,
+            val favCount: Int = 0,
+            val favoritedPercent: Double = 0.0
+        )
+
+        /** streak 子对象：上传连续天数。 */
+        data class Streak(
+            val currentStreak: Int = 0,
+            val longestStreak: Int = 0,
+            val totalActiveDays: Int = 0,
+            val lastUploadDate: String = "",
+            val todayCount: Int = 0
+        )
+    }
 }
