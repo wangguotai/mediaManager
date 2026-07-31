@@ -483,6 +483,10 @@ func (s *Server) registerRoutes() {
 	// （建议创建相册或为待整理媒体打标签），与 album-suggestions 互补：
 	// 后者仅针对"未分类"媒体，本端点对全量媒体做整体组织诊断。只读端点。
 	s.mux.HandleFunc("/api/media/photo-organize-suggest", s.handlePhotoOrganizeSuggest)
+	// 相册组织建议：基于 photo-organize-suggest 的分组结果，把每条建议落地成具体的
+	// "建相册"动作——给出建议相册名与完整 media_ids（不同于 photo-organize-suggest 仅
+	// 返回预览 id 列表，本端点面向"一键建相册"场景，需完整的成员 id）。只读端点。
+	s.mux.HandleFunc("/api/media/album-organize-suggest", s.handleAlbumOrganizeSuggest)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 	// 媒体完整性报告（合并 orphan-check + error-check + duplicate-report 为一份完整报告，
@@ -12542,6 +12546,155 @@ func (s *Server) handlePhotoOrganizeSuggest(w http.ResponseWriter, r *http.Reque
 		"suggestions": suggestions,
 		"total":       len(suggestions),
 	})
+}
+
+// handleAlbumOrganizeSuggest GET /api/media/album-organize-suggest — 相册组织建议。
+//
+// 基于 photo-organize-suggest 的分组逻辑，把每条组织建议落地为具体的"建相册"动作：
+// 返回建议相册名 + 完整 media_ids（面向"一键创建相册"场景）。与 photo-organize-suggest
+// 的区别：后者只给 preview_ids（最多 4 个）作预览；本端点给出每个分组的全部 media id，
+// 前端可直接拿去调用"创建相册"接口填充 members。
+//
+// 两类可建相册的建议（仅当条件成立才产出）：
+//
+//	a) by_month — 按拍摄时间（taken_at 优先，回退 created_at）"年-月"分组，某月 >= 5 →
+//	   建议创建"YYYY年M月"相册，media_ids 含该月全部媒体（按时间升序）。
+//	b) by_type  — 视频类 >= 3 → 建议"视频合集"相册，media_ids 含全部视频。
+//
+// untagged 维度在 photo-organize-suggest 中是"打标签"建议（非建相册场景），此处不产出，
+// 避免给出无 clear album semantics 的建议。
+//
+// 数据来源：store.ListMediaByUser 一次拉全量未软删媒体，本地分组。需认证，按 user_id
+// 隔离；store 未注入返回 503。
+// 响应：{ suggestions: [{type, name, media_ids, reason}], total }
+func (s *Server) handleAlbumOrganizeSuggest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// albumSuggestion 是单条相册组织建议的响应结构。
+	type albumSuggestion struct {
+		Type     string   `json:"type"`      // by_month | by_type
+		Name     string   `json:"name"`      // 建议相册名
+		MediaIDs []string `json:"media_ids"` // 命中媒体的完整 id（按时间升序，便于按序建档）
+		Reason   string   `json:"reason"`    // 人类可读的生成理由
+	}
+	suggestions := make([]albumSuggestion, 0)
+
+	// activeIDs 从一组 media（按代表性时间升序）提取 id 列表。
+	activeIDs := func(group []*storage.Media) []string {
+		if len(group) == 0 {
+			return []string{}
+		}
+		sorted := make([]*storage.Media, len(group))
+		copy(sorted, group)
+		sort.Slice(sorted, func(i, j int) bool {
+			return mediaTimeFor(sorted[i]).Before(mediaTimeFor(sorted[j]))
+		})
+		ids := make([]string, 0, len(sorted))
+		for _, m := range sorted {
+			ids = append(ids, m.ID)
+		}
+		return ids
+	}
+
+	// 先过滤软删媒体（防御式）。
+	active := make([]*storage.Media, 0, len(mediaList))
+	for _, m := range mediaList {
+		if !m.Deleted {
+			active = append(active, m)
+		}
+	}
+
+	// 中文月份名（1..12 → "1月".."12月"），用于"YYYY年M月"命名。
+	monthName := func(m int) string {
+		cnNums := []string{"", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"}
+		if m >= 1 && m <= 12 {
+			return cnNums[m] + "月"
+		}
+		return fmt.Sprintf("%d月", m)
+	}
+
+	// a) by_month：按"年-月"分组，count >= 5 产出建议，月份升序。
+	type monthBucket struct {
+		year  int
+		month int
+		media []*storage.Media
+	}
+	byMonth := make(map[string]*monthBucket)
+	for _, m := range active {
+		t := mediaTimeFor(m)
+		key := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
+		b, ok := byMonth[key]
+		if !ok {
+			b = &monthBucket{year: t.Year(), month: int(t.Month())}
+			byMonth[key] = b
+		}
+		b.media = append(b.media, m)
+	}
+	monthKeys := make([]string, 0, len(byMonth))
+	for k := range byMonth {
+		monthKeys = append(monthKeys, k)
+	}
+	sort.Strings(monthKeys) // 升序：最早月份在前
+	for _, k := range monthKeys {
+		b := byMonth[k]
+		if len(b.media) < 5 {
+			continue
+		}
+		suggestions = append(suggestions, albumSuggestion{
+			Type:     "by_month",
+			Name:     fmt.Sprintf("%d年%s", b.year, monthName(b.month)),
+			MediaIDs: activeIDs(b.media),
+			Reason:   fmt.Sprintf("该月共有 %d 张媒体，建议创建相册集中管理", len(b.media)),
+		})
+	}
+
+	// b) by_type：视频类媒体 >= 3 产出"视频合集"建议。
+	var videos []*storage.Media
+	for _, m := range active {
+		if strings.ToUpper(m.Type) == "VIDEO" {
+			videos = append(videos, m)
+		}
+	}
+	if len(videos) >= 3 {
+		suggestions = append(suggestions, albumSuggestion{
+			Type:     "by_type",
+			Name:     "视频合集",
+			MediaIDs: activeIDs(videos),
+			Reason:   fmt.Sprintf("共有 %d 个视频，建议单独成册便于浏览", len(videos)),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"total":       len(suggestions),
+	})
+}
+
+// mediaTimeFor 取一条 media 的代表性时间（优先拍摄时间 taken_at，回退上传时间 created_at），
+// UTC 归一化（codebase 时间聚合约定）。taken_at 为 int64 毫秒时间戳，0 表未知。
+func mediaTimeFor(m *storage.Media) time.Time {
+	if m.TakenAt > 0 {
+		return time.UnixMilli(m.TakenAt).UTC()
+	}
+	return m.CreatedAt.UTC()
 }
 
 // handleMediaInsights GET /api/media/insights — 智能洞察报告。
