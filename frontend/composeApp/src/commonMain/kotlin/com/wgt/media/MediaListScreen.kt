@@ -1919,6 +1919,55 @@ private fun MyTabContent(
             }
         }
 
+        // V19：相册统计卡片（GET /api/media/album/stats-summary）
+        // 在相册排行后展示聚合统计：总相册数/平均项数/最多最少相册。
+        var albumStats by remember { mutableStateOf<MediaService.AlbumStatsSummary?>(null) }
+        LaunchedEffect(Unit) { albumStats = MediaService.getAlbumStatsSummary() }
+        albumStats?.let { stats ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "相册统计",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 总相册数 + 平均项数（一位小数，commonMain 无 String.format，沿用 take 截断）
+                    val avgStr = stats.avgPerAlbum.toString()
+                    Text(
+                        "总 ${stats.totalAlbums} 个相册 · 平均 ${avgStr.take(avgStr.indexOf('.') + 2)} 项/相册",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    stats.maxAlbum?.let { max ->
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "📈 最多: ${max.name.ifEmpty { "未命名相册" }} (${max.count} 项)",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    stats.minAlbum?.let { min ->
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "📉 最少: ${min.name.ifEmpty { "未命名相册" }} (${min.count} 项)",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
         // V7：分享链接列表卡片

@@ -1101,6 +1101,82 @@ object MediaService {
     }
 
     /**
+     * V19：相册极值——stats-summary 返回的最多/最少相册单项。
+     *
+     * 后端字段：id / name / count（见 handleAlbumStatsSummary）。
+     * [count] 为该相册内的媒体项数。
+     */
+    data class AlbumExtremum(
+        val id: String,
+        val name: String,
+        val count: Int = 0
+    )
+
+    /**
+     * V19：相册统计摘要——GET /api/media/album/stats-summary 返回的聚合数据。
+     *
+     * 后端返回 `{total_albums, total_media, avg_per_album, max_album{id,name,count}, min_album{id,name,count}}`。
+     * [totalMedia] 是各相册媒体项数之和（同一媒体在多相册中重复计数，非去重，与
+     * count-ranking/all-summary 的口径一致）。[maxAlbum]/[minAlbum] 为项数最多/最少的相册；
+     * 单个相册时二者指向同一相册（正确行为）；无相册时为 null。
+     */
+    data class AlbumStatsSummary(
+        val totalAlbums: Int = 0,
+        val totalMedia: Int = 0,
+        val avgPerAlbum: Double = 0.0,
+        val maxAlbum: AlbumExtremum? = null,
+        val minAlbum: AlbumExtremum? = null
+    )
+
+    /**
+     * V19：GET /api/media/album/stats-summary — 获取相册统计摘要
+     * （总相册数/总媒体项数/平均值/最多最少相册）。
+     *
+     * 后端返回 `{total_albums, total_media, avg_per_album, max_album{id,name,count}, min_album{id,name,count}}`。
+     * max_album/min_album 在无相册时为 null（后端返回 null）。
+     *
+     * 后端不可用/出错时返回 null（与 [getAlbumCountRanking] 同语义——
+     * 区分"成功但空"与"网络失败"，故用 null 表示失败）。
+     *
+     * @return 相册统计摘要，或 null（失败）
+     */
+    suspend fun getAlbumStatsSummary(): AlbumStatsSummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/stats-summary")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                AlbumStatsSummary(
+                    totalAlbums = obj["total_albums"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalMedia = obj["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgPerAlbum = obj["avg_per_album"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    maxAlbum = parseAlbumExtremum(obj["max_album"]),
+                    minAlbum = parseAlbumExtremum(obj["min_album"])
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumStatsSummary FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 解析 stats-summary 的 max_album/min_album 字段。后端在无相册时返回 null，
+     * 此处返回 null；有相册时解析 id/name/count。
+     */
+    private fun parseAlbumExtremum(el: JsonElement?): AlbumExtremum? {
+        if (el == null || el is JsonNull) return null
+        val o = el.jsonObject
+        return AlbumExtremum(
+            id = o["id"]?.jsonPrimitive?.contentOrNull ?: "",
+            name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+            count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+        )
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头
