@@ -1701,6 +1701,22 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/empty-trash — 一键清空回收站，返回删除数量。 */
+    suspend fun emptyTrash(): Int {
+        return try {
+            val response: HttpResponse = jsonClient.post("${rnBackendBaseUrl()}/api/media/empty-trash") {
+                contentType(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["purged_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "emptyTrash failed: ${e.message}")
+            0
+        }
+    }
+
     // ---- V7 §1.2 分享链接 API ----
 
     /** 分享链接信息。 */
