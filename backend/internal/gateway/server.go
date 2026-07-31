@@ -303,6 +303,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/extreme-media", s.handleMediaExtremeMedia)
 	// V8：按 MIME 类型统计
 	s.mux.HandleFunc("/api/media/file-types", s.handleMediaFileTypes)
+	// 按 MIME 类型详细统计（比 file-types 更细粒度：每种 MIME 的 count/total_bytes/avg_bytes/最早+最晚上传时间）。
+	s.mux.HandleFunc("/api/media/mime-type-stats", s.handleMimeTypeStats)
 	// V8：孤立文件检查（DB 有记录但磁盘文件缺失）
 	s.mux.HandleFunc("/api/media/orphan-check", s.handleMediaOrphanCheck)
 	// V8：按天统计上传量（日历热力图）
@@ -8876,5 +8878,84 @@ func (s *Server) handleUploadPatternAnalysis(w http.ResponseWriter, r *http.Requ
 		"by_time_period": periodCounts,
 		"by_weekday":     weekdayCounts,
 		"user_id":        uid,
+	})
+}
+
+// handleMimeTypeStats GET /api/media/mime-type-stats — 按 MIME 类型详细统计。
+// 与 /api/media/file-types 的区别：file-types 只返回 count + bytes，本端点额外提供
+// avg_bytes（平均大小）与 earliest/latest（该 MIME 最早/最晚上传时间），供前端存储
+// 分析页按 MIME 粒度展示完整大小与时间维度。实现复用 ListMediaByUser 全量拉取 +
+// 内存按 Mime 分组聚合，按数量倒序排序后返回。
+func (s *Server) handleMimeTypeStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type mimeStat struct {
+		Mime       string    `json:"mime"`
+		Count      int       `json:"count"`
+		TotalBytes int64     `json:"total_bytes"`
+		AvgBytes   int64     `json:"avg_bytes"`
+		Earliest   time.Time `json:"earliest"`
+		Latest     time.Time `json:"latest"`
+	}
+
+	byMime := make(map[string]*mimeStat)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		key := m.Mime
+		if key == "" {
+			key = "unknown"
+		}
+		st, ok := byMime[key]
+		if !ok {
+			st = &mimeStat{Mime: key, Earliest: m.CreatedAt, Latest: m.CreatedAt}
+			byMime[key] = st
+		}
+		st.Count++
+		st.TotalBytes += m.Size
+		if m.CreatedAt.Before(st.Earliest) {
+			st.Earliest = m.CreatedAt
+		}
+		if m.CreatedAt.After(st.Latest) {
+			st.Latest = m.CreatedAt
+		}
+	}
+
+	stats := make([]mimeStat, 0, len(byMime))
+	for _, v := range byMime {
+		if v.Count > 0 {
+			v.AvgBytes = v.TotalBytes / int64(v.Count)
+		}
+		stats = append(stats, *v)
+	}
+	// 按数量倒序，并列时按 MIME 字典序保证稳定输出。
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Count != stats[j].Count {
+			return stats[i].Count > stats[j].Count
+		}
+		return stats[i].Mime < stats[j].Mime
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mimes": stats,
+		"total": len(stats),
 	})
 }
