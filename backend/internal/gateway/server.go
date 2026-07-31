@@ -266,6 +266,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/batch-rename", s.handleMediaTagBatchRename)
 	// V8：批量导入标签（从外部系统迁移标签数据，INSERT OR IGNORE 幂等）
 	s.mux.HandleFunc("/api/media/tag/import", s.handleMediaTagImport)
+	// V8：导出用户所有标签数据（标签名 + 关联 media_id 列表）为 JSON。
+	s.mux.HandleFunc("/api/media/tag/export", s.handleMediaTagExport)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
 	// V8：标签自动补全
@@ -4322,6 +4324,61 @@ func (s *Server) handleMediaTagImport(w http.ResponseWriter, r *http.Request) {
 		"total":           len(req.Tags),
 	})
 }
+
+// handleMediaTagExport V8：GET /api/media/tag/export — 导出用户所有标签数据。
+// 遍历用户所有标签名，对每个标签查关联的 media_id 列表，汇总为 JSON 导出。
+// 响应: { tags: [{tag_name, media_ids: [...], count}], total_tags, total_relations }
+// 用于备份/迁移：导出数据可直接喂给 /api/media/tag/import 还原。
+func (s *Server) handleMediaTagExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	ctx := r.Context()
+	tagNames, err := s.store.ListAllTags(ctx, uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	type tagExport struct {
+		TagName   string   `json:"tag_name"`
+		MediaIDs  []string `json:"media_ids"`
+		Count     int      `json:"count"`
+	}
+	tags := make([]tagExport, 0, len(tagNames))
+	totalRelations := 0
+	for _, name := range tagNames {
+		mediaIDs, err := s.store.SearchMediaByTag(ctx, uid, name)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if mediaIDs == nil {
+			mediaIDs = []string{}
+		}
+		tags = append(tags, tagExport{
+			TagName:  name,
+			MediaIDs: mediaIDs,
+			Count:    len(mediaIDs),
+		})
+		totalRelations += len(mediaIDs)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":             tags,
+		"total_tags":       len(tags),
+		"total_relations":  totalRelations,
+	})
+}
+
 // handleMediaTagDelete V8：POST /api/media/tag/delete — 删除标签。
 // 请求体: { tag_name }
 func (s *Server) handleMediaTagDelete(w http.ResponseWriter, r *http.Request) {
