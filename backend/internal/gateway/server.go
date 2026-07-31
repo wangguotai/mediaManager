@@ -193,6 +193,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
 	s.mux.HandleFunc("/api/media/quick-stats", s.handleMediaQuickStats)
+	// 媒体覆盖率报告：已标记标签/已收藏/已分享/在相册中的媒体占比，供前端展示媒体整理完成度。
+	s.mux.HandleFunc("/api/media/media-coverage", s.handleMediaCoverage)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
 	// 区别于 batch-download 的 zip 流式打包，不创建分享链接）
 	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
@@ -2923,6 +2925,133 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 		"earliest_ts":    earliest,
 		"latest_ts":      latest,
 		"user_id":        uid,
+	})
+}
+
+// handleMediaCoverage GET /api/media/media-coverage — 媒体覆盖率报告。
+// 返回当前用户媒体库中四项整理维度的覆盖占比：
+//   - tagged    ：至少打了一个标签的媒体
+//   - favorited ：已收藏的媒体
+//   - shared    ：出现在任一分享链接中的媒体
+//   - in_album  ：加入了至少一个相册的媒体
+//   - untagged  ：完全没有标签的媒体（tagged 的补集，便于前端展示待整理量）
+//
+// 覆盖率 = count/total*100，round2 保留两位小数。total=0 时各覆盖率与计数均为 0。
+// 数据来源：media 来自 store.ListMediaByUser；标签来自 store.ListAllTags +
+// SearchMediaByTag 汇总成带标签 media_id 集合；收藏来自 mediaSvc.favoriteProvider；
+// 分享来自 store.ListShareTokensByUser（MediaIDs JSON 数组）；相册来自
+// mediaSvc.albumStoreProvider.ListAlbums（Album.MediaIDs）。各项能力未配置时对应计数为 0。
+func (s *Server) handleMediaCoverage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 全部未软删媒体的 id 集合（ListMediaByUser 已过滤 deleted，这里再次跳过以防御式）。
+	liveIDs := make(map[string]struct{}, len(mediaList))
+	total := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		total++
+		liveIDs[m.ID] = struct{}{}
+	}
+
+	// tagged：遍历用户所有标签，汇总关联的 media_id。
+	taggedSet := make(map[string]struct{})
+	if total > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	// favorited：收藏 media_id 列表。
+	favSet := make(map[string]struct{})
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		for _, id := range fav.ListFavorites(uid) {
+			favSet[id] = struct{}{}
+		}
+	}
+
+	// shared：出现在任一分享链接 MediaIDs 中的媒体。
+	sharedSet := make(map[string]struct{})
+	if tokens, serr := s.store.ListShareTokensByUser(r.Context(), uid); serr == nil {
+		for _, t := range tokens {
+			var ids []string
+			if jerr := json.Unmarshal([]byte(t.MediaIDs), &ids); jerr == nil {
+				for _, id := range ids {
+					sharedSet[id] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// in_album：加入至少一个相册的媒体。
+	albumSet := make(map[string]struct{})
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		for _, a := range provider.ListAlbums(uid) {
+			for _, id := range a.MediaIDs {
+				albumSet[id] = struct{}{}
+			}
+		}
+	}
+
+	countInLive := func(set map[string]struct{}) int {
+		n := 0
+		for id := range set {
+			if _, ok := liveIDs[id]; ok {
+				n++
+			}
+		}
+		return n
+	}
+
+	taggedCount := countInLive(taggedSet)
+	favoritedCount := countInLive(favSet)
+	sharedCount := countInLive(sharedSet)
+	inAlbumCount := countInLive(albumSet)
+	untaggedCount := total - taggedCount
+
+	type coverage struct {
+		Count   int     `json:"count"`
+		Percent float64 `json:"percent"`
+	}
+	pct := func(c int) float64 {
+		if total == 0 {
+			return 0
+		}
+		return round2(float64(c) / float64(total) * 100)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":     total,
+		"tagged":    coverage{Count: taggedCount, Percent: pct(taggedCount)},
+		"favorited": coverage{Count: favoritedCount, Percent: pct(favoritedCount)},
+		"shared":    coverage{Count: sharedCount, Percent: pct(sharedCount)},
+		"in_album":  coverage{Count: inAlbumCount, Percent: pct(inAlbumCount)},
+		"untagged":  coverage{Count: untaggedCount, Percent: pct(untaggedCount)},
 	})
 }
 
