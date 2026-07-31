@@ -308,6 +308,16 @@ fun SettingsScreen(
     var isExporting by remember { mutableStateOf(false) }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
 
+    // 一键删除重复确认对话框 + 执行状态（完整性报告卡片触发）。
+    // showBatchDeleteDialog 控制弹窗；batchDeleting 控制按钮 loading；
+    // 用 integrityReport.duplicates 的 count/reclaimableBytes 作确认提示文案。
+    // integrityReport/integrityLoading 提升到此处（原在完整性报告卡片内部声明），
+    // 以便上方确认 Dialog 与下方卡片都能访问——Dialog 显示前需要读 duplicates 数据。
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    var batchDeleting by remember { mutableStateOf(false) }
+    var integrityReport by remember { mutableStateOf<MediaService.MediaIntegrityReport?>(null) }
+    var integrityLoading by remember { mutableStateOf(true) }
+
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
@@ -372,6 +382,68 @@ fun SettingsScreen(
             onDismiss = {
                 showExportDialog = false
                 exportJson = null  // 关闭时清空，下次重新拉取
+            }
+        )
+    }
+
+    // 一键删除重复确认对话框——基于完整性报告卡片的 duplicates 数据。
+    // 文案动态展示将删除的重复份数（count）与可回收空间（reclaimableBytes）。
+    // 确认后调 MediaService.batchDeleteDuplicates()，成功 Snackbar 汇报结果并刷新
+    // 完整性报告（重新拉取，使卡片上的重复计数实时归零/下降）。
+    if (showBatchDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!batchDeleting) showBatchDeleteDialog = false
+            },
+            title = { Text("确认删除重复文件") },
+            text = {
+                val rep = integrityReport
+                if (rep != null && rep.duplicates.count > 0) {
+                    Text(
+                        "将删除 ${rep.duplicates.count} 个重复文件，" +
+                            "释放约 ${formatBytesToMB(rep.duplicates.reclaimableBytes)} MB。\n\n" +
+                            "每组重复仅保留最早上传的原始件，其余移入回收站，可随时恢复。"
+                    )
+                } else {
+                    Text("没有检测到重复文件。")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !batchDeleting && (integrityReport?.duplicates?.count ?: 0) > 0,
+                    onClick = {
+                        batchDeleting = true
+                        scope.launch {
+                            val result = MediaService.batchDeleteDuplicates()
+                            batchDeleting = false
+                            if (result != null) {
+                                showBatchDeleteDialog = false
+                                snackbarHostState.showSnackbar(
+                                    "已删除 ${result.deletedCount} 个，释放 ${formatBytesToMB(result.freedBytes)}"
+                                )
+                                // 刷新完整性报告，使卡片重复计数实时更新
+                                integrityReport = MediaService.getMediaIntegrityReport()
+                            } else {
+                                snackbarHostState.showSnackbar("删除失败，请检查后端连接")
+                            }
+                        }
+                    }
+                ) {
+                    if (batchDeleting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("确认删除", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !batchDeleting,
+                    onClick = { showBatchDeleteDialog = false }
+                ) { Text("取消") }
             }
         )
     }
@@ -1296,8 +1368,7 @@ fun SettingsScreen(
             // V25：完整性报告卡片 —— 调 /api/media/media-integrity-report 显示综合完整性
             // 评分 + A/B/C/D 等级 + 四维度（孤立/错误/重复/总媒体）统计。放在"媒体错误检查"
             // 之后、"数据概览"之前，作为存储健康类卡片的总结收尾。
-            var integrityReport by remember { mutableStateOf<MediaService.MediaIntegrityReport?>(null) }
-            var integrityLoading by remember { mutableStateOf(true) }
+            // 注：integrityReport/integrityLoading 提升到 Composable 顶部声明（供确认 Dialog 访问）。
             LaunchedEffect(Unit) {
                 integrityReport = MediaService.getMediaIntegrityReport()
                 integrityLoading = false
@@ -1395,6 +1466,25 @@ fun SettingsScreen(
                             "重复可回收 ${formatBytesToMB(rep.duplicates.reclaimableBytes)} MB（${rep.duplicates.count} 份）",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    // 一键删除重复按钮：存在重复组时展示。点击弹确认 Dialog（由上方
+                    // showBatchDeleteDialog 控制），后端按 SHA256 分组保留最早原件、其余软删。
+                    if (rep.duplicates.count > 0) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Button(
+                            onClick = { showBatchDeleteDialog = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        ) { Text("一键删除重复") }
+                        Text(
+                            "保留每组最早原件，其余移入回收站可恢复",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
                 }

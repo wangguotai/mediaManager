@@ -6393,6 +6393,71 @@ object MediaService {
     }
 
     /**
+     * 批量一键删除重复文件结果（与后端 [handleMediaDuplicatesBatchDelete] 响应对齐）。
+     *
+     * 后端按 SHA256 分组，每组保留最早（created_at 最小）一份，其余软删，best-effort：
+     * - [deletedCount] 成功软删的行数
+     * - [freedBytes] 这些行 Size 之和（int64 字节；磁盘文件由后续清理任务回收）
+     * - [groupsProcessed] 处理的重复组数（len>=2 的 SHA256 分组数）
+     * - [errors] 失败项列表，每项形如 `"media_id: error"`（前端仅作摘要展示，不阻断其余项）
+     *
+     * 用普通 data class 承载——解析走运行时 [Json.parseToJsonElement]（与
+     * [getMediaIntegrityReport] 同款），不依赖 kotlinx.serialization 编译器插件。
+     */
+    data class BatchDeleteResult(
+        val deletedCount: Int,
+        val freedBytes: Long,
+        val groupsProcessed: Int,
+        val errors: List<String>
+    )
+
+    /**
+     * POST /api/media/media-duplicates-batch-delete — 一键删除全部重复文件。
+     *
+     * 后端按 SHA256 分组，每组保留最早（created_at 最小）一份原件，其余成员标记软删除
+     * （deleted=1，不物理删文件，与回收站策略一致），归属校验由 MarkDeletedForUser 按
+     * (id,user_id) 双键过滤防横向越权。响应结构（见 [handleMediaDuplicatesBatchDelete]）：
+     * `{deleted_count, freed_bytes, groups_processed, errors:[{media_id,error}], user_id}`。
+     * errors 为 best-effort 失败项，不阻断其余删除；前端仅作摘要展示。
+     *
+     * 本端点为写操作（POST only），无请求体（后端直接从 DB 拉全部媒体按 SHA256 分组）。
+     * 鉴权头由显式 `getAuthToken()?.let { header(...) }` 注入（与 [renameMedia] 等 POST 写端点
+     * 同款）。HTTP 非 200 或网络异常返回 null，调用方按失败提示处理。
+     *
+     * @return 删除结果 [BatchDeleteResult]；失败返回 null
+     */
+    suspend fun batchDeleteDuplicates(): BatchDeleteResult? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/media-duplicates-batch-delete") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                // 后端无请求体要求，发空 JSON 对象避免某些代理对空 POST 的处理差异
+                setBody(buildJsonObject {})
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                BatchDeleteResult(
+                    deletedCount = o["deleted_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    freedBytes = o["freed_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    groupsProcessed = o["groups_processed"]?.jsonPrimitive?.intOrNull ?: 0,
+                    errors = o["errors"]?.jsonArray?.mapNotNull { el ->
+                        val item = el.jsonObject
+                        val mid = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        val msg = item["error"]?.jsonPrimitive?.contentOrNull ?: ""
+                        "$mid: $msg"
+                    } ?: emptyList()
+                )
+            } else {
+                logger.info("MediaService", "batchDeleteDuplicates status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchDeleteDuplicates FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 深度存储分析——单个交叉格（年份×类型 或 大小段×类型）的计数与字节数。
      *
      * 与后端 [handleStorageDeepAnalysis] 的 typeStat `{count, bytes}` 对齐。
