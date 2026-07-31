@@ -2353,6 +2353,85 @@ object MediaService {
     }
 
     /**
+     * V9：本周上传摘要的一天计数（[WeeklySummary.byDay] 的元素）。
+     *
+     * [day] 为英文星期缩写（Mon/Tue/Wed/Thu/Fri/Sat/Sun），与后端 [handleWeeklySummary]
+     * 的 by_day.day 字段一致；前端展示时再映射为“周一/周二/…”。
+     */
+    data class DayCount(
+        val day: String = "",
+        val count: Int = 0
+    )
+
+    /**
+     * V9：本周上传摘要——配合"连续上传"卡片后展示本周活动概览。
+     *
+     * 后端 GET /api/media/weekly-summary 返回（滚动 7 天窗口，UTC）：
+     * `{week_start, week_end, uploaded_count, uploaded_bytes,
+     *   by_day:[{day,count}, ...7], most_active_day:{day,count},
+     *   new_tags_count, new_albums_count}`。
+     * - [weekStart]/[weekEnd] 窗口起止时间（RFC3339 字符串，原样透传展示）。
+     * - [uploadedCount] 本周上传媒体数。
+     * - [uploadedBytes] 本周上传媒体总字节。
+     * - [byDay] 7 天逐日上传数，[DayCount.day] 为英文星期缩写。
+     * - [mostActiveDay] 本周上传最多的一天；全 0 时 [DayCount.day] 为空串。
+     * - [newTagsCount] 本周标签操作数（audit 口径）。
+     * - [newAlbumsCount] 本周新建相册数。
+     */
+    data class WeeklySummary(
+        val weekStart: String = "",
+        val weekEnd: String = "",
+        val uploadedCount: Int = 0,
+        val uploadedBytes: Long = 0L,
+        val byDay: List<DayCount> = emptyList(),
+        val mostActiveDay: DayCount = DayCount(),
+        val newTagsCount: Int = 0,
+        val newAlbumsCount: Int = 0
+    )
+
+    /**
+     * V9：GET /api/media/weekly-summary — 获取本周上传摘要。
+     *
+     * 解析宽容：by_day 缺失回退空列表，most_active_day 缺失回退空 [DayCount]，
+     * 数值字段缺省 0/空串。失败（HTTP 非 200 / 网络异常）返回 null，
+     * 调用方按 null 静默跳过不渲染卡片（与 [getUploadStreak] 同款 null 容错）。
+     */
+    suspend fun getWeeklySummary(): WeeklySummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/weekly-summary") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val byDay = o["by_day"]?.jsonArray?.map { el ->
+                    val d = el.jsonObject
+                    DayCount(
+                        day = d["day"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = d["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                val mad = o["most_active_day"]?.jsonObject
+                WeeklySummary(
+                    weekStart = o["week_start"]?.jsonPrimitive?.contentOrNull ?: "",
+                    weekEnd = o["week_end"]?.jsonPrimitive?.contentOrNull ?: "",
+                    uploadedCount = o["uploaded_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    uploadedBytes = o["uploaded_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    byDay = byDay,
+                    mostActiveDay = DayCount(
+                        day = mad?.get("day")?.jsonPrimitive?.contentOrNull ?: "",
+                        count = mad?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    newTagsCount = o["new_tags_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    newAlbumsCount = o["new_albums_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getWeeklySummary FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/timeline-calendar — 按拍摄日期分组的媒体统计。
      *
      * 后端返回 `{days: [{date, count, type}], total_days, total_media}`，

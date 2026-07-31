@@ -176,6 +176,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
+	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
+	s.mux.HandleFunc("/api/media/weekly-summary", s.handleWeeklySummary)
 	// V13：年度回顾报告（某年媒体统计摘要：总览/月分布/类型分布/收藏数/上传最忙日）。
 	s.mux.HandleFunc("/api/media/yearly-review", s.handleMediaYearlyReview)
 	// V21：综合报告（合并 quick-stats/yearly-review/storage/tag/pattern/duplicate 为一次请求），
@@ -4290,6 +4292,141 @@ func (s *Server) handleMediaGrowthReport(w http.ResponseWriter, r *http.Request)
 		"last_month":           map[string]any{"count": lmCount, "bytes": lmBytes},
 		"month_change_percent": monthChange,
 		"this_year":            map[string]any{"count": tyCount, "bytes": tyBytes},
+	})
+}
+
+// handleWeeklySummary GET /api/media/weekly-summary — 周报摘要。
+//
+// 返回最近 7 天（滚动窗口，非自然周）的媒体活动摘要，供前端周报卡片一次加载：
+//   - week_start / week_end：窗口起止时间（UTC，RFC3339）
+//   - uploaded_count / uploaded_bytes：本周上传的媒体数与总字节数（不含软删行）
+//   - by_day：按天分布 [{day,count}]，共 7 项，day 为英文星期缩写（Mon/Tue/...）
+//     从 week_start 当天起按 UTC 日期分桶，每桶为当日 00:00-24:00 UTC 的上传量。
+//   - most_active_day：本周上传最多的那一天 {day,count}；全部为 0 则 {day:"",count:0}
+//   - new_tags_count：本周新增的标签操作数（audit_log 中 action="tag" 且 created_at
+//     落在窗口内的记录数）。注意"新增标签数"口径为标签关联操作次数而非去重标签名，
+//     与现有 audit_log 埋点一致（每次打标签写一条 "tag" 审计）。
+//   - new_albums_count：本周创建的相册数（album.CreatedAt Unix 秒 >= week_start）
+//
+// 数据来源：media 用 s.store.ListMediaByUser（仅未软删行，created_at DESC，复用既有
+// 单次全量拉取）；audit log 用 s.store.ListAuditLogs（取较大 limit 拉足够记录再在内存
+// 过滤，避免新增 Store 方法）；相册用 mediaSvc 的 albumStoreProvider.ListAlbums。
+// 需认证，按 user_id 隔离；store 未注入返回 503；mediaSvc 不支持相册时 new_albums_count 为 0。
+//
+// 响应结构：
+//
+//	{
+//	  "week_start": "2026-07-26T10:00:00Z",
+//	  "week_end":   "2026-08-02T10:00:00Z",
+//	  "uploaded_count": N,
+//	  "uploaded_bytes": N,
+//	  "by_day": [{"day":"Mon","count":N}, ...7],
+//	  "most_active_day": {"day":"Mon","count":N} 或 {"day":"","count":0},
+//	  "new_tags_count": N,
+//	  "new_albums_count": N
+//	}
+func (s *Server) handleWeeklySummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 滚动 7 天窗口，UTC 与 growth-report/timeline 等统计端点口径一致。
+	now := time.Now().UTC()
+	weekStart := now.AddDate(0, 0, -7)
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按天分桶：生成 weekStart 当天起共 7 个 UTC 日期桶，标签为星期缩写。
+	weekdayShort := []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+	type dayBucket struct {
+		Day   string `json:"day"`
+		Count int    `json:"count"`
+	}
+	buckets := make([]dayBucket, 7)
+	dayStarts := make([]time.Time, 7)
+	for i := 0; i < 7; i++ {
+		d := weekStart.AddDate(0, 0, i)
+		dayStarts[i] = time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+		buckets[i].Day = weekdayShort[int(dayStarts[i].Weekday())]
+	}
+
+	var uploadedCount, uploadedBytes int64
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		if ca.Before(weekStart) || !ca.Before(now) {
+			continue
+		}
+		uploadedCount++
+		uploadedBytes += m.Size
+		// 落入对应 UTC 日期桶（ca 在 [weekStart, now) 内，故必落在 7 桶之一，
+		// 用线性扫描定位当天 00:00 <= ca < 次日 00:00 的桶）。
+		for i := 0; i < 7; i++ {
+			nextStart := dayStarts[i].AddDate(0, 0, 1)
+			if !ca.Before(dayStarts[i]) && ca.Before(nextStart) {
+				buckets[i].Count++
+				break
+			}
+		}
+	}
+
+	// 最活跃的一天：count 最大者；并列取靠前的桶；全 0 返回 {day:"",count:0}。
+	mostActive := dayBucket{}
+	for i := 0; i < 7; i++ {
+		if buckets[i].Count > mostActive.Count {
+			mostActive = buckets[i]
+		}
+	}
+	if mostActive.Count == 0 {
+		mostActive = dayBucket{Day: "", Count: 0}
+	}
+
+	// 本周新增标签数：audit_log 中 action="tag" 且 created_at 落在窗口内。
+	// 取较大 limit 拉足够记录在内存过滤（ListAuditLogs 无法按时间范围查询）。
+	newTagsCount := 0
+	if logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000); err == nil {
+		for _, a := range logs {
+			if a.Action != "tag" {
+				continue
+			}
+			if ca := a.CreatedAt.UTC(); !ca.Before(weekStart) && ca.Before(now) {
+				newTagsCount++
+			}
+		}
+	} // 查询失败不致命，按 0 计并继续返回其余字段。
+
+	// 本周新增相册数：album.CreatedAt 为 Unix 秒（int64），>= weekStart.Unix() 即本周创建。
+	newAlbumsCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		for _, a := range provider.ListAlbums(uid) {
+			if a.CreatedAt >= weekStart.Unix() {
+				newAlbumsCount++
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"week_start":       weekStart.Format(time.RFC3339),
+		"week_end":         now.Format(time.RFC3339),
+		"uploaded_count":   uploadedCount,
+		"uploaded_bytes":   uploadedBytes,
+		"by_day":           buckets,
+		"most_active_day":  mostActive,
+		"new_tags_count":   newTagsCount,
+		"new_albums_count": newAlbumsCount,
 	})
 }
 

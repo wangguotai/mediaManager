@@ -1383,6 +1383,99 @@ private fun MyTabContent(
             }
         }
 
+        // V9：本周摘要卡片——在连续上传卡片之后展示本周活动概览。
+        // 后端 GET /api/media/weekly-summary 返回 null（未铺量/异常）时静默跳过，
+        // 与其他统计卡片保持一致的 null 容错策略。
+        var weeklySummary by remember { mutableStateOf<MediaService.WeeklySummary?>(null) }
+        LaunchedEffect(Unit) { weeklySummary = MediaService.getWeeklySummary() }
+        weeklySummary?.let { w ->
+            // 本周无任何上传（count=0 且无新标签/相册）时仍展示一周空状态柱状图，
+            // 仅当后端整体返回 null 时才跳过（与上方 null 容错一致）。
+            // 英文星期缩写 → 中文星期。
+            fun weekdayZh(abbr: String): String = when (abbr) {
+                "Mon" -> "周一"; "Tue" -> "周二"; "Wed" -> "周三"; "Thu" -> "周四"
+                "Fri" -> "周五"; "Sat" -> "周六"; "Sun" -> "周日"; else -> abbr
+            }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("本周摘要", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 上传 N 项 · X MB
+                    val mbText = formatBytesToMB(w.uploadedBytes)
+                    Text(
+                        "上传 ${w.uploadedCount} 项 · $mbText",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 最活跃: 周X (N 项) —— mostActiveDay.day 为空串表示本周全 0
+                    val mostActiveText = if (w.mostActiveDay.day.isNotEmpty() && w.mostActiveDay.count > 0) {
+                        "最活跃: ${weekdayZh(w.mostActiveDay.day)} (${w.mostActiveDay.count} 项)"
+                    } else {
+                        "最活跃: 暂无"
+                    }
+                    Text(
+                        mostActiveText,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // 新标签 N 个 · 新相册 N 个
+                    Text(
+                        "新标签 ${w.newTagsCount} 个 · 新相册 ${w.newAlbumsCount} 个",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // 7 天迷你柱状图：每天一根竖条，高度按当日 count / 最大 count 比例。
+                    // 固定顺序保证周一…周日稳定排列；缺失的 byDay 补 0。
+                    val orderedDays = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+                    val countMap = w.byDay.associate { it.day to it.count }
+                    val maxCount = orderedDays.maxOf { countMap[it] ?: 0 }.coerceAtLeast(1)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        orderedDays.forEach { abbr ->
+                            val count = countMap[abbr] ?: 0
+                            // 柱高 6…56dp，count=0 时给最小 6dp 占位以便看到“空柱”。
+                            val barHeight = (6 + (count.toFloat() / maxCount) * 50).toInt().dp
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    if (count > 0) count.toString() else "",
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .width(18.dp)
+                                        .height(barHeight)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(
+                                            if (count > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                        )
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    weekdayZh(abbr).take(1),
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：拍摄日历（按拍摄日期分组的媒体统计，调 timeline-calendar）
         var timelineCalendar by remember { mutableStateOf<List<MediaService.TimelineCalendarDay>?>(null) }
         LaunchedEffect(Unit) { timelineCalendar = MediaService.getTimelineCalendar() }
