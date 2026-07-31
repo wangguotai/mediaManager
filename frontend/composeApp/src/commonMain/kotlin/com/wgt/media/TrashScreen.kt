@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.launch
+import mediamanager.composeapp.generated.resources.*
+import org.jetbrains.compose.resources.painterResource
 
 /**
  * 回收站页面（V7 §1.1 前端）。
@@ -30,6 +32,11 @@ fun TrashScreen(onBack: () -> Unit) {
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var snackbarMsg by remember { mutableStateOf<String?>(null) }
     val snackbar = remember { SnackbarHostState() }
+
+    // V8：搜索过滤 + 排序 state
+    var searchText by remember { mutableStateOf("") }
+    // 排序模式：true=按删除时间(updatedAt) DESC，false=按文件名升序
+    var sortByDeletedTime by remember { mutableStateOf(true) }
 
     // 拉取回收站列表
     LaunchedEffect(Unit) {
@@ -105,32 +112,78 @@ fun TrashScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 else -> {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(8.dp)
-                    ) {
-                        items(items, key = { it.id }) { item ->
-                            val isSelected = item.id in selectedIds
-                            ListItem(
-                                headlineContent = { Text(item.filename) },
-                                supportingContent = {
-                                    Text("${formatSize(item.size)} · ${item.type}")
-                                },
-                                trailingContent = {
-                                    Checkbox(
-                                        checked = isSelected,
-                                        onCheckedChange = { checked ->
-                                            selectedIds = if (checked) {
-                                                selectedIds + item.id
-                                            } else {
-                                                selectedIds - item.id
-                                            }
-                                        }
-                                    )
-                                },
-                                modifier = Modifier.padding(vertical = 2.dp)
+                    // V8：过滤 + 排序后的列表
+                    val filteredItems = remember(items, searchText, sortByDeletedTime) {
+                        val filtered = if (searchText.isBlank()) {
+                            items
+                        } else {
+                            items.filter { it.filename.contains(searchText, ignoreCase = true) }
+                        }
+                        if (sortByDeletedTime) {
+                            filtered.sortedByDescending { it.updatedAt }
+                        } else {
+                            filtered.sortedBy { it.filename }
+                        }
+                    }
+
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // V8：搜索栏 + 排序切换
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = searchText,
+                                onValueChange = { searchText = it },
+                                singleLine = true,
+                                placeholder = { Text("搜索文件名") },
+                                modifier = Modifier.weight(1f)
                             )
-                            HorizontalDivider()
+                            IconButton(onClick = { sortByDeletedTime = !sortByDeletedTime }) {
+                                Icon(
+                                    painterResource(Res.drawable.ic_sort),
+                                    contentDescription = if (sortByDeletedTime) "当前：按删除时间，点击切到文件名" else "当前：按文件名，点击切到删除时间"
+                                )
+                            }
+                        }
+                        // V8：计数提示（搜索时显示过滤后数量）
+                        if (searchText.isNotBlank()) {
+                            Text(
+                                "共 ${items.size} 项（过滤后 ${filteredItems.size} 项）",
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(8.dp)
+                        ) {
+                            items(filteredItems, key = { it.id }) { item ->
+                                val isSelected = item.id in selectedIds
+                                ListItem(
+                                    headlineContent = { Text(item.filename) },
+                                    supportingContent = {
+                                        Text("${formatSize(item.size)} · ${item.type}")
+                                    },
+                                    trailingContent = {
+                                        Checkbox(
+                                            checked = isSelected,
+                                            onCheckedChange = { checked ->
+                                                selectedIds = if (checked) {
+                                                    selectedIds + item.id
+                                                } else {
+                                                    selectedIds - item.id
+                                                }
+                                            }
+                                        )
+                                    },
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+                                HorizontalDivider()
+                            }
                         }
                     }
                     LaunchedEffect(snackbarMsg) {
