@@ -381,6 +381,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/batch-sort", s.handleAlbumBatchSort)
 	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
 	s.mux.HandleFunc("/api/media/tag/batch-by-type", s.handleMediaTagBatchByType)
+	// V22：智能标签推荐——基于现有标签和文件名模式（IMG_/VID_/Screenshot/WeChat/camera），
+	// 推荐用户尚未使用的标签及命中的媒体数量，供前端"建议标签"功能展示。只读端点。
+	s.mux.HandleFunc("/api/media/tag-recommendations", s.handleMediaTagRecommendations)
 	// V8：自动清理重复媒体
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// 重复文件详细报告（仅报告不删除）
@@ -6747,6 +6750,102 @@ func (s *Server) handleMediaAutoTag(w http.ResponseWriter, r *http.Request) {
 		"scanned":      len(mediaList),
 		"tagged_count": tagged,
 		"rules":        len(rules),
+	})
+}
+
+// handleMediaTagRecommendations V22：GET /api/media/tag-recommendations —
+// 基于现有标签和文件名模式推荐新标签。只读端点，不修改任何媒体。
+//
+// 策略：扫描用户所有未删除媒体的 Filename，按常见命名模式（IMG_/VID_/Screenshot/
+// WeChat/camera）映射到中文标签名；若用户已有该标签则跳过。返回命中该模式的媒体数量，
+// 供前端"建议标签"功能展示并让用户一键采纳。
+//
+// 响应:
+//
+//	{
+//	  "recommendations": [
+//	    {"tag_name":"照片","reason":"文件名以 IMG_ 开头","suggested_media_count":12},
+//	    ...
+//	  ],
+//	  "total": 3
+//	}
+func (s *Server) handleMediaTagRecommendations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	// 用户已有标签集合（用于跳过已存在的推荐）。
+	existingTags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	haveTag := make(map[string]bool, len(existingTags))
+	for _, t := range existingTags {
+		haveTag[t] = true
+	}
+	// 拉取所有媒体文件名（ListMediaByUser 仅返回 deleted=0 行，已按 created_at DESC 排序）。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 推荐规则：匹配函数 → (标签名, 推荐理由)。匹配基于不区分大小写的子串/前缀判断。
+	type rule struct {
+		match  func(filename string) bool
+		tag    string
+		reason string
+	}
+	rules := []rule{
+		{func(f string) bool { return strings.HasPrefix(f, "IMG_") }, "照片", "文件名以 IMG_ 开头"},
+		{func(f string) bool { return strings.HasPrefix(f, "VID_") }, "视频", "文件名以 VID_ 开头"},
+		{func(f string) bool { return strings.Contains(f, "Screenshot") }, "截图", "文件名含 Screenshot"},
+		{func(f string) bool { return strings.Contains(f, "WeChat") }, "微信", "文件名含 WeChat"},
+		{func(f string) bool { return strings.Contains(f, "camera") }, "相机", "文件名含 camera"},
+	}
+	// 统计每条规则命中的媒体数量（不区分大小写匹配）。
+	counts := make([]int, len(rules))
+	for _, m := range mediaList {
+		nameUpper := strings.ToUpper(m.Filename)
+		for i, rl := range rules {
+			// 用大写形式做匹配，保证大小写不敏感。
+			if rl.match(nameUpper) {
+				counts[i]++
+			}
+		}
+	}
+	// 组装推荐列表：跳过用户已有标签或零命中的规则。
+	type recommendation struct {
+		TagName             string `json:"tag_name"`
+		Reason              string `json:"reason"`
+		SuggestedMediaCount int    `json:"suggested_media_count"`
+	}
+	recommendations := make([]recommendation, 0, len(rules))
+	for i, rl := range rules {
+		if counts[i] == 0 {
+			continue
+		}
+		if haveTag[rl.tag] {
+			continue
+		}
+		recommendations = append(recommendations, recommendation{
+			TagName:             rl.tag,
+			Reason:              rl.reason,
+			SuggestedMediaCount: counts[i],
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recommendations": recommendations,
+		"total":           len(recommendations),
 	})
 }
 
