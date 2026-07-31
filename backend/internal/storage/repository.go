@@ -747,6 +747,52 @@ func (s *Store) DeleteShareToken(ctx context.Context, token, userID string) erro
 	return nil
 }
 
+// ExtendShareToken 延长分享链接的有效期（防越权：仅 owner 可操作）。
+//
+// 新过期时间计算规则（与任务约定一致）：
+//   - token 且 expires_at=空串（永不过期）：直接返回 nil，无需延长。
+//   - 已过期（expires_at <= now）：新过期 = now + extendDuration。
+//   - 未过期（expires_at > now）：新过期 = 原 expires_at + extendDuration。
+//
+// 按 (token, user_id) 双键过滤，防越权延长他人分享；未命中或不属于该用户
+// 均返回 ErrNotFound（不区分，避免泄露存在性）。userID 为空直接 ErrNotFound。
+// 新过期时间以 RFC3339Nano 落库，与 CreateShareToken/GetShareToken 约定一致。
+func (s *Store) ExtendShareToken(ctx context.Context, token, userID string, extendDuration time.Duration) error {
+	if token == "" || userID == "" {
+		return ErrNotFound
+	}
+	st, err := s.GetShareToken(ctx, token)
+	if err != nil {
+		return err // ErrNotFound 或扫描错误
+	}
+	if st.UserID != userID {
+		return ErrNotFound // 防越权：非 owner 拒绝，不区分以避免泄露
+	}
+	// 永不过期（expires_at 为空串/零值）：无需延长，直接返回。
+	if st.ExpiresAt.IsZero() {
+		return nil
+	}
+	now := time.Now()
+	var newExpires time.Time
+	if !now.After(st.ExpiresAt) {
+		// 未过期：从原 expires_at 累加。
+		newExpires = st.ExpiresAt.Add(extendDuration)
+	} else {
+		// 已过期：从 now 重新计算。
+		newExpires = now.Add(extendDuration)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE share_tokens SET expires_at = ? WHERE token = ? AND user_id = ?`,
+		newExpires.UTC().Format(time.RFC3339Nano), token, userID)
+	if err != nil {
+		return fmt.Errorf("extend share token: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteExpiredShareTokens V7：物理删除所有已过期的分享链接。
 // expires_at 非空且 < now 的行被删除。返回清理条数。
 func (s *Store) DeleteExpiredShareTokens(ctx context.Context) (int, error) {

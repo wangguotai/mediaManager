@@ -223,6 +223,87 @@ func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleShareExtend 处理 POST /api/share/extend?token=xxx，延长分享链接有效期（需认证）。
+//
+// 路由形式：用 query param ?token=xxx（而非路径参数 /api/share/{token}/extend），
+// 因为 /api/share/ 前缀会进入 handleShareAccess 分流；用 query 可在 ServeMux 用
+// /api/share/extend 精确匹配独立处理，避免与 {token} 段冲突。
+//
+// 请求体: {"extend_hours": 24}（可选，默认 24 小时；0 或负数视为默认 24）。
+// 鉴权：/api/share/ 前缀整体豁免 authMiddleware，故用 requireShareAuth 手动校验
+// JWT 获取 userID；仅创建者（owner）可延长自己的分享（repository 层按 token+user_id
+// 双键校验，非 owner 返回 ErrNotFound → 404，不区分不存在与无权以避免泄露）。
+//
+// 返回: {"status":"success","token":...,"new_expires_at":"RFC3339"}。
+func (s *Server) handleShareExtend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	// /api/share/ 前缀整体豁免 authMiddleware，此处手动鉴权。
+	uid := s.requireShareAuth(w, r)
+	if uid == "" && s.authSvc != nil {
+		return // 401 已写入
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "share requires storage backend"})
+		return
+	}
+	// token 必须从 query param 获取（路由设计为 ?token=xxx）。
+	token := r.URL.Query().Get("token")
+	if token == "" || strings.Contains(token, "..") || strings.Contains(token, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "token query param required"})
+		return
+	}
+	// 解析请求体，读取 extend_hours（可空 body）。
+	var req struct {
+		ExtendHours int `json:"extend_hours"`
+	}
+	// body 可选——为空时走默认值。
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+			if !errors.Is(err, io.EOF) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+				return
+			}
+		}
+	}
+	// 默认 24 小时；0 或负数也视为默认（避免误传 0 导致无意义延长）。
+	hours := req.ExtendHours
+	if hours <= 0 {
+		hours = 24
+	}
+	extendDuration := time.Duration(hours) * time.Hour
+
+	if err := s.store.ExtendShareToken(r.Context(), token, uid, extendDuration); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "share not found or not owned"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "extend share token: " + err.Error()})
+		return
+	}
+	// 重新查询以获取最新 expires_at 返回给客户端（UPDATE 后需重读）。
+	st, err := s.store.GetShareToken(r.Context(), token)
+	if err != nil {
+		// 延长成功但读取失败——不回滚，告知已成功但无 new_expires_at。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "success",
+			"token":  token,
+		})
+		return
+	}
+	newExpiresStr := ""
+	if !st.ExpiresAt.IsZero() {
+		newExpiresStr = st.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "success",
+		"token":           token,
+		"new_expires_at":  newExpiresStr,
+	})
+}
+
 // handleShareAccess 是 /api/share/ 前缀的统一入口，按 method + path 分流：
 //   - GET /api/share/{token}              → handleShareView（公开查看元数据）
 //   - GET /api/share/{token}/stream/{id}  → handleShareStream（公开下载字节流）

@@ -303,6 +303,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/share/create", s.handleShareCreate)
 	// V7：列出当前用户的分享链接
 	s.mux.HandleFunc("/api/share/list", s.handleShareList)
+	// 延长分享链接有效期（POST /api/share/extend?token=xxx，需认证）。
+	// 精确匹配优先于 /api/share/ 前缀，故不会被 handleShareAccess 误捕获。
+	s.mux.HandleFunc("/api/share/extend", s.handleShareExtend)
 	s.mux.HandleFunc("/api/share/", s.handleShareAccess)
 
 	// Stats: 缩略图缓存命中率等可观测性指标（JSON，兼容旧前端，保留）。
