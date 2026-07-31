@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import mediamanager.composeapp.generated.resources.Res
@@ -244,6 +245,42 @@ fun SearchBar(
                             )
                         )
                     }
+                }
+            }
+        }
+        // V7：搜索建议——展开态且输入非空时，从后端获取文件名建议。
+        var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+        LaunchedEffect(queryText) {
+            if (expanded && queryText.length >= 2) {
+                delay(SEARCH_DEBOUNCE_MS)
+                suggestions = MediaService.getSearchSuggestions(queryText.trim()) ?: emptyList()
+            } else {
+                suggestions = emptyList()
+            }
+        }
+
+        if (expanded && queryText.isNotEmpty() && suggestions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(suggestions.size) { index ->
+                    val sug = suggestions[index]
+                    AssistChip(
+                        onClick = {
+                            queryText = sug
+                            queryVisible = true
+                            onDebouncedQueryChange(sug)
+                            SearchHistory.add(sug)
+                        },
+                        label = { Text(sug, fontSize = 13.sp) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                        )
+                    )
                 }
             }
         }
