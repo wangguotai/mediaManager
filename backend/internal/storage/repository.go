@@ -1508,3 +1508,65 @@ ORDER BY date DESC`, userID)
 	}
 	return out, nil
 }
+
+// ===== 媒体热力图（按天统计，一年 GitHub 风格贡献图） =====
+
+// MediaHeatmap 按天统计当前用户未软删媒体的发布数量，供前端渲染一年（12 个月 ×
+// 每月天数）的 GitHub 贡献图风格热力图。
+//
+// 日期取值优先 taken_at（EXIF/客户端声明的拍摄时间，INTEGER 毫秒时间戳）：taken_at>0
+// 时用 strftime('%Y-%m-%d', taken_at/1000, 'unixepoch') 取 UTC 日期；taken_at=0（未知）
+// 时回退到 created_at（上传时间，TEXT RFC3339），用 substr(created_at,1,10) 取前 10 字符
+// 即 YYYY-MM-DD。这样无 EXIF 的媒体也能按上传日归入热力图，避免大片空白。
+//
+// COALESCE 实现：taken_at=0 时 strftime 返回空串（SQLite 对 0/1000=0 epoch → 1970-01-01
+// 实际非空，故显式用 CASE 判定 taken_at>0 选择来源），保证回退语义清晰。
+//
+// SQL：
+//
+//	SELECT CASE WHEN taken_at > 0
+//	  THEN strftime('%Y-%m-%d', taken_at/1000, 'unixepoch')
+//	  ELSE substr(created_at,1,10) END AS date,
+//	  COUNT(*) AS count
+//	FROM "media"
+//	WHERE user_id = ? AND deleted = 0
+//	GROUP BY date
+//	ORDER BY date
+//
+// 返回 [{date:"2026-07-30", count:3}, ...]，按 date 升序。仅返回有媒体的日期，
+// 调用方/前端据此填充一年网格的空白格为 0。空 userID 直接报错（按用户隔离）。
+func (s *Store) MediaHeatmap(ctx context.Context, userID string) ([]map[string]any, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT CASE WHEN taken_at > 0
+  THEN strftime('%Y-%m-%d', taken_at/1000, 'unixepoch')
+  ELSE substr(created_at,1,10) END AS date,
+       COUNT(*) AS count
+FROM "media"
+WHERE user_id = ? AND deleted = 0
+GROUP BY date
+ORDER BY date`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("media heatmap: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var date string
+		var count int
+		if err := rows.Scan(&date, &count); err != nil {
+			return nil, fmt.Errorf("scan media heatmap: %w", err)
+		}
+		out = append(out, map[string]any{
+			"date":  date,
+			"count": count,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows media heatmap: %w", err)
+	}
+	return out, nil
+}

@@ -170,6 +170,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
 	// V9：按月统计媒体数量（所有媒体 created_at 的 YYYY-MM 分布，不限时间范围）。
 	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
+	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
+	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V9：批量获取下载 URL 列表（返回每个媒体的直接下载链接，前端可"复制链接"或批量下载，
@@ -3590,6 +3592,53 @@ func (s *Server) handleMediaCountByMonth(w http.ResponseWriter, r *http.Request)
 		"months":       months,
 		"total_months": len(months),
 		"total_media":  totalMedia,
+	})
+}
+
+// handleMediaHeatmap GET /api/media/media-heatmap — 按天统计媒体数量热力图。
+//
+// 返回一年（12 个月 × 每月天数）的 GitHub 贡献图风格数据。日期优先取 taken_at
+// （拍摄时间），缺失（=0）回退到 created_at（上传时间），保证无 EXIF 的媒体也计入。
+// 仅返回有媒体的日期，前端将空白日补 0。
+//
+// 响应结构：
+//
+//	{
+//	  "days": [{"date":"2026-07-30","count":3}, ...], // 按 date 升序
+//	  "total_days":  N,  // 有媒体的不同日期数
+//	  "total_media": M   // 所有日期 count 合计（= 未软删媒体总数）
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaHeatmap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	days, err := s.store.MediaHeatmap(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var totalMedia int
+	for _, d := range days {
+		if c, ok := d["count"].(int); ok {
+			totalMedia += c
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days":        days,
+		"total_days":  len(days),
+		"total_media": totalMedia,
 	})
 }
 

@@ -2116,6 +2116,37 @@ object MediaService {
     /** V8：拍摄日历单日（按拍摄日期分组：日期 + 条数 + 类型）。 */
     data class TimelineCalendarDay(val date: String, val count: Int, val type: String)
 
+    /**
+     * V9：GET /api/media/media-heatmap — 拍摄热力图数据。
+     *
+     * 后端返回 `{days: [{date, count}], total_days, total_media}`，
+     * 本方法仅取 `days` 数组解析为 [HeatmapDay]。`date` 形如 "2026-07-31"，
+     * `count` 为当天拍摄数量。失败返回 null，调用方按 null 展示空状态。
+     */
+    suspend fun getMediaHeatmap(): List<HeatmapDay>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-heatmap") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["days"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    HeatmapDay(
+                        date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaHeatmap FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V9：拍摄热力图单日（日期 + 当天拍摄数量）。 */
+    data class HeatmapDay(val date: String, val count: Int)
+
     /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
     suspend fun orphanCheck(): OrphanCheckResult? {
         return try {
