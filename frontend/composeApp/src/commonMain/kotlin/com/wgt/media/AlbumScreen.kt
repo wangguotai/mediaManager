@@ -1098,6 +1098,96 @@ private fun AlbumDetailPage(
                             Text("🎯", fontSize = 20.sp)
                         }
                     }
+                    // V12：给相册打标签按钮 🏷️ — 弹出对话框输入标签名，
+                    // 调 batch-tag-album 给整个相册所有媒体批量打标签，成功后 Snackbar 提示数量。
+                    var showTagAlbumDialog by remember { mutableStateOf(false) }
+                    var tagAlbumLoading by remember { mutableStateOf(false) }
+                    val tagAlbumScope = rememberCoroutineScope()
+                    IconButton(
+                        onClick = { showTagAlbumDialog = true },
+                        enabled = !tagAlbumLoading
+                    ) {
+                        if (tagAlbumLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("🏷️", fontSize = 20.sp)
+                        }
+                    }
+                    if (showTagAlbumDialog) {
+                        var tagName by remember { mutableStateOf("") }
+                        var tagError by remember { mutableStateOf<String?>(null) }
+                        AlertDialog(
+                            onDismissRequest = {
+                                if (!tagAlbumLoading) { showTagAlbumDialog = false; tagError = null }
+                            },
+                            title = { Text("给相册打标签") },
+                            text = {
+                                Column {
+                                    Text(
+                                        "将为相册 \"$albumName\" 内所有媒体添加该标签。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = tagName,
+                                        onValueChange = { tagName = it; tagError = null },
+                                        label = { Text("标签名") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    tagError?.let { e ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(e, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    enabled = !tagAlbumLoading && tagName.trim().isNotEmpty(),
+                                    onClick = {
+                                        val trimmed = tagName.trim()
+                                        if (trimmed.isEmpty()) {
+                                            tagError = "标签名不能为空"
+                                            return@TextButton
+                                        }
+                                        if (tagAlbumLoading) return@TextButton
+                                        tagAlbumLoading = true
+                                        tagAlbumScope.launch {
+                                            val count = MediaService.batchTagAlbum(albumId, trimmed)
+                                            tagAlbumLoading = false
+                                            if (count != null) {
+                                                showTagAlbumDialog = false
+                                                viewModel.showErrorMessage("已为 $count 项媒体添加标签")
+                                                // 打标签不改变相册封面/内容，无需 loadAlbums/loadAlbumDetail；
+                                                // 但刷新详情可让后续操作看到最新标签态（保守刷新）。
+                                            } else {
+                                                tagError = "打标签失败，请稍后重试"
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    if (tagAlbumLoading) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    } else {
+                                        Text("确定")
+                                    }
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(
+                                    enabled = !tagAlbumLoading,
+                                    onClick = { showTagAlbumDialog = false; tagError = null }
+                                ) { Text("取消") }
+                            }
+                        )
+                    }
                     IconButton(
                         onClick = {
                             if (shareToggleLoading) return@IconButton

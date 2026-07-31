@@ -929,6 +929,40 @@ object MediaService {
     )
 
     /**
+     * 给整个相册的所有媒体批量打标签。
+     *
+     * POST /api/media/tag/batch-tag-album
+     * 请求体：{album_id, tag_name}
+     * 响应：{tagged_count: Int}（被成功打标签的媒体数量）
+     *
+     * @param albumId 相册 ID
+     * @param tagName 标签名
+     * @return 被打标签的媒体数量；HTTP 非 200 或异常时返回 null（不抛）
+     */
+    suspend fun batchTagAlbum(albumId: String, tagName: String): Int? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/batch-tag-album") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("tag_name", tagName)
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tagged_count"]?.jsonPrimitive?.intOrNull
+            } else {
+                logger.info("MediaService", "batchTagAlbum status=${response.status} albumId=$albumId tag=$tagName")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchTagAlbum FAILED albumId=$albumId tag=$tagName: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 删除相册。
      *
      * DELETE /api/media/album/{id}
