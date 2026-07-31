@@ -868,8 +868,9 @@ private fun MyTabContent(
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
+                        val cumStr = points.last().cumMB.toString()
                         Text(
-                            "累计 ${"%.1f".format(points.last().cumMB)} MB",
+                            "累计 ${cumStr.take(cumStr.indexOf('.') + 2)} MB",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
