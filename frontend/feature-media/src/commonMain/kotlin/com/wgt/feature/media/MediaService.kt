@@ -1396,6 +1396,22 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/tag/search?tag=xxx — 按标签搜索 media_id 列表。 */
+    suspend fun searchByTag(tag: String): List<String>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/search?tag=${tag.encodeURLQueryComponent()}") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["media_ids"]?.jsonArray?.map { it.jsonPrimitive.content }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "searchByTag FAILED: ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/tag/all — 列出所有标签。 */
     suspend fun listAllTags(): List<String>? {
         return try {

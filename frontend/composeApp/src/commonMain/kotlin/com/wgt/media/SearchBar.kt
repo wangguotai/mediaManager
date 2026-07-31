@@ -248,6 +248,37 @@ fun SearchBar(
                 }
             }
         }
+        // V8：标签快捷区——展开态且输入为空时显示用户所有标签，点击触发标签搜索
+        if (expanded && queryText.isEmpty()) {
+            var allTags by remember { mutableStateOf<List<String>>(emptyList()) }
+            LaunchedEffect(expanded) {
+                if (expanded) allTags = MediaService.listAllTags() ?: emptyList()
+            }
+            if (allTags.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(allTags.size) { index ->
+                        val tag = allTags[index]
+                        AssistChip(
+                            onClick = {
+                                queryText = "#$tag"
+                                queryVisible = true
+                                onDebouncedQueryChange("#$tag")
+                            },
+                            label = { Text("#$tag", fontSize = 13.sp) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                            )
+                        )
+                    }
+                }
+            }
+        }
         // V7：搜索建议——展开态且输入非空时，从后端获取文件名建议。
         var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
         LaunchedEffect(queryText) {
