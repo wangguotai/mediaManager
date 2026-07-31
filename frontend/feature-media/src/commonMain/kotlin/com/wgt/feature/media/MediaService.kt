@@ -2045,6 +2045,43 @@ object MediaService {
     }
 
     /**
+     * V8：GET /api/media/video-info/{id} — 视频时长/分辨率/编码（ffprobe 解析结果）。
+     *
+     * 后端 [getMediaInfo] 的 /api/media/info/{id} 响应不含时长（Media 模型无该字段），
+     * 视频时长由独立的 ffprobe 端点提供。前端在 [MediaInfoDialog] 对 type==VIDEO
+     * 的媒体并发请求本方法，展示"时长：xxx 秒"。非视频或解析失败返回 null，UI 静默跳过。
+     *
+     * 后端 [service.VideoInfoResponse] 结构：`{duration_seconds,width,height,codec,container}`。
+     */
+    suspend fun getVideoInfo(mediaId: String): VideoInfo? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/video-info/$mediaId")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                VideoInfo(
+                    durationSeconds = o["duration_seconds"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    width = o["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                    height = o["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                    codec = o["codec"]?.jsonPrimitive?.contentOrNull ?: "",
+                    container = o["container"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getVideoInfo FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V8：视频 ffprobe 解析结果（时长/分辨率/编码）。 */
+    data class VideoInfo(
+        val durationSeconds: Double,
+        val width: Int,
+        val height: Int,
+        val codec: String,
+        val container: String
+    )
+
+    /**
      * V8：POST /api/media/batch-rename — 批量重命名，返回结果。
      */
      suspend fun batchRename(

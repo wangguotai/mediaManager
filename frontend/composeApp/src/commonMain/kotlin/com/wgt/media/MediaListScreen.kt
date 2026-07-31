@@ -4091,7 +4091,15 @@ fun MediaInfoDialog(
     onDismiss: () -> Unit
 ) {
     var info by remember { mutableStateOf<MediaService.MediaInfo?>(null) }
+    // V8：视频时长由独立 ffprobe 端点提供（/api/media/info/{id} 不含 duration），
+    // 仅对 VIDEO 类型并发拉取，失败/非视频时为 null，时长行静默跳过。
+    var videoInfo by remember { mutableStateOf<MediaService.VideoInfo?>(null) }
     LaunchedEffect(mediaId) { info = MediaService.getMediaInfo(mediaId) }
+    LaunchedEffect(mediaId, info?.type) {
+        if (info?.type?.equals("VIDEO", ignoreCase = true) == true) {
+            videoInfo = MediaService.getVideoInfo(mediaId)
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -4101,7 +4109,10 @@ fun MediaInfoDialog(
                 Column {
                     InfoRow("文件名", i.filename)
                     InfoRow("类型", i.type)
-                    InfoRow("尺寸", "${i.width} × ${i.height}")
+                    // 分辨率：width/height 都 >0 时展示 WxH，否则缺省（部分网盘图可能无尺寸）。
+                    if (i.width > 0 && i.height > 0) {
+                        InfoRow("分辨率", "${i.width} × ${i.height}")
+                    }
                     val sizeStr = if (i.sizeMB >= 1) {
                         val s = i.sizeMB.toString(); s.take(s.indexOf('.') + 3) + " MB"
                     } else {
@@ -4109,6 +4120,12 @@ fun MediaInfoDialog(
                     }
                     InfoRow("大小", sizeStr)
                     InfoRow("MIME", i.mime)
+                    // 时长：仅视频且 ffprobe 解析成功（duration>0）展示，单位秒，保留 1 位小数。
+                    videoInfo?.let { v ->
+                        if (v.durationSeconds > 0) {
+                            InfoRow("时长", "${v.durationSeconds.toInt()}.${((v.durationSeconds * 10) % 10).toInt()} 秒")
+                        }
+                    }
                     if (i.sha256.isNotEmpty()) {
                         InfoRow("SHA256", i.sha256.take(16) + "…")
                     }
