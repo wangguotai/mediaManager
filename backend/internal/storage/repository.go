@@ -171,11 +171,11 @@ func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
 		m.UpdatedAt = now
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO "media" (id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO "media" (id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at, orientation)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.UserID, m.Filename, m.Type, m.Size, m.Mime, m.Width, m.Height,
 		timeToVal(m.CreatedAt), timeToVal(m.UpdatedAt), m.SHA256, boolToInt(m.Deleted),
-		m.ClientID, m.TakenAt)
+		m.ClientID, m.TakenAt, m.Orientation)
 	if err != nil {
 		return fmt.Errorf("insert media: %w", err)
 	}
@@ -184,7 +184,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
 // mediaColumns 是 media 表的完整列清单（含同步扩展列 client_id/taken_at），
 // 供各 SELECT 复用，避免增删列时多处漂移。
-const mediaColumns = `id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at`
+const mediaColumns = `id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at, orientation`
 
 // GetMedia 按 id 取单行 media（含已软删除行，便于审计/恢复）。未命中返回 ErrNotFound。
 func (s *Store) GetMedia(ctx context.Context, id string) (*Media, error) {
@@ -304,6 +304,31 @@ WHERE id = ?`,
 		timeToVal(m.UpdatedAt), m.SHA256, m.ID)
 	if err != nil {
 		return fmt.Errorf("update media: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetMediaRotation 设置单行 media 的旋转角度（orientation 列），且仅当其 user_id
+// 等于 userID 时才生效。供 POST /api/media/rotate 使用。
+//
+// rotation 应为 0/90/180/270 之一（EXIF orientation 语义）；本方法不做值域校验，
+// 由调用方（handler）负责，保持 storage 层只管持久化。
+//
+// 防横向越权：WHERE 含 user_id 双键，与 MarkDeletedForUser/UndeleteMediaForUser 同策略，
+// 非己有或不存在均返回 ErrNotFound（不区分，避免泄露 media_id 是否存在）。
+// 同时刷新 updated_at，使旋转变更进入增量同步流。userID 为空直接 ErrNotFound。
+func (s *Store) SetMediaRotation(ctx context.Context, userID, mediaID string, rotation int) error {
+	if userID == "" || mediaID == "" {
+		return ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE "media" SET orientation = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+		rotation, timeToVal(time.Now()), mediaID, userID)
+	if err != nil {
+		return fmt.Errorf("set media rotation: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
@@ -502,7 +527,7 @@ func (s *Store) BatchRestoreMedia(ctx context.Context, userID string, mediaIDs [
 	placeholders = placeholders[:len(placeholders)-1] // 去掉末尾多余的 ","
 	args := make([]any, 0, len(mediaIDs)+2)
 	args = append(args, timeToVal(time.Now())) // updated_at = ?
-	for _, id := range mediaIDs { // id IN (...) — 逐个追加，避免 []string→[]any 的 ... 展开类型不符
+	for _, id := range mediaIDs {              // id IN (...) — 逐个追加，避免 []string→[]any 的 ... 展开类型不符
 		args = append(args, id)
 	}
 	args = append(args, userID) // AND user_id = ?
@@ -1292,7 +1317,7 @@ func scanMedia(scan scanFunc) (*Media, error) {
 	var deleted int
 	if err := scan(&m.ID, &m.UserID, &m.Filename, &m.Type, &m.Size, &m.Mime,
 		&m.Width, &m.Height, &createdAt, &updatedAt, &m.SHA256, &deleted,
-		&m.ClientID, &m.TakenAt); err != nil {
+		&m.ClientID, &m.TakenAt, &m.Orientation); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

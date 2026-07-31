@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS "media" (
     deleted    INTEGER NOT NULL DEFAULT 0,
     client_id  TEXT NOT NULL DEFAULT '',
     taken_at   INTEGER NOT NULL DEFAULT 0,
+    orientation INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
 
@@ -155,6 +156,7 @@ var columnAdditions = []struct {
 }{
 	{"client_id", `ALTER TABLE "media" ADD COLUMN client_id TEXT NOT NULL DEFAULT ''`},
 	{"taken_at", `ALTER TABLE "media" ADD COLUMN taken_at INTEGER NOT NULL DEFAULT 0`},
+	{"orientation", `ALTER TABLE "media" ADD COLUMN orientation INTEGER NOT NULL DEFAULT 0`},
 }
 
 // Store 封装一个 SQLite 连接与其上的 CRUD 能力。

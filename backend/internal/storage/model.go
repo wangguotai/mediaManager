@@ -22,20 +22,21 @@ type User struct {
 //   - TakenAt：内容实际拍摄时间（EXIF/客户端声明的毫秒时间戳）；0 表未知，
 //     同步端点在 changes 中原样回传，列表排序不依赖它（沿用 updated_at）。
 type Media struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	Filename  string    `json:"filename"`
-	Type      string    `json:"type"` // "IMAGE" | "VIDEO" | "LIVE_PHOTO"
-	Size      int64     `json:"size"`
-	Mime      string    `json:"mime"`
-	Width     int32     `json:"width"`
-	Height    int32     `json:"height"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	SHA256    string    `json:"sha256"`
-	Deleted   bool      `json:"deleted"`
-	ClientID  string    `json:"client_id"`
-	TakenAt   int64     `json:"taken_at"`
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	Filename    string    `json:"filename"`
+	Type        string    `json:"type"` // "IMAGE" | "VIDEO" | "LIVE_PHOTO"
+	Size        int64     `json:"size"`
+	Mime        string    `json:"mime"`
+	Width       int32     `json:"width"`
+	Height      int32     `json:"height"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	SHA256      string    `json:"sha256"`
+	Deleted     bool      `json:"deleted"`
+	ClientID    string    `json:"client_id"`
+	TakenAt     int64     `json:"taken_at"`
+	Orientation int       `json:"orientation"` // 旋转角度：0/90/180/270，持久化到 media.orientation 列
 }
 
 // Device 对应 device 表的一行。记录已接入的客户端设备信息。
@@ -58,10 +59,10 @@ type Device struct {
 type ShareToken struct {
 	Token        string    `json:"token"`
 	UserID       string    `json:"user_id"`
-	MediaIDs     string    `json:"media_ids"`      // JSON 数组字符串
-	ExpiresAt    time.Time `json:"expires_at"`     // 零值 = 永不过期
-	PasswordHash string    `json:"-"`              // 不序列化，避免泄露
-	HasPassword  bool      `json:"has_password"`   // 派生字段：PasswordHash != ""（供公开响应）
+	MediaIDs     string    `json:"media_ids"`    // JSON 数组字符串
+	ExpiresAt    time.Time `json:"expires_at"`   // 零值 = 永不过期
+	PasswordHash string    `json:"-"`            // 不序列化，避免泄露
+	HasPassword  bool      `json:"has_password"` // 派生字段：PasswordHash != ""（供公开响应）
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -75,9 +76,9 @@ type ShareToken struct {
 //   - SharedWithUserID: 被共享的目标用户。
 //   - SharedAt        : 共享发起时间，供列表排序与审计。
 type AlbumShare struct {
-	ID              string    `json:"id"`
-	AlbumID         string    `json:"album_id"`
-	OwnerUserID     string    `json:"owner_user_id"`
-	SharedWithUserID string   `json:"shared_with_user_id"`
-	SharedAt        time.Time `json:"shared_at"`
+	ID               string    `json:"id"`
+	AlbumID          string    `json:"album_id"`
+	OwnerUserID      string    `json:"owner_user_id"`
+	SharedWithUserID string    `json:"shared_with_user_id"`
+	SharedAt         time.Time `json:"shared_at"`
 }

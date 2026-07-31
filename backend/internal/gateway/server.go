@@ -5,11 +5,11 @@
 package gateway
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,9 +64,9 @@ type Server struct {
 
 	// healthz 降频缓存：/healthz 每次请求都跑 countAllUserMedia 全量目录扫描会造成
 	// IO 放大，且该端点无认证可被外部刷。缓存统计结果（30s TTL），过期才重扫。
-	mediaCountMu        sync.Mutex
-	mediaCountCache     int
-	mediaCountCachedAt  time.Time
+	mediaCountMu       sync.Mutex
+	mediaCountCache    int
+	mediaCountCachedAt time.Time
 
 	// loginLimiter 是 /api/auth/login 的 IP+username 滑动窗口限速器（PRD §2.7）。
 	// 防暴力撞库：每 (ip,username) 每分钟最多 loginRateMax 次，超限返回 429。
@@ -147,6 +147,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
+	// V9：媒体旋转（更新 EXIF orientation / 旋转标记）
+	s.mux.HandleFunc("/api/media/rotate", s.handleMediaRotate)
 	// V7：最近活动（合并最近上传/收藏/分享）
 	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
 	// V7：存储增长趋势（按月份累计）
@@ -654,7 +656,7 @@ func sortMediaList(list []*gen.MediaMetadata, sortBy string) {
 		sort.Slice(list, func(i, j int) bool {
 			return list[i].Filename < list[j].Filename // 文件名 A-Z
 		})
-	// "date" 或其他：保持默认 created_at 降序，不额外排序。
+		// "date" 或其他：保持默认 created_at 降序，不额外排序。
 	}
 }
 
@@ -1811,9 +1813,9 @@ func (s *Server) handleAlbumUnshare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":             "success",
-		"album_id":           req.AlbumID,
-		"shared_with_user":   req.SharedWithUserID,
+		"status":           "success",
+		"album_id":         req.AlbumID,
+		"shared_with_user": req.SharedWithUserID,
 	})
 }
 
@@ -2364,10 +2366,10 @@ func (s *Server) handleMediaStorageStats(w http.ResponseWriter, r *http.Request)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"by_type":     typeStats,
-		"total_count":  totalCount,
-		"total_bytes":  totalBytes,
-		"total_mb":     float64(totalBytes) / (1024 * 1024),
-		"user_id":      uid,
+		"total_count": totalCount,
+		"total_bytes": totalBytes,
+		"total_mb":    float64(totalBytes) / (1024 * 1024),
+		"user_id":     uid,
 	})
 }
 
@@ -2527,18 +2529,18 @@ func (s *Server) handleMediaSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_count":  totalCount,
-		"total_bytes":  totalBytes,
-		"total_mb":     float64(totalBytes) / (1024 * 1024),
-		"image_count":  imageCount,
-		"video_count":  videoCount,
-		"live_count":   liveCount,
+		"total_count":    totalCount,
+		"total_bytes":    totalBytes,
+		"total_mb":       float64(totalBytes) / (1024 * 1024),
+		"image_count":    imageCount,
+		"video_count":    videoCount,
+		"live_count":     liveCount,
 		"favorite_count": favCount,
 		"album_count":    albumCount,
 		"share_count":    shareCount,
-		"earliest_ts":  earliest,
-		"latest_ts":    latest,
-		"user_id":      uid,
+		"earliest_ts":    earliest,
+		"latest_ts":      latest,
+		"user_id":        uid,
 	})
 }
 
@@ -2566,8 +2568,8 @@ func (s *Server) handleMediaTimeline(w http.ResponseWriter, r *http.Request) {
 
 	// 按月份分组
 	type monthGroup struct {
-		Month string        `json:"month"`
-		Count int           `json:"count"`
+		Month string           `json:"month"`
+		Count int              `json:"count"`
 		Items []map[string]any `json:"items"`
 	}
 	groups := make(map[string]*monthGroup)
@@ -2603,7 +2605,7 @@ func (s *Server) handleMediaTimeline(w http.ResponseWriter, r *http.Request) {
 		result = append(result, groups[mo])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"groups":      result,
+		"groups":       result,
 		"total_months": len(result),
 	})
 }
@@ -2830,7 +2832,7 @@ func (s *Server) handleMediaRecentActivity(w http.ResponseWriter, r *http.Reques
 	}
 
 	type activity struct {
-		Type      string `json:"type"`       // upload / favorite / share
+		Type      string `json:"type"` // upload / favorite / share
 		MediaID   string `json:"media_id"`
 		Filename  string `json:"filename"`
 		Timestamp int64  `json:"timestamp"`
@@ -2912,10 +2914,10 @@ func (s *Server) handleMediaStorageTrend(w http.ResponseWriter, r *http.Request)
 	}
 
 	type monthTrend struct {
-		Month     string `json:"month"`
-		AddedCount int   `json:"added_count"`
-		AddedBytes int64 `json:"added_bytes"`
-		CumBytes   int64 `json:"cum_bytes"`
+		Month      string `json:"month"`
+		AddedCount int    `json:"added_count"`
+		AddedBytes int64  `json:"added_bytes"`
+		CumBytes   int64  `json:"cum_bytes"`
 	}
 	byMonth := make(map[string]*monthTrend)
 	var order []string
@@ -2998,6 +3000,62 @@ func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"media_id": req.MediaID,
 		"filename": req.Filename,
+	})
+}
+
+// handleMediaRotate 处理 POST /api/media/rotate，
+// 更新媒体旋转标记（media.orientation 列，EXIF orientation 语义：0/90/180/270）。
+// 仅持久化旋转角度，不改动底层图像文件——前端按 orientation 渲染显示旋转。
+func (s *Server) handleMediaRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaID  string `json:"media_id"`
+		Rotation int    `json:"rotation"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.MediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+		return
+	}
+	// 校验旋转角度为合法值（0/90/180/270），非法直接 400。
+	switch req.Rotation {
+	case 0, 90, 180, 270:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rotation must be one of 0/90/180/270"})
+		return
+	}
+
+	// SetMediaRotation 内部按 (id, user_id) 双键校验归属，防横向越权；
+	// 非己有或不存在均返回 ErrNotFound（不区分，避免泄露）。
+	if err := s.store.SetMediaRotation(r.Context(), uid, req.MediaID, req.Rotation); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	_ = s.store.AddAuditLog(r.Context(), uid, "rotate", req.MediaID, fmt.Sprintf("%d degrees", req.Rotation))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"rotation": req.Rotation,
 	})
 }
 
@@ -3656,8 +3714,8 @@ func (s *Server) handleMediaFileTypes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"types":  stats,
-		"total":  len(stats),
+		"types": stats,
+		"total": len(stats),
 	})
 }
 
@@ -3846,9 +3904,9 @@ func (s *Server) handleMediaTagMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"source_tag":    req.SourceTag,
-		"target_tag":    req.TargetTag,
-		"merged_count":  count,
+		"source_tag":   req.SourceTag,
+		"target_tag":   req.TargetTag,
+		"merged_count": count,
 	})
 }
 
@@ -3909,10 +3967,10 @@ func (s *Server) handleMediaByResolution(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	resolutions := map[string]int{
-		"4K":     0,
-		"2K":     0,
-		"1080p":  0,
-		"720p":   0,
+		"4K":    0,
+		"2K":    0,
+		"1080p": 0,
+		"720p":  0,
 		"其他":    0,
 	}
 	for _, m := range mediaList {
@@ -3965,16 +4023,16 @@ func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) 
 	}
 	const mb = 1024 * 1024
 	ranges := map[string]int{
-		"<1MB":      0,
-		"1-10MB":    0,
-		"10-100MB":  0,
-		">100MB":    0,
+		"<1MB":     0,
+		"1-10MB":   0,
+		"10-100MB": 0,
+		">100MB":   0,
 	}
 	var rangeBytes = map[string]int64{
-		"<1MB":      0,
-		"1-10MB":    0,
-		"10-100MB":  0,
-		">100MB":    0,
+		"<1MB":     0,
+		"1-10MB":   0,
+		"10-100MB": 0,
+		">100MB":   0,
 	}
 	for _, m := range mediaList {
 		if m.Deleted {
@@ -4042,11 +4100,11 @@ func (s *Server) handleMediaSyncStatus(w http.ResponseWriter, r *http.Request) {
 		lastUpdateStr = lastUpdate.Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_media":      totalCount,
-		"deleted_media":    deletedCount,
-		"total_bytes":      totalBytes,
-		"last_update":      lastUpdateStr,
-		"server_time":      time.Now().Format(time.RFC3339),
+		"total_media":   totalCount,
+		"deleted_media": deletedCount,
+		"total_bytes":   totalBytes,
+		"last_update":   lastUpdateStr,
+		"server_time":   time.Now().Format(time.RFC3339),
 	})
 }
 
@@ -4070,11 +4128,11 @@ func (s *Server) handleAlbumAllSummary(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(albums))
 	for _, a := range albums {
 		items = append(items, map[string]any{
-			"id":            a.ID,
-			"name":          a.Name,
-			"media_count":   len(a.MediaIDs),
+			"id":             a.ID,
+			"name":           a.Name,
+			"media_count":    len(a.MediaIDs),
 			"cover_media_id": a.CoverMediaID,
-			"created_at":    a.CreatedAt,
+			"created_at":     a.CreatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4255,10 +4313,10 @@ func (s *Server) handleAlbumClone(w http.ResponseWriter, r *http.Request) {
 		_ = provider.SetAlbumCover(uid, newAlbum.ID, source.CoverMediaID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "success",
-		"new_album_id":    newAlbum.ID,
-		"new_album_name":  name,
-		"copied_count":    added,
+		"status":         "success",
+		"new_album_id":   newAlbum.ID,
+		"new_album_name": name,
+		"copied_count":   added,
 	})
 }
 
@@ -4515,7 +4573,7 @@ func (s *Server) handleMediaBatchShare(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.AddAuditLog(r.Context(), uid, "share", "", fmt.Sprintf("batch created %d share links", len(links)))
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"links":        links,
+		"links":         links,
 		"created_count": len(links),
 	})
 }
@@ -5169,10 +5227,10 @@ func (s *Server) handleMediaDuplicateCleanup(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         "success",
-		"groups_found":   len(bySHA),
-		"deleted_count":  len(deleted),
-		"deleted":        deleted,
+		"status":        "success",
+		"groups_found":  len(bySHA),
+		"deleted_count": len(deleted),
+		"deleted":       deleted,
 	})
 }
 
