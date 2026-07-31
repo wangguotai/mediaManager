@@ -475,6 +475,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album-suggestions", s.handleAlbumSuggestions)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
+	// 媒体完整性报告（合并 orphan-check + error-check + duplicate-report 为一份完整报告，
+	// 含完整度评分 0-100 与 A/B/C/D 等级）。一次 ListMediaByUser 拉全量 + 单次磁盘扫描，
+	// 同时检测 DB 有记录磁盘缺失（orphan）、size<=0 或大小不符（error）、SHA256 重复（duplicate）。
+	s.mux.HandleFunc("/api/media/media-integrity-report", s.handleMediaIntegrityReport)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -11384,6 +11388,224 @@ func (s *Server) handleStorageRecommendations(w http.ResponseWriter, r *http.Req
 		"total_reclaimable_bytes": totalReclaimable,
 		"recommendation_count":    recommendationCount,
 		"user_id":                 uid,
+	})
+}
+
+// handleMediaIntegrityReport GET /api/media/media-integrity-report — 媒体完整性报告。
+//
+// 合并 orphan-check + error-check + duplicate-report 为一份完整报告，并据此计算
+// 完整度评分（0-100）与等级（A/B/C/D）。一次 ListMediaByUser 拉全量未软删媒体，
+// 单次遍历同时完成三类检查，避免三个端点各自重扫磁盘的 IO 放大：
+//
+//   - orphans  : DB 有记录但磁盘文件缺失（uploads 目录下 m.ID.* glob 无命中）
+//   - errors   : size<=0（zero_size）或磁盘文件大小与 DB 记录不符（size_mismatch）。
+//                注意：磁盘缺失属于 orphan 范畴，不重复计入 error，error 专注 数据损坏。
+//   - duplicates: 按 SHA256 分组，组内 count>1 的部分全部计入重复。
+//
+// 评分模型：score = 100 - (orphan_rate*40 + error_rate*40 + duplicate_rate*20)
+//   - orphan_rate    = orphan_count / total_media
+//   - error_rate     = error_count / total_media
+//   - duplicate_rate = duplicate_count / total_media（同 SHA256 超出 1 份的份数）
+// 各扣分项钳制到权重上限，score 钳制到 [0,100]。空库视为满分 100。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。uploads 目录未配置时 orphan/error
+// 的磁盘检查跳过（仅能统计 zero_size 类 error），并在响应中标注 disk_check=false。
+//
+// 响应：
+//
+//	{
+//	  "integrity_score": N,            // 0-100
+//	  "grade": "A"|"B"|"C"|"D",        // >=85 A / 70-84 B / 50-69 C / <50 D
+//	  "orphans":   {"count","samples":[{media_id,filename}]},
+//	  "errors":    {"count","samples":[{media_id,filename,error_type,db_size,disk_size?}]},
+//	  "duplicates":{"groups","count","reclaimable_bytes"},
+//	  "total_media": N,
+//	  "disk_check": bool,
+//	  "user_id": "..."
+//	}
+func (s *Server) handleMediaIntegrityReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	uploadsDir := s.userUploadsDir(uid)
+	diskCheck := uploadsDir != ""
+
+	totalMedia := len(mediaList) // ListMediaByUser 已过滤 deleted，等价于未软删总数
+
+	// 检查三类异常（单次遍历）。
+	//   orphan  : 磁盘文件缺失（glob 无命中，或命中但 stat 失败）。
+	//   error   : size<=0（zero_size）或 大小不符（size_mismatch）。
+	//             磁盘缺失归 orphan，不重复计入 error。
+	//   dup     : SHA256 非空时按 sha 分组，组内 count>1 的重复份数累加（count-1/组）。
+	type orphanSample struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+	}
+	type errorSample struct {
+		MediaID   string `json:"media_id"`
+		Filename  string `json:"filename"`
+		ErrorType string `json:"error_type"`
+		DBSize    int64  `json:"db_size"`
+		DiskSize  int64  `json:"disk_size,omitempty"`
+	}
+	shaGroups := make(map[string][]*storage.Media)
+	var orphanSamples []orphanSample
+	var errorSamples []errorSample
+	orphanCount := 0
+	errorCount := 0
+	// samples 上限，避免响应过大（与 orphan-check 的 500 / error-check 的 100 保持一致量级）
+	const sampleLimit = 10
+
+	for _, m := range mediaList {
+		if m.SHA256 != "" {
+			shaGroups[m.SHA256] = append(shaGroups[m.SHA256], m)
+		}
+
+		// (a) zero_size：DB 记录本身即为损坏数据，无需磁盘检查即可判定。
+		if m.Size <= 0 {
+			errorCount++
+			if len(errorSamples) < sampleLimit {
+				errorSamples = append(errorSamples, errorSample{
+					MediaID:   m.ID,
+					Filename:  m.Filename,
+					ErrorType: "zero_size",
+					DBSize:    m.Size,
+				})
+			}
+			continue
+		}
+
+		// 未配置 uploads 目录：跳过 orphan/size_mismatch 的磁盘检查。
+		if !diskCheck {
+			continue
+		}
+
+		// 以 media ID 为前缀 glob 定位磁盘文件（扩展名未知，与 orphan-check/error-check 一致）
+		files, _ := filepath.Glob(filepath.Join(uploadsDir, m.ID+".*"))
+		if len(files) == 0 {
+			// (b) 磁盘文件缺失 → orphan
+			orphanCount++
+			if len(orphanSamples) < sampleLimit {
+				orphanSamples = append(orphanSamples, orphanSample{
+					MediaID:  m.ID,
+					Filename: m.Filename,
+				})
+			}
+			continue
+		}
+		info, statErr := os.Stat(files[0])
+		if statErr != nil {
+			// glob 命中但 stat 失败（并发删除等罕见竞态），视为缺失 → orphan
+			orphanCount++
+			if len(orphanSamples) < sampleLimit {
+				orphanSamples = append(orphanSamples, orphanSample{
+					MediaID:  m.ID,
+					Filename: m.Filename,
+				})
+			}
+			continue
+		}
+		if info.Size() != m.Size {
+			// (c) 磁盘大小 != DB 记录 → error（size_mismatch）
+			errorCount++
+			if len(errorSamples) < sampleLimit {
+				errorSamples = append(errorSamples, errorSample{
+					MediaID:   m.ID,
+					Filename:  m.Filename,
+					ErrorType: "size_mismatch",
+					DBSize:    m.Size,
+					DiskSize:  info.Size(),
+				})
+			}
+		}
+	}
+
+	// 重复文件：每个 SHA256 组 count>1，超出 1 份计入重复；reclaimable = (count-1)*size。
+	duplicateGroups := 0
+	duplicateCount := 0
+	var duplicateReclaimable int64
+	for _, items := range shaGroups {
+		if len(items) < 2 {
+			continue
+		}
+		duplicateGroups++
+		duplicateCount += len(items) - 1
+		// 同一 SHA256 内容相同，文件 size 应一致，取首份 size 作为每文件字节数。
+		duplicateReclaimable += int64(len(items)-1) * items[0].Size
+	}
+
+	// 评分：100 - (orphan_rate*40 + error_rate*40 + duplicate_rate*20)
+	// totalMedia<=0（空库）时各率为 0，视为满分。各扣分项钳制到权重上限，score 钳制 [0,100]。
+	orphanRate := 0.0
+	errorRate := 0.0
+	duplicateRate := 0.0
+	if totalMedia > 0 {
+		orphanRate = float64(orphanCount) / float64(totalMedia)
+		errorRate = float64(errorCount) / float64(totalMedia)
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+	}
+	orphanPenalty := min01(orphanRate) * 40
+	errorPenalty := min01(errorRate) * 40
+	dupPenalty := min01(duplicateRate) * 20
+	score := 100.0 - (orphanPenalty + errorPenalty + dupPenalty)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	// 等级映射：A(>=85) / B(70-84) / C(50-69) / D(<50)。
+	grade := "D"
+	switch {
+	case score >= 85:
+		grade = "A"
+	case score >= 70:
+		grade = "B"
+	case score >= 50:
+		grade = "C"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"integrity_score": int(score),
+		"grade":           grade,
+		"orphans": map[string]any{
+			"count":   orphanCount,
+			"samples": orphanSamples,
+		},
+		"errors": map[string]any{
+			"count":   errorCount,
+			"samples": errorSamples,
+		},
+		"duplicates": map[string]any{
+			"groups":            duplicateGroups,
+			"count":             duplicateCount,
+			"reclaimable_bytes": duplicateReclaimable,
+		},
+		"total_media": totalMedia,
+		"disk_check":  diskCheck,
+		"rates": map[string]any{
+			"orphan":     round2(orphanRate),
+			"error":      round2(errorRate),
+			"duplicate":  round2(duplicateRate),
+		},
+		"user_id": uid,
 	})
 }
 
