@@ -157,6 +157,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/recent-activity", s.handleMediaRecentActivity)
 	// V7：存储增长趋势（按月份累计）
 	s.mux.HandleFunc("/api/media/storage-trend", s.handleMediaStorageTrend)
+	// V10：扩展存储趋势（按月 count+bytes+环比 mom_growth+同比 yoy_growth）
+	s.mux.HandleFunc("/api/media/storage-trend-extended", s.handleStorageTrendExtended)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
@@ -3980,6 +3982,141 @@ func (s *Server) handleMediaStorageTrend(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"trends": trends,
 	})
+}
+
+// handleStorageTrendExtended GET /api/media/storage-trend-extended — 扩展存储趋势。
+//
+// 按月返回最近 N 个月（默认 12，?months= 指定）的 count + bytes，并额外计算：
+//   - mom_growth：环比增长率 = (本月 - 上月) / 上月 * 100，基于 count；
+//     上月为 0 或不存在 → null（避免除零，与 growth-report 同口径）。
+//   - yoy_growth：同比增长率 = (本月 - 去年同月) / 去年同月 * 100，基于 count；
+//     去年同月为 0 或不存在 → null。仅当窗口覆盖到去年同月时才返回非 null。
+//
+// 口径与 storage-trend / media-count-by-month 一致：基于 created_at 的 YYYY-MM
+// （UTC）分桶，仅未软删行（Deleted=false），复用 ListMediaByUser 单次全量拉取，
+// 不新增 Store 方法。返回的 months 按 YYYY-MM 字典序升序（= 时间序）。
+//
+// 响应结构：
+//
+//	{
+//	  "months": [
+//	    {"month":"2025-01","count":N,"bytes":N,"mom_growth":12.34|null,"yoy_growth":-5.6|null},
+//	    ...
+//	  ],
+//	  "total": N  // months 数组长度
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageTrendExtended(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// ?months= 默认 12，范围 [1,120]。
+	monthsParam := 12
+	if v := r.URL.Query().Get("months"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			monthsParam = n
+			if monthsParam > 120 {
+				monthsParam = 120
+			}
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 1) 按 YYYY-MM 分桶累计 count+bytes（仅未软删），与 media-count-by-month 同口径。
+	type bucket struct {
+		Count int
+		Bytes int64
+	}
+	buckets := make(map[string]*bucket)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		month := m.CreatedAt.UTC().Format("2006-01")
+		b := buckets[month]
+		if b == nil {
+			b = &bucket{}
+			buckets[month] = b
+		}
+		b.Count++
+		b.Bytes += m.Size
+	}
+
+	// 2) 生成最近 monthsParam 个月的 YYYY-MM 列表（含当前月），升序。
+	//    统一用 UTC，与时间边界类端点（growth-report / forecast）一致。
+	now := time.Now().UTC()
+	monthKeys := make([]string, 0, monthsParam)
+	for i := monthsParam - 1; i >= 0; i-- {
+		t := now.AddDate(0, -i, 0)
+		monthKeys = append(monthKeys, t.Format("2006-01"))
+	}
+
+	// 3) 组装结果，计算环比 / 同比。
+	type monthRow struct {
+		Month    string  `json:"month"`
+		Count    int     `json:"count"`
+		Bytes    int64   `json:"bytes"`
+		MoMGrowth *float64 `json:"mom_growth"`
+		YoYGrowth *float64 `json:"yoy_growth"`
+	}
+	rows := make([]monthRow, 0, len(monthKeys))
+	for _, mk := range monthKeys {
+		b := buckets[mk] // 可能为 nil（该月无上传）
+		row := monthRow{Month: mk}
+		if b != nil {
+			row.Count = b.Count
+			row.Bytes = b.Bytes
+		}
+		// 环比：上月。月份键已是升序连续序列，用 monthKeys 索引回看。
+		if idx := indexOf(monthKeys, mk); idx > 0 {
+			prev := buckets[monthKeys[idx-1]]
+			if prev != nil && prev.Count > 0 {
+				g := float64(row.Count-prev.Count) / float64(prev.Count) * 100
+				row.MoMGrowth = &g
+			}
+		}
+		// 同比：去年同月。解析 mk 为 time 再 AddDate(0,-12,0) 得到去年同月键。
+		if t, err := time.Parse("2006-01", mk); err == nil {
+			yoyKey := t.AddDate(0, -12, 0).Format("2006-01")
+			if yoy := buckets[yoyKey]; yoy != nil && yoy.Count > 0 {
+				g := float64(row.Count-yoy.Count) / float64(yoy.Count) * 100
+				row.YoYGrowth = &g
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"months": rows,
+		"total":  len(rows),
+	})
+}
+
+// indexOf 返回 s 中 v 的首次出现索引，未找到返回 -1。
+func indexOf(s []string, v string) int {
+	for i, x := range s {
+		if x == v {
+			return i
+		}
+	}
+	return -1
 }
 
 // handleMediaRename 处理 POST /api/media/rename，
