@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -480,6 +481,10 @@ func (s *Server) registerRoutes() {
 	// 从 audit_log 中提取 action="search" 记录统计；无 search 埋点时分析
 	// detail 字段作为回退。无任何搜索记录时返回空列表。
 	s.mux.HandleFunc("/api/media/media-query-stats", s.handleMediaQueryStats)
+	// 会话统计：基于 audit_log 按时间间隔（>30min 算新会话）切分会话，
+	// 统计平均操作数/平均时长/最常见首操作/最长会话，分析用户使用习惯。
+	// 数据来源：s.store.ListAuditLogs 取最近 500 条（created_at DESC），内存中翻转后按时间正序切分。
+	s.mux.HandleFunc("/api/media/media-session-stats", s.handleMediaSessionStats)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V18：批量合并多个相册到第一个（album_ids[0] 为目标，其余为源）
@@ -11357,6 +11362,136 @@ func (s *Server) handleAuditLogByMedia(w http.ResponseWriter, r *http.Request) {
 		"logs":  out,
 		"total": len(out),
 	})
+}
+
+// handleMediaSessionStats GET /api/media/media-session-stats
+// 基于审计日志分析用户使用习惯：将最近 500 条 audit_log 按时间间隔切分成"会话"
+// （相邻两条记录 created_at 间隔 >30 分钟视为新会话），统计：
+//   - total_sessions                  会话总数
+//   - avg_actions                     每次会话平均操作数（保留 2 位小数）
+//   - avg_duration                    每次会话平均时长（分钟，保留 2 位小数）
+//   - common_first_action             会话开始第一个操作中出现频率最高的 action
+//   - longest_session{actions,duration} 操作最多的会话（actions=操作数, duration=时长分钟）
+//
+// 数据来源：s.store.ListAuditLogs(ctx, uid, 500)，返回按 created_at DESC（最近在前）。
+// 这里先翻转为时间正序（最早在前），再按 30min 间隔切分会话，保证"第一个操作"语义正确。
+// 会话时长 = 会话最后一条记录 created_at - 第一条记录 created_at（单条记录的会话时长为 0）。
+// 无审计记录时返回 total_sessions=0，其余字段为零值/空串，longest_session 为 nil。
+func (s *Server) handleMediaSessionStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	const recent = 500
+	const sessionGap = 30 * time.Minute
+
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, recent)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 无数据：返回零值结构，前端据此渲染"暂无数据"。
+	if len(logs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"total_sessions":        0,
+			"avg_actions":           0,
+			"avg_duration":          0,
+			"common_first_action":   "",
+			"longest_session":       nil,
+			"analyzed_record_count": 0,
+		})
+		return
+	}
+
+	// ListAuditLogs 返回 created_at DESC（最近在前），翻转成时间正序（最早在前），
+	// 以便按时间顺序切分会话并正确识别每个会话的"第一个操作"。
+	asc := make([]*storage.AuditLog, len(logs))
+	for i, a := range logs {
+		asc[len(logs)-1-i] = a
+	}
+
+	// 按 30min 间隔切分会话：相邻记录时间差 > sessionGap 开新会话。
+	type session struct {
+		firstAction string
+		actionCount int
+		start       time.Time
+		end         time.Time
+	}
+	var sessions []session
+	var cur *session
+	for _, a := range asc {
+		if cur == nil || a.CreatedAt.Sub(cur.end) > sessionGap {
+			sessions = append(sessions, session{
+				firstAction: a.Action,
+				actionCount: 1,
+				start:       a.CreatedAt,
+				end:         a.CreatedAt,
+			})
+			cur = &sessions[len(sessions)-1]
+		} else {
+			cur.actionCount++
+			cur.end = a.CreatedAt
+		}
+	}
+
+	// 聚合统计。
+	totalSessions := len(sessions)
+	totalActions := 0
+	totalDurationMin := 0.0
+	firstActionCount := map[string]int{}
+	longestIdx := 0
+	for i, sess := range sessions {
+		totalActions += sess.actionCount
+		totalDurationMin += sess.end.Sub(sess.start).Minutes()
+		firstActionCount[sess.firstAction]++
+		if sess.actionCount > sessions[longestIdx].actionCount {
+			longestIdx = i
+		}
+	}
+	avgActions := float64(totalActions) / float64(totalSessions)
+	avgDuration := totalDurationMin / float64(totalSessions)
+
+	// 最常见首操作：按出现次数降序，平局取字典序最小（确定性输出）。
+	commonFirst := ""
+	if len(firstActionCount) > 0 {
+		bestCount := -1
+		for act, cnt := range firstActionCount {
+			if cnt > bestCount || (cnt == bestCount && act < commonFirst) {
+				commonFirst = act
+				bestCount = cnt
+			}
+		}
+	}
+
+	longest := sessions[longestIdx]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_sessions":      totalSessions,
+		"avg_actions":         roundTo2(avgActions),
+		"avg_duration":        roundTo2(avgDuration),
+		"common_first_action": commonFirst,
+		"longest_session": map[string]any{
+			"actions":  longest.actionCount,
+			"duration": roundTo2(longest.end.Sub(longest.start).Minutes()),
+		},
+		"analyzed_record_count": len(logs),
+	})
+}
+
+// roundTo2 四舍五入到 2 位小数。用于 avg_actions/avg_duration 等百分比式统计的稳定输出，
+// 避免 JSON 里出现 2.3333333333333335 这类长尾浮点。负数（本场景不会出现）同样按此处理。
+func roundTo2(f float64) float64 {
+	return math.Round(f*100) / 100
 }
 
 // handleMediaActivityFeed GET /api/media/activity-feed?limit=20
