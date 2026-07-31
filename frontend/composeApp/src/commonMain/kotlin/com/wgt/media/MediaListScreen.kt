@@ -2545,6 +2545,10 @@ private fun MyTabContent(
                             // 导出反馈消息 + 剪贴板管理器
                             var exportMessage by remember { mutableStateOf<String?>(null) }
                             var isExporting by remember { mutableStateOf(false) }
+                            // V9：标签共现对（调 GET /api/media/tag-co-occurrence），用于"常一起出现"区。
+                            // 后端只返回 count>=2 的对，且未按 count 排序，此处取 top 5 前先倒序。
+                            var tagPairs by remember { mutableStateOf<List<MediaService.TagPair>?>(null) }
+                            LaunchedEffect(Unit) { tagPairs = MediaService.getTagCoOccurrence() }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -2587,6 +2591,43 @@ private fun MyTabContent(
                                                             deleteTagTarget = s.tagName
                                                         }
                                                     ) { Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+                                                }
+                                            }
+                                            // V9：标签关联区——"常一起出现"，展示共现次数最多的 5 对标签。
+                                            // 数据来自 getTagCoOccurrence()；null（请求失败/未铺量）或空则静默跳过。
+                                            tagPairs?.let { pairs ->
+                                                if (pairs.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text(
+                                                        "常一起出现",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    pairs.sortedByDescending { it.count }.take(5).forEach { p ->
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                "#${p.tagA} + #${p.tagB}",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                "${p.count} 次",
+                                                                fontSize = 12.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

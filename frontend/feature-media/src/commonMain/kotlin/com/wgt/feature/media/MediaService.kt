@@ -2620,6 +2620,44 @@ object MediaService {
     data class FileTypeStat(val mime: String, val count: Int, val bytes: Long)
 
     /**
+     * V9：GET /api/media/tag-co-occurrence — 标签共现分析。
+     *
+     * 对每对标签 (A, B) 统计同时拥有这两个标签的媒体数量，后端只返回 count >= 2
+     * 的标签对。响应: `{pairs: [{tag_a, tag_b, count}], total_pairs}`。
+     *
+     * 注意：后端 pairs 按标签遍历顺序（i<j）输出，**未按 count 排序**，故前端取
+     * top-N 前需自行按 count 倒序（见 [MediaListScreen] 标签管理面板的 `sortedByDescending`）。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（无 serialization 编译器插件依赖）。
+     *
+     * @return 标签共现对列表（原序）；HTTP 非 200 或网络异常返回 null（调用方按空态跳过）。
+     */
+    suspend fun getTagCoOccurrence(): List<TagPair>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-co-occurrence") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["pairs"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagPair(
+                        tagA = o["tag_a"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        tagB = o["tag_b"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagCoOccurrence FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V9：标签共现对 */
+    data class TagPair(val tagA: String, val tagB: String, val count: Int)
+
+    /**
      * V8：GET /api/media/mime-type-stats — 按 MIME 类型详细统计。
      *
      * 与 [getFileTypes]（`/api/media/file-types`）的区别：本端点额外提供
