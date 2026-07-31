@@ -266,6 +266,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/move-media", s.handleAlbumMoveMedia)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
+	// V8：合并两个相册
+	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -4087,6 +4089,69 @@ func (s *Server) handleMediaAutoTag(w http.ResponseWriter, r *http.Request) {
 		"scanned":      len(mediaList),
 		"tagged_count": tagged,
 		"rules":        len(rules),
+	})
+}
+
+// handleAlbumMerge V8：POST /api/media/album/merge — 合并两个相册。
+// 请求体: { source_album_id, target_album_id }
+// 把 source 的所有 media 移到 target，然后删除 source 相册。
+func (s *Server) handleAlbumMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		SourceAlbumID string `json:"source_album_id"`
+		TargetAlbumID string `json:"target_album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.SourceAlbumID == "" || req.TargetAlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source_album_id and target_album_id required"})
+		return
+	}
+	if req.SourceAlbumID == req.TargetAlbumID {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source and target must be different"})
+		return
+	}
+	source := provider.GetAlbum(uid, req.SourceAlbumID)
+	if source == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "source album not found"})
+		return
+	}
+	if provider.GetAlbum(uid, req.TargetAlbumID) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "target album not found"})
+		return
+	}
+	// 把 source 的 media 全部加到 target（幂等）
+	added, addErr := provider.BatchAddToAlbum(uid, req.TargetAlbumID, source.MediaIDs)
+	if addErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": addErr.Error()})
+		return
+	}
+	// 删除 source 相册
+	_ = provider.DeleteAlbum(uid, req.SourceAlbumID)
+	// 级联清理 source 的共享记录
+	if s.store != nil {
+		_ = s.store.DeleteAlbumShare(r.Context(), req.SourceAlbumID, uid, "")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "success",
+		"merged_count":    added,
+		"target_album_id": req.TargetAlbumID,
+		"deleted_source":  req.SourceAlbumID,
 	})
 }
 
