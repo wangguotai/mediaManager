@@ -7,7 +7,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.launch
 import mediamanager.composeapp.generated.resources.*
@@ -114,11 +116,26 @@ fun TrashScreen(onBack: () -> Unit) {
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when {
                 loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                items.isEmpty() -> Text(
-                    "回收站为空",
-                    modifier = Modifier.align(Alignment.Center),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                items.isEmpty() -> Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("🗑️", fontSize = 64.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        "回收站是空的",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "删除的媒体会出现在这里，可在此恢复",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
                 else -> {
                     // V8：过滤 + 排序后的列表
                     val filteredItems = remember(items, searchText, sortByDeletedTime) {

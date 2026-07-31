@@ -342,22 +342,18 @@ private fun AlbumListPage(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Icon(
-                                painterResource(Res.drawable.ic_photo),
-                                contentDescription = null,
-                                modifier = Modifier.size(72.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            )
+                            Text("📷", fontSize = 64.sp)
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                if (selectedTab == 1) "暂无共享相册" else "暂无相册",
+                                if (selectedTab == 1) "还没有共享相册" else "还没有相册",
                                 style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 if (selectedTab == 1) "其他用户共享给你的相册会显示在这里"
-                                else "点击右下角按钮创建相册",
+                                else "点击右下角创建你的第一个相册",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             )

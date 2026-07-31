@@ -3861,20 +3861,20 @@ private fun EmptyStateView(tabIndex: Int) {
         label = "emptyPulseScale"
     )
 
-    val iconRes = when (tabIndex) {
-        0 -> Res.drawable.ic_photo
-        1 -> Res.drawable.ic_cloud_upload
-        else -> Res.drawable.ic_cloud
+    val emoji = when (tabIndex) {
+        0 -> "📸"
+        1 -> "📤"
+        else -> "☁️"
     }
     val title = when (tabIndex) {
-        0 -> "相册是空的"
-        1 -> "还没有上传过图片"
-        else -> "网盘暂无图片"
+        0 -> "还没有媒体文件"
+        1 -> "还没有上传过媒体"
+        else -> "网盘还没有媒体"
     }
     val subtitle = when (tabIndex) {
-        0 -> "下拉刷新从图库加载"
-        1 -> "点击右下角按钮上传"
-        else -> "下拉刷新重试"
+        0 -> "下拉刷新从图库加载照片和视频"
+        1 -> "上传你的第一张照片或视频来开始"
+        else -> "下拉刷新从网盘加载"
     }
 
     Column(
@@ -3882,32 +3882,16 @@ private fun EmptyStateView(tabIndex: Int) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // 背景圆圈 + 图标，脉冲动画驱动缩放。
-        Box(
-            modifier = Modifier.size(96.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                        CircleShape
-                    )
+        // 大 emoji 主视觉 + 脉冲动画，比静态图标更友好亲切。
+        Text(
+            emoji,
+            fontSize = 64.sp,
+            modifier = Modifier.graphicsLayer(
+                scaleX = pulseScale,
+                scaleY = pulseScale,
+                alpha = iconAlpha
             )
-            Icon(
-                painter = painterResource(iconRes),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(52.dp)
-                    .graphicsLayer(
-                        scaleX = pulseScale,
-                        scaleY = pulseScale,
-                        alpha = iconAlpha
-                    ),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-            )
-        }
+        )
         Spacer(modifier = Modifier.height(20.dp))
         Text(
             title,
