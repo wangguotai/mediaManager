@@ -2130,6 +2130,59 @@ private fun MyTabContent(
             }
         }
 
+        // V9：收藏时间线——最近收藏的 5 项（调 GET /api/media/favorite-timeline）
+        var favoriteTimeline by remember { mutableStateOf<List<MediaService.FavoriteTimelineItem>?>(null) }
+        LaunchedEffect(Unit) { favoriteTimeline = MediaService.getFavoriteTimeline(5) }
+        favoriteTimeline?.let { timeline ->
+            if (timeline.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "收藏时间线",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        timeline.take(5).forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    if (item.type.equals("video", ignoreCase = true)) "🎬" else "📷",
+                                    fontSize = 16.sp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    item.filename.ifEmpty { item.mediaId },
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (item.favoritedAt.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        item.favoritedAt.take(10),
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：最近活动卡片
         var activities by remember { mutableStateOf<List<MediaService.ActivityInfo>?>(null) }
         LaunchedEffect(Unit) { activities = MediaService.getRecentActivity() }

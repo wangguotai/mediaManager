@@ -2990,6 +2990,51 @@ object MediaService {
     data class FileTypeStat(val mime: String, val count: Int, val bytes: Long)
 
     /**
+     * GET /api/media/favorite-timeline — 收藏时间线，按收藏时间倒序。
+     *
+     * 后端返回 `{favorites:[{media_id,filename,type,favorited_at}],total}`，其中
+     * `favorited_at` 为 RFC3339 字符串（time.Time 序列化）。前端取前 [limit] 条
+     * 供"我的"Tab 的"收藏时间线"卡片渲染最近收藏的媒体列表。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization 编译器插件）。
+     * 失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip 静默跳过卡片，不崩溃"我的"Tab。
+     *
+     * @param limit 取前 N 条（透传 query param，后端上限 200，<=0 回退默认 20）
+     * @return 收藏时间线条目列表（已按 favorited_at 倒序）；失败返回 null
+     */
+    suspend fun getFavoriteTimeline(limit: Int = 10): List<FavoriteTimelineItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/favorite-timeline") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["favorites"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    FavoriteTimelineItem(
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        filename = o["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        favoritedAt = o["favorited_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getFavoriteTimeline FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 收藏时间线条目（[getFavoriteTimeline] 返回项）。 */
+    data class FavoriteTimelineItem(
+        val mediaId: String,
+        val filename: String,
+        val type: String,
+        val favoritedAt: String
+    )
+
+    /**
      * V9：GET /api/media/tag-co-occurrence — 标签共现分析。
      *
      * 对每对标签 (A, B) 统计同时拥有这两个标签的媒体数量，后端只返回 count >= 2
