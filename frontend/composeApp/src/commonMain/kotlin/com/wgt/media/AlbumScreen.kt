@@ -204,9 +204,23 @@ private fun AlbumListPage(
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
     val batchScope = rememberCoroutineScope()
 
-    // 排序后的相册列表
-    val sortedAlbums = remember(albums, sortByName) {
-        if (sortByName) albums.sortedBy { it.name.lowercase() } else albums
+    // V9：置顶相册 id 集合（从后端 /api/media/album/pinned 拉取）。空集合表示无置顶
+    // 或拉取失败（UI 降级为不显示置顶标记）。长按菜单据此显示"置顶/取消置顶"。
+    var pinnedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 长按动作菜单：非空时弹出操作对话框（置顶/取消置顶/删除）
+    var pendingActionAlbum by remember { mutableStateOf<MediaService.Album?>(null) }
+    val actionScope = rememberCoroutineScope()
+
+    // 进入列表页时拉取置顶相册 id 集合，用于渲染 📌 标记与决定长按菜单动作。
+    LaunchedEffect(Unit) {
+        pinnedIds = MediaService.getPinnedAlbumIds()
+    }
+
+    // 排序后的相册列表：置顶相册 (pinnedIds 命中) 优先排前，再按名称/时间原序。
+    val sortedAlbums = remember(albums, sortByName, pinnedIds) {
+        val base = if (sortByName) albums.sortedBy { it.name.lowercase() } else albums
+        // 稳定分区：置顶在前，保持区内原序
+        base.partition { it.id in pinnedIds }.let { (pinned, rest) -> pinned + rest }
     }
 
     Scaffold(
@@ -342,6 +356,7 @@ private fun AlbumListPage(
                             ) { album ->
                                 AlbumCard(
                                     album = album,
+                                    isPinned = album.id in pinnedIds,
                                     onClick = {
                                         if (selectionMode) {
                                             if (selectedAlbumIds.contains(album.id)) {
@@ -354,13 +369,16 @@ private fun AlbumListPage(
                                         }
                                     },
                                 onLongClick = {
-                                    if (!selectionMode) {
-                                        selectionMode = true
-                                    }
-                                    if (selectedAlbumIds.contains(album.id)) {
-                                        selectedAlbumIds.remove(album.id)
+                                    if (selectionMode) {
+                                        // 批量选择途中：保持原行为，切中选
+                                        if (selectedAlbumIds.contains(album.id)) {
+                                            selectedAlbumIds.remove(album.id)
+                                        } else {
+                                            selectedAlbumIds.add(album.id)
+                                        }
                                     } else {
-                                        selectedAlbumIds.add(album.id)
+                                        // 非批量模式：弹动作菜单（置顶/取消置顶/删除/批量选择）
+                                        pendingActionAlbum = album
                                     }
                                 },
                             )
@@ -397,15 +415,81 @@ private fun AlbumListPage(
             }
         )
     }
+
+    // V9：长按弹动作对话框 —— 置顶 / 取消置顶 / 删除 / 批量选择
+    pendingActionAlbum?.let { album ->
+        val isPinnedNow = album.id in pinnedIds
+        AlertDialog(
+            onDismissRequest = { pendingActionAlbum = null },
+            title = { Text("相册操作", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text("「${album.name}」", fontWeight = FontWeight.Medium)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // 置顶 / 取消置顶
+                    TextButton(
+                        onClick = {
+                            pendingActionAlbum = null
+                            actionScope.launch {
+                                val ok = if (isPinnedNow) {
+                                    MediaService.unpinAlbum(album.id)
+                                } else {
+                                    MediaService.pinAlbum(album.id)
+                                }
+                                if (ok) {
+                                    // 刷新置顶 id 集合；列表按 pinnedIds 重排，📌 标记随之变化
+                                    pinnedIds = MediaService.getPinnedAlbumIds()
+                                    viewModel.showErrorMessage(
+                                        if (isPinnedNow) "已取消置顶" else "已置顶"
+                                    )
+                                } else {
+                                    viewModel.showErrorMessage("操作失败")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (isPinnedNow) "📌 取消置顶" else "📌 置顶相册")
+                    }
+                    // 删除单个相册（复用 pendingDeleteAlbum 流程）
+                    TextButton(
+                        onClick = {
+                            pendingActionAlbum = null
+                            onAlbumLongClick(album) // 触发上层 pendingDeleteAlbum 确认对话框
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("删除相册", color = MaterialTheme.colorScheme.error)
+                    }
+                    // 进入批量选择模式
+                    TextButton(
+                        onClick = {
+                            pendingActionAlbum = null
+                            selectionMode = true
+                            selectedAlbumIds.add(album.id)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("多选...")
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingActionAlbum = null }) { Text("关闭") }
+            }
+        )
+    }
 }
 
 /**
- * 相册卡片：封面缩略图 + 名称 + 数量徽标。
+ * 相册卡片：封面缩略图 + 名称 + 数量徽标。已置顶时右上角显示 📌 标记。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun AlbumCard(
     album: MediaService.Album,
+    isPinned: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -490,6 +574,21 @@ private fun AlbumCard(
                         modifier = Modifier.size(48.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                     )
+                }
+            }
+
+            // V9：置顶标记 —— 右上角 📌，仅当相册已置顶时显示。
+            // 背景半透明圆角胶囊，保证在任意封面上可见。
+            if (isPinned) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text("📌", fontSize = 13.sp)
                 }
             }
 

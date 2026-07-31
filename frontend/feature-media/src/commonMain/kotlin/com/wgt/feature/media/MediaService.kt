@@ -1341,6 +1341,78 @@ object MediaService {
     }
 
     /**
+     * V9：POST /api/media/album/pin — 置顶相册。
+     *
+     * 请求体 `{ "album_id": "x" }`，后端成功返回 200 `{ "status":"success","album_id":"x" }`。
+     * 失败（网络异常/非 200）返回 false。
+     *
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun pinAlbum(albumId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/pin") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("album_id", albumId) })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "pinAlbum id=$albumId status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "pinAlbum FAILED id=$albumId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V9：POST /api/media/album/unpin — 取消相册置顶。
+     *
+     * 请求体 `{ "album_id": "x" }`，后端成功返回 200 `{ "status":"success","album_id":"x" }`。
+     * 失败（网络异常/非 200）返回 false。
+     *
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun unpinAlbum(albumId: String): Boolean {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/unpin") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("album_id", albumId) })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "unpinAlbum id=$albumId status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "unpinAlbum FAILED id=$albumId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V9：GET /api/media/album/pinned — 获取当前用户置顶的相册 id 集合。
+     *
+     * 后端返回 `{ "albums":[...], "count":N }`。此处仅取每个相册的 `id`，用于
+     * UI 判定渲染置顶标记 / 决定长按菜单的可执行动作（置顶或取消置顶）。
+     * 失败时返回空集合，UI 降级为不显示置顶状态。
+     */
+    suspend fun getPinnedAlbumIds(): Set<String> {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/pinned")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val arr = obj["albums"]?.jsonArray ?: JsonArray(emptyList())
+                arr.mapNotNull { item ->
+                    val o = item.jsonObject
+                    o["id"]?.jsonPrimitive?.contentOrNull
+                }.toSet()
+            } else {
+                emptySet()
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getPinnedAlbumIds FAILED: ${e::class.simpleName} ${e.message}")
+            emptySet()
+        }
+    }
+
+    /**
      * V8：POST /api/media/tag/add — 给媒体打标签。
      */
     suspend fun addMediaTag(mediaId: String, tagName: String): Boolean {
