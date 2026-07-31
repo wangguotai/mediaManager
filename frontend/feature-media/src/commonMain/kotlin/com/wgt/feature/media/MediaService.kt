@@ -1419,6 +1419,37 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/sync-status — 同步状态摘要。 */
+    suspend fun getSyncStatus(): SyncStatus? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/sync-status") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                SyncStatus(
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    deletedMedia = o["deleted_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    lastUpdate = o["last_update"]?.jsonPrimitive?.contentOrNull ?: "",
+                    serverTime = o["server_time"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getSyncStatus FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：同步状态 */
+    data class SyncStatus(
+        val totalMedia: Int,
+        val deletedMedia: Int,
+        val totalBytes: Long,
+        val lastUpdate: String,
+        val serverTime: String
+    )
+
     /** V8：GET /api/media/by-size-range — 按大小范围统计。 */
     suspend fun getBySizeRange(): SizeRangeStat? {
         return try {

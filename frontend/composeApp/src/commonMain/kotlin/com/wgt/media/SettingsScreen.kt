@@ -742,6 +742,32 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V8：同步状态
+            var syncStatus by remember { mutableStateOf<MediaService.SyncStatus?>(null) }
+            LaunchedEffect(Unit) { syncStatus = MediaService.getSyncStatus() }
+            syncStatus?.let { ss ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("媒体同步", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${ss.totalMedia} 项 (回收站 ${ss.deletedMedia})",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                if (ss.lastUpdate.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("最后更新", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(ss.lastUpdate.take(19), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    }
+                }
+            }
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }
