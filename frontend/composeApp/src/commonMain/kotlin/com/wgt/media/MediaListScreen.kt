@@ -1538,7 +1538,7 @@ private fun MyTabContent(
                                 )
                                 Spacer(modifier = Modifier.height(1.dp))
                                 for (day in 1..daysInMonth) {
-                                    val dateStr = "2026-%02d-%02d".format(monthNum, day)
+                                    val dateStr = "2026-${monthNum.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}"
                                     val count = countByDate[dateStr] ?: 0
                                     // 颜色深浅：0=灰，1-3=浅，4+=深。
                                     val cellColor = when {
