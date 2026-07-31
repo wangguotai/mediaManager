@@ -173,6 +173,10 @@ func (s *Server) registerRoutes() {
 	// 相关媒体推荐：基于相同标签 / 相同类型 + 相近日期（±7天）推荐，去掉自身去重。
 	// path prefix 匹配 /api/media/media-related/{id}?limit=10
 	s.mux.HandleFunc("/api/media/media-related/", s.handleMediaRelated)
+	// path prefix 匹配 /api/media/media-similar/{id}?limit=10 — 基于"看起来像"
+	// （size 差距 <20% + 同类型 + 分辨率差距 <30%）的相似媒体推荐，
+	// 与 media-related 互补：related 用标签+日期，similar 用大小/类型/尺寸。
+	s.mux.HandleFunc("/api/media/media-similar/", s.handleMediaSimilar)
 	// V9：完整 EXIF/metadata（合并 SQLite 持久化字段 + 文件实时解析的 EXIF 标签）
 	s.mux.HandleFunc("/api/media/exif/", s.handleMediaExif)
 	// V9：按拍摄日期（taken_at）分组的日历视图，不限时间范围。区别于 upload-calendar
@@ -4661,6 +4665,154 @@ func (s *Server) handleMediaRelated(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"related": related,
 		"total":   len(related),
+	})
+}
+
+// handleMediaSimilar GET /api/media/media-similar/{id}?limit=10 — 相似媒体推荐。
+//
+// 与 media-related 的区别：related 用标签 + 拍摄日期判断关联；similar 用"看起来像"，即
+// 文件大小相近 + 类型相同 + 分辨率相近（基于物理特征，排除标签/tag 因素）。
+//
+// 筛选规则（全部命中才纳入候选）：
+//   - a) 类型与目标相同（IMAGE/VIDEO/LIVE_PHOTO 等，精确匹配 media.Type）；
+//   - b) size 差距 < 20%：abs(m.Size-target.Size)/max(target.Size,1) < 0.2；
+//   - c) 分辨率差距 < 30%：按 width*height 总像素，abs差/max(targetPixels,1) < 0.3。
+//
+// 按相似度排序（综合 size 偏差率 + 分辨率偏差率，越小越像），返回
+// {similar: [{media_id, filename, similarity_score}], total}，similarity_score 为
+// 0~100（100 最像，由 100*(1 - 0.5*sizeRatio - 0.5*pixelRatio) 估算）。
+func (s *Server) handleMediaSimilar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 从 path 提取 media id（/api/media/media-similar/{id}）。
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/media-similar/")
+	if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	// limit：默认 10，上限 50，下限 0（允许返回空）。
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	// 获取目标媒体，校验归属。
+	target, err := s.store.GetMedia(r.Context(), mediaID)
+	if err != nil || target == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "media not found"})
+		return
+	}
+	if target.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not owner"})
+		return
+	}
+
+	// 预加载该用户全部媒体，按物理特征比对。
+	// 注意：不调任何标签相关 store 方法——similar 明确排除标签因素。
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	targetSize := target.Size
+	if targetSize <= 0 {
+		targetSize = 1 // 避免除 0
+	}
+	targetPixels := int64(target.Width) * int64(target.Height)
+	if targetPixels <= 0 {
+		targetPixels = 1 // 无尺寸信息的媒体也允许出结果，仅按 size 比对
+	}
+
+	type similarItem struct {
+		MediaID         string  `json:"media_id"`
+		Filename        string  `json:"filename"`
+		SimilarityScore float64 `json:"similarity_score"`
+		sizeRatio       float64 // 仅排序用
+		pixelRatio      float64 // 仅排序用
+	}
+
+	var cands []similarItem
+	for _, m := range mediaList {
+		if m == nil || m.Deleted || m.ID == mediaID {
+			continue
+		}
+		// a) 同类型。
+		if m.Type != target.Type {
+			continue
+		}
+		// b) size 差距 < 20%。
+		mSize := m.Size
+		var sizeDiff int64
+		if mSize >= targetSize {
+			sizeDiff = mSize - targetSize
+		} else {
+			sizeDiff = targetSize - mSize
+		}
+		sizeRatio := float64(sizeDiff) / float64(targetSize)
+		if sizeRatio >= 0.2 {
+			continue
+		}
+		// c) 分辨率差距 < 30%（按总像素；任一无尺寸记录则按 1px^2 处理，趋近忽略此项）。
+		mPixels := int64(m.Width) * int64(m.Height)
+		var pixelDiff int64
+		if mPixels >= targetPixels {
+			pixelDiff = mPixels - targetPixels
+		} else {
+			pixelDiff = targetPixels - mPixels
+		}
+		pixelRatio := float64(pixelDiff) / float64(targetPixels)
+		if pixelRatio >= 0.3 {
+			continue
+		}
+		// similarity_score：0~100，100 最像。size 与分辨率各占 50% 权重。
+		score := 100.0 * (1.0 - 0.5*sizeRatio - 0.5*pixelRatio)
+		cands = append(cands, similarItem{
+			MediaID:         m.ID,
+			Filename:        m.Filename,
+			SimilarityScore: score,
+			sizeRatio:       sizeRatio,
+			pixelRatio:      pixelRatio,
+		})
+	}
+
+	// 按相似度排序（差距越小越像，desc）。
+	sort.Slice(cands, func(i, j int) bool {
+		oi := cands[i].sizeRatio + cands[i].pixelRatio
+		oj := cands[j].sizeRatio + cands[j].pixelRatio
+		if oi != oj {
+			return oi < oj
+		}
+		return cands[i].MediaID < cands[j].MediaID // 稳定 tie-break
+	})
+
+	if len(cands) > limit {
+		cands = cands[:limit]
+	}
+	if cands == nil {
+		cands = []similarItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"similar": cands,
+		"total":   len(cands),
 	})
 }
 
