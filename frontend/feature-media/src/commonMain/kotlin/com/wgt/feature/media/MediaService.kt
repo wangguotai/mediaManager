@@ -2499,6 +2499,39 @@ object MediaService {
     }
 
     /**
+     * V8：GET /api/media/audit-log/by-media?media_id=xxx — 单个媒体操作历史。
+     *
+     * 返回指定媒体的审计记录（按时间倒序）。后端约定响应体：
+     * `{ "logs": [{ "id","action","media_id","detail","created_at" }], "total": N }`。
+     * 解析模式与 [getAuditLogs] 一致，仅查询参数不同。失败返回 null，
+     * 调用方（MediaInfoDialog）按空状态展示。
+     */
+    suspend fun getAuditLogsByMedia(mediaId: String): List<AuditLogEntry>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/audit-log/by-media") {
+                parameter("media_id", mediaId)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["logs"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    AuditLogEntry(
+                        id = o["id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null,
+                        action = o["action"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAuditLogsByMedia FAILED mediaId=$mediaId: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/audit-log/stats — 操作统计。
      *
      * 返回各操作类型的累计计数。后端约定响应体：

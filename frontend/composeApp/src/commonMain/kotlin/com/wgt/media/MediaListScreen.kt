@@ -4169,6 +4169,47 @@ fun MediaInfoDialog(
                             }) { Text("添加", fontSize = 12.sp) }
                         }
                     }
+                    // V8：操作历史区域 — 调 /api/media/audit-log/by-media 展示该媒体的操作记录
+                    var auditLogs by remember(mediaId) { mutableStateOf<List<MediaService.AuditLogEntry>?>(null) }
+                    LaunchedEffect(mediaId) { auditLogs = MediaService.getAuditLogsByMedia(mediaId) }
+                    auditLogs?.let { logList ->
+                        if (logList.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("操作历史:", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            logList.take(10).forEach { entry ->
+                                val emoji = when (entry.action) {
+                                    "upload" -> "📤"
+                                    "delete" -> "🗑️"
+                                    "share" -> "🔗"
+                                    "rename" -> "✏️"
+                                    "favorite" -> "⭐"
+                                    "tag" -> "🏷️"
+                                    "restore" -> "♻️"
+                                    else -> "•"
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(emoji, fontSize = 12.sp)
+                                    Text(
+                                        entry.detail.ifEmpty { entry.action },
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        entry.createdAt,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             } ?: run {
                 Row(
