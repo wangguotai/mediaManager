@@ -2963,6 +2963,66 @@ object MediaService {
     )
 
     /**
+     * 标签层级子节点（[tag] = 子标签名，[count] = 该子标签自身关联媒体数）。
+     * 后端 count 仅含子标签自身，不含父标签，避免重复统计口径混乱。
+     */
+    data class TagChild(val tag: String, val count: Int)
+
+    /**
+     * 标签层级根节点（[tag] = 根标签名，[count] = 该根标签自身媒体数，
+     * [children] = 由标签名分隔符（- / : ）推断出的单层子标签列表，可能为空）。
+     */
+    data class TagHierarchyNode(
+        val tag: String,
+        val count: Int,
+        val children: List<TagChild>
+    )
+
+    /**
+     * 标签层级分析数据。
+     *
+     * 后端 GET /api/media/tag-hierarchy — 自动分析标签名中的分隔符（- / : 等）
+     * 推断父子关系：如 "旅行-国内" 的父节点为 "旅行"；无分隔符或父标签不独立存在的
+     * 标签作为顶层根。仅做单层父子切分（a-b-c 的父为 a），不做多层嵌套。
+     *
+     * 响应: `{hierarchy: [{tag, count, children: [{tag, count}]}], total_roots, total_tags}`。
+     * `total_roots` = 根标签数；`total_tags` = 全部标签数（含父与子，去重）。
+     *
+     * 解析沿用 [getTagNetwork] 的运行时 JSON 操作（无 serialization 编译器插件依赖）。
+     * children 数组缺失时落空列表非致命；计数缺失落 0。
+     *
+     * @return 根节点列表（含子节点）；HTTP 非 200 或网络异常返回 null（调用方按空态跳过卡片）。
+     */
+    suspend fun getTagHierarchy(): List<TagHierarchyNode>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag-hierarchy") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["hierarchy"]?.jsonArray?.mapNotNull { item ->
+                    val n = item.jsonObject
+                    val children = n["children"]?.jsonArray?.mapNotNull { c ->
+                        val co = c.jsonObject
+                        TagChild(
+                            tag = co["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                            count = co["count"]?.jsonPrimitive?.intOrNull ?: 0
+                        )
+                    } ?: emptyList()
+                    TagHierarchyNode(
+                        tag = n["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = n["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        children = children
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getTagHierarchy FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/mime-type-stats — 按 MIME 类型详细统计。
      *
      * 与 [getFileTypes]（`/api/media/file-types`）的区别：本端点额外提供

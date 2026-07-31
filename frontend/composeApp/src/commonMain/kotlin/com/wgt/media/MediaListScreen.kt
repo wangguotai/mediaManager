@@ -3075,6 +3075,78 @@ private fun MyTabContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V9：标签层级卡片——调 getTagHierarchy 显示标签父子关系（按标签名分隔符
+        // - / : 推断的单层父子树）。每个根一行 📁 #tag (N)，子标签缩进 📎 #child (N)。
+        // 获取失败(hierarchy=null)静默跳过；最多展示 5 个根、每根最多 3 个子，避免长列表撑满。
+        var tagHierarchy by remember { mutableStateOf<List<MediaService.TagHierarchyNode>?>(null) }
+        LaunchedEffect(Unit) { tagHierarchy = MediaService.getTagHierarchy() }
+        tagHierarchy?.let { roots ->
+            if (roots.isNotEmpty()) {
+                val topRoots = roots.take(5)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签层级",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "共 ${roots.size} 个根标签，显示前 ${topRoots.size} 个",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        topRoots.forEach { node ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "📁 #${node.tag}",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "${node.count}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                            node.children.take(3).forEach { child ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 20.dp, top = 1.dp, bottom = 1.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "📎 #${child.tag}",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                    )
+                                    Text(
+                                        "${child.count}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Text(
             "我的",
             fontWeight = FontWeight.Bold,
