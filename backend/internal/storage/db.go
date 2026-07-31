@@ -126,6 +126,24 @@ CREATE TABLE IF NOT EXISTS media_tags (
 CREATE INDEX IF NOT EXISTS idx_media_tags_user   ON media_tags(user_id);
 CREATE INDEX IF NOT EXISTS idx_media_tags_media  ON media_tags(media_id);
 CREATE INDEX IF NOT EXISTS idx_media_tags_tag    ON media_tags(user_id, tag_name);
+
+-- V8：审计日志系统。记录用户对媒体资源的操作行为，供审计查询与统计。
+--   - id         : UUID 主键，由 Store 层生成。
+--   - user_id    : 操作者，按用户隔离查询。
+--   - action     : 操作类型（upload/delete/share/rename/favorite/tag 等）。
+--   - media_id   : 关联媒体 ID，可空（如未来用户级操作），以 NULL 表示无关联。
+--   - detail     : 操作细节（JSON 字符串或自由文本），便于审计回溯。
+--   - created_at : 操作时间（RFC3339），按时间倒序展示最近行为。
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    media_id   TEXT,
+    detail     TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_user    ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 `
 
 // columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。

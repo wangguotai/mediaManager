@@ -518,6 +518,106 @@ func (s *Store) TagStats(ctx context.Context, userID string) ([]map[string]any, 
 	return out, nil
 }
 
+// ===== AuditLog ===== V8：审计日志系统
+
+// AuditLog 表示一条审计日志记录。
+type AuditLog struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	Action    string    `json:"action"`
+	MediaID   string    `json:"media_id,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AddAuditLog 写入一条审计日志。ID 由 uuid.NewString() 生成，
+// CreatedAt 置为当前时间。action 不应为空（空串虽不报错但语义无效）。
+// mediaID 为空串时落 NULL（表示非媒体级操作），detail 同理。
+func (s *Store) AddAuditLog(ctx context.Context, userID, action, mediaID, detail string) error {
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	id := uuid.NewString()
+	created := time.Now().Format(time.RFC3339)
+	// mediaID 空串 → nil（落 NULL），非空直接绑定字符串。
+	var mediaArg any
+	if mediaID == "" {
+		mediaArg = nil
+	} else {
+		mediaArg = mediaID
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_logs (id, user_id, action, media_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, userID, action, mediaArg, detail, created); err != nil {
+		return fmt.Errorf("add audit log: %w", err)
+	}
+	return nil
+}
+
+// ListAuditLogs 返回某用户的审计日志，按 created_at 降序（最近在前）。
+// limit<=0 时默认 50（与默认审计页一致）。空 userID 直接返回空切片（不查库）。
+func (s *Store) ListAuditLogs(ctx context.Context, userID string, limit int) ([]*AuditLog, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, action, media_id, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
+		userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit logs: %w", err)
+	}
+	defer rows.Close()
+	var out []*AuditLog
+	for rows.Next() {
+		var a AuditLog
+		var createdAt string
+		var mediaID sql.NullString
+		if err := rows.Scan(&a.ID, &a.UserID, &a.Action, &mediaID, &a.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan audit log: %w", err)
+		}
+		if mediaID.Valid {
+			a.MediaID = mediaID.String
+		}
+		a.CreatedAt = timeFromVal(createdAt)
+		out = append(out, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows audit logs: %w", err)
+	}
+	return out, nil
+}
+
+// AuditLogStats 按操作类型聚合某用户的审计日志数量，返回 [{action, count}]，
+// 按 count 降序（与 TagStats 模式一致）。空 userID 直接返回空切片。
+func (s *Store) AuditLogStats(ctx context.Context, userID string) ([]map[string]any, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT action, COUNT(*) AS cnt FROM audit_logs WHERE user_id = ? GROUP BY action ORDER BY cnt DESC`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("audit log stats: %w", err)
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var action string
+		var cnt int
+		if err := rows.Scan(&action, &cnt); err != nil {
+			return nil, fmt.Errorf("scan audit log stats: %w", err)
+		}
+		out = append(out, map[string]any{"action": action, "count": cnt})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows audit log stats: %w", err)
+	}
+	return out, nil
+}
+
 // RenameTag V8：重命名标签（用户维度，所有包含 old_name 的标签改为 new_name）。
 // 用 INSERT OR IGNORE + DELETE 处理可能的 UNIQUE 冲突。
 func (s *Store) RenameTag(ctx context.Context, userID, oldName, newName string) (int, error) {
