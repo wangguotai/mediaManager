@@ -215,6 +215,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/quick-stats", s.handleMediaQuickStats)
 	// 媒体覆盖率报告：已标记标签/已收藏/已分享/在相册中的媒体占比，供前端展示媒体整理完成度。
 	s.mux.HandleFunc("/api/media/media-coverage", s.handleMediaCoverage)
+	// 媒体量报告：总量+总字节+本月增量+上月增量+环比增长率+日均上传统量+年底预测量。
+	// 与 growth-report 区别：growth-report 返周/月/年三档对比快照；本端点聚焦"全年汇总"
+	// （总量+趋势+预测），供前端"媒体量报告"卡片一次加载。
+	s.mux.HandleFunc("/api/media/media-volume-report", s.handleMediaVolumeReport)
 	// 用户活跃度评分（基于 upload/favorite/share/tag/rename/rotate 各维度加权打分+等级+明细）。
 	// 数据来源：audit_log 操作统计（AuditLogStats）+ ListMediaByUser 取上传数 +
 	// favoriteProvider.ListFavorites 取当前收藏数（audit_log 仅记录 unfavorite）。
@@ -5631,6 +5635,117 @@ func (s *Server) handleMediaGrowthReport(w http.ResponseWriter, r *http.Request)
 		"last_month":           map[string]any{"count": lmCount, "bytes": lmBytes},
 		"month_change_percent": monthChange,
 		"this_year":            map[string]any{"count": tyCount, "bytes": tyBytes},
+	})
+}
+
+// handleMediaVolumeReport GET /api/media/media-volume-report — 媒体量报告。
+//
+// 返回媒体库的"全年汇总"视角：总量/总字节 + 本月与上月增量 + 环比增长率 +
+// 日均上传统量 + 按当前趋势预测的年底总量。一次 ListMediaByUser 全量拉取后在
+// Go 侧分桶计算（与 handleMediaGrowthReport 同源，不新增 Store 方法）。
+//
+// 字段口径：
+//   - total_media / total_bytes：未软删媒体总数与累计字节数。
+//   - this_month / last_month：自然月（UTC 月首 00:00 为界）的本月/上月新增
+//     {count, bytes}。
+//   - mom_growth：本月相对上月的环比增长率 (this-last)/last*100；上月为 0
+//     时返回 null（除零保护），与 growth-report 的 month_change_percent 同口径。
+//   - avg_daily_uploads：日均上传量 = total_media / 自首条上传以来的天数
+//     （不足 1 天按 1 天计，避免除零；首条不存在时为 0）。
+//   - projected_year_end：按本年至今的日均上传速率外推到年底的预测总量 =
+//     total_media + 本年日均新增 * 年底剩余天数。无上传历史时为 total_media。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaVolumeReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// UTC 时间边界，与 growth-report / timeline 等统计端点一致。
+	now := time.Now().UTC()
+	year, month, _ := now.Date()
+	thisMonthStart := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
+	yearEnd := time.Date(year+1, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var totalMedia, totalBytes int64
+	var tmCount, tmBytes, lmCount, lmBytes int64
+	var firstUpload time.Time // 零值表示尚无上传
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		totalMedia++
+		totalBytes += m.Size
+		if !ca.Before(thisMonthStart) {
+			tmCount++
+			tmBytes += m.Size
+		} else if !ca.Before(lastMonthStart) {
+			lmCount++
+			lmBytes += m.Size
+		}
+		if firstUpload.IsZero() || ca.Before(firstUpload) {
+			firstUpload = ca
+		}
+	}
+
+	// 环比增长率：上月为 0 时返回 null（与 growth-report 同口径）。
+	var momGrowth any
+	if lmCount > 0 {
+		momGrowth = float64(tmCount-lmCount) / float64(lmCount) * 100
+	}
+
+	// 日均上传量：自首条上传至当前的总天数，不足 1 天按 1 天计。
+	avgDaily := 0.0
+	daysSinceFirst := 0.0
+	if !firstUpload.IsZero() {
+		daysSinceFirst = now.Sub(firstUpload).Hours() / 24
+		if daysSinceFirst < 1 {
+			daysSinceFirst = 1
+		}
+		avgDaily = float64(totalMedia) / daysSinceFirst
+	}
+
+	// 年底预测：按本年至今的日均新增速率外推剩余天数。
+	// 本年日均新增 = 本年新增量 / 本年已过天数；无本年新增时退化为 total_media。
+	yearStart := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+	daysIntoYear := now.Sub(yearStart).Hours() / 24
+	remainingDays := yearEnd.Sub(now).Hours() / 24
+	projectedYearEnd := totalMedia
+	if daysIntoYear >= 1 {
+		// 本年至今新增量 = 本年起上传的媒体数（total 减去本年前已有的）。
+		var yearAdditions int64
+		for _, m := range mediaList {
+			if !m.CreatedAt.UTC().Before(yearStart) {
+				yearAdditions++
+			}
+		}
+		yearlyRate := float64(yearAdditions) / daysIntoYear
+		projectedYearEnd = totalMedia + int64(yearlyRate*remainingDays)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_media":        totalMedia,
+		"total_bytes":        totalBytes,
+		"this_month":         map[string]any{"count": tmCount, "bytes": tmBytes},
+		"last_month":         map[string]any{"count": lmCount, "bytes": lmBytes},
+		"mom_growth":         momGrowth,
+		"avg_daily_uploads":  avgDaily,
+		"projected_year_end": projectedYearEnd,
 	})
 }
 
