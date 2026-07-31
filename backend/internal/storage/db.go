@@ -113,6 +113,19 @@ CREATE TABLE IF NOT EXISTS album_shares (
 --                             撤销共享、DeleteAlbum 级联清理均走此索引）。
 CREATE INDEX IF NOT EXISTS idx_album_shares_target ON album_shares(shared_with_user_id);
 CREATE INDEX IF NOT EXISTS idx_album_shares_album  ON album_shares(album_id);
+
+-- V8：媒体标签系统（多对多）
+CREATE TABLE IF NOT EXISTS media_tags (
+    id         TEXT PRIMARY KEY,
+    media_id   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    tag_name   TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (media_id, user_id, tag_name)
+);
+CREATE INDEX IF NOT EXISTS idx_media_tags_user   ON media_tags(user_id);
+CREATE INDEX IF NOT EXISTS idx_media_tags_media  ON media_tags(media_id);
+CREATE INDEX IF NOT EXISTS idx_media_tags_tag    ON media_tags(user_id, tag_name);
 `
 
 // columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。

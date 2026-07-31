@@ -211,6 +211,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/purge", s.handleMediaPurge)
 	// V8：清空回收站（物理删除当前用户的所有已软删媒体）
 	s.mux.HandleFunc("/api/media/empty-trash", s.handleMediaEmptyTrash)
+	// V8：媒体标签系统
+	s.mux.HandleFunc("/api/media/tag/add", s.handleMediaTagAdd)
+	s.mux.HandleFunc("/api/media/tag/remove", s.handleMediaTagRemove)
+	s.mux.HandleFunc("/api/media/tag/list", s.handleMediaTagList)
+	s.mux.HandleFunc("/api/media/tag/all", s.handleMediaTagAll)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -2679,6 +2684,117 @@ func (s *Server) handleMediaInfo(w http.ResponseWriter, r *http.Request) {
 		"taken_at":   media.TakenAt,
 		"deleted":    media.Deleted,
 	})
+}
+
+// handleMediaTagAdd V8：POST /api/media/tag/add — 给媒体打标签。
+func (s *Server) handleMediaTagAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		MediaID string `json:"media_id"`
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.MediaID == "" || req.TagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id and tag_name required"})
+		return
+	}
+	if err := s.store.AddMediaTag(r.Context(), uid, req.MediaID, req.TagName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success", "media_id": req.MediaID, "tag": req.TagName})
+}
+
+// handleMediaTagRemove V8：POST /api/media/tag/remove — 移除标签。
+func (s *Server) handleMediaTagRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		MediaID string `json:"media_id"`
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.MediaID == "" || req.TagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id and tag_name required"})
+		return
+	}
+	if err := s.store.RemoveMediaTag(r.Context(), uid, req.MediaID, req.TagName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "success"})
+}
+
+// handleMediaTagList V8：GET /api/media/tag/list?media_id=xxx — 列出媒体的标签。
+func (s *Server) handleMediaTagList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	mediaID := r.URL.Query().Get("media_id")
+	if mediaID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_id required"})
+		return
+	}
+	tags, err := s.store.ListMediaTags(r.Context(), uid, mediaID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"media_id": mediaID, "tags": tags})
+}
+
+// handleMediaTagAll V8：GET /api/media/tag/all — 列出当前用户的所有标签。
+func (s *Server) handleMediaTagAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": tags, "count": len(tags)})
 }
 
 // handleMediaBatchDownload 处理 POST /api/media/batch-download，

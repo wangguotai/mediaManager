@@ -403,6 +403,80 @@ func (s *Store) PurgeAllTrashForUser(ctx context.Context, userID string) (int, e
 	return int(n), nil
 }
 
+// ===== MediaTag ===== V8：媒体标签系统
+
+// MediaTag 表示一条媒体标签关联。
+type MediaTag struct {
+	ID        string    `json:"id"`
+	MediaID   string    `json:"media_id"`
+	UserID    string    `json:"user_id"`
+	TagName   string    `json:"tag_name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AddMediaTag 给媒体打标签（幂等，UNIQUE 约束保证不重复）。
+func (s *Store) AddMediaTag(ctx context.Context, userID, mediaID, tagName string) error {
+	tagID := "tag-" + uuid.NewString()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO media_tags (id, media_id, user_id, tag_name, created_at) VALUES (?, ?, ?, ?, ?)`,
+		tagID, mediaID, userID, tagName, time.Now().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("add media tag: %w", err)
+	}
+	return nil
+}
+
+// RemoveMediaTag 移除媒体的某个标签。
+func (s *Store) RemoveMediaTag(ctx context.Context, userID, mediaID, tagName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM media_tags WHERE user_id = ? AND media_id = ? AND tag_name = ?`,
+		userID, mediaID, tagName)
+	if err != nil {
+		return fmt.Errorf("remove media tag: %w", err)
+	}
+	return nil
+}
+
+// ListMediaTags 列出某个媒体的所有标签。
+func (s *Store) ListMediaTags(ctx context.Context, userID, mediaID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tag_name FROM media_tags WHERE user_id = ? AND media_id = ? ORDER BY tag_name`,
+		userID, mediaID)
+	if err != nil {
+		return nil, fmt.Errorf("list media tags: %w", err)
+	}
+	defer rows.Close()
+	var tags []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan media tag: %w", err)
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+// ListAllTags 列出当前用户用过的所有标签（去重）。
+func (s *Store) ListAllTags(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT tag_name FROM media_tags WHERE user_id = ? ORDER BY tag_name`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("list all tags: %w", err)
+	}
+	defer rows.Close()
+	var tags []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
