@@ -1389,3 +1389,62 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+// ===== 时间轴日历（按拍摄日期分组） =====
+
+// TimelineCalendar 按拍摄日期（taken_at）分组统计每天的媒体数量，按日期倒序。
+// 与 upload-calendar 不同：前者基于 taken_at（EXIF/客户端声明的毫秒时间戳）且不限时间范围，
+// 后者基于 created_at（上传时间）且只看最近 30 天。
+//
+// taken_at 列为 INTEGER 毫秒时间戳，0 表未知；WHERE taken_at > 0 排除无拍摄时间的记录。
+// 日期提取用 strftime('%Y-%m-%d', taken_at/1000, 'unixepoch')：除 1000 转秒，
+// 'unixepoch' 修饰符把整列秒数当 Unix 时间戳解读，strftime 取 UTC 日期（与 DB 一致用 UTC，
+// 前端按本地时区渲染由调用方决定）。按 (date, type) 双维度分组，type 为 IMAGE/VIDEO/LIVE_PHOTO 等，
+// 供前端日历视图区分当天照片/视频数量。每行含 date、type、count；total 为当天全部类型合计
+// （供前端"那天共 N 张"的 tooltip，避免再 SUM 聚合）。
+//
+// 返回 []map[string]any 而非结构体切片，保持与任务约定的灵活 schema 一致，便于前端直接消费。
+func (s *Store) TimelineCalendar(ctx context.Context, userID string) ([]map[string]any, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT strftime('%Y-%m-%d', taken_at/1000, 'unixepoch') AS date,
+       "type" AS type,
+       COUNT(*) AS count
+FROM "media"
+WHERE user_id = ? AND deleted = 0 AND taken_at > 0
+GROUP BY date, "type"
+ORDER BY date DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("timeline calendar: %w", err)
+	}
+	defer rows.Close()
+
+	// 先按 (date,type) 收集，同时累计每天的 total，保持行顺序按日期倒序。
+	// SQLite 已 ORDER BY date DESC，但同一天内多 type 行的相对顺序未定——无妨，
+	// 输出每行带 total，前端不需依赖 type 顺序。
+	var out []map[string]any
+	dayTotal := make(map[string]int) // date → 当天全部 type 合计
+	for rows.Next() {
+		var date, typ string
+		var count int
+		if err := rows.Scan(&date, &typ, &count); err != nil {
+			return nil, fmt.Errorf("scan timeline calendar: %w", err)
+		}
+		out = append(out, map[string]any{
+			"date":  date,
+			"type":  typ,
+			"count": count,
+		})
+		dayTotal[date] += count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows timeline calendar: %w", err)
+	}
+	// 回填每行的 total（当天所有类型合计）。
+	for _, row := range out {
+		row["total"] = dayTotal[row["date"].(string)]
+	}
+	return out, nil
+}

@@ -163,6 +163,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/info/", s.handleMediaInfo)
 	// V9：完整 EXIF/metadata（合并 SQLite 持久化字段 + 文件实时解析的 EXIF 标签）
 	s.mux.HandleFunc("/api/media/exif/", s.handleMediaExif)
+	// V9：按拍摄日期（taken_at）分组的日历视图，不限时间范围。区别于 upload-calendar
+	// （基于 created_at 的最近 30 天上传热力图）。供前端日历视图渲染每天照片/视频数量。
+	s.mux.HandleFunc("/api/media/timeline-calendar", s.handleMediaTimelineCalendar)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -3358,6 +3361,56 @@ func (s *Server) handleMediaExif(w http.ResponseWriter, r *http.Request) {
 		resp["updated_at"] = time.Unix(fileMeta.GetUpdatedAt(), 0).Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleMediaTimelineCalendar V9：GET /api/media/timeline-calendar — 按拍摄日期（taken_at）
+// 分组统计每天的媒体数量，供前端日历视图渲染。
+//
+// 与 upload-calendar 区别：本端点基于 taken_at（EXIF/客户端声明的拍摄时间）而非 created_at
+// （上传时间），且不限制时间范围（返回全部有拍摄时间的媒体）。taken_at 缺失（=0）的记录被排除。
+//
+// 返回 {days: [{date, count, type, total}], total_days: N, total_media: M}：
+//   - days 按 (date,type) 分组，date 为 YYYY-MM-DD（UTC），type 为 IMAGE/VIDEO/LIVE_PHOTO 等，
+//     count 为该类型当天数量，total 为当天所有类型合计。
+//   - total_days：有媒体的不同日期数；total_media：有拍摄时间的媒体总数。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaTimelineCalendar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	rows, err := s.store.TimelineCalendar(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 统计独立日期数与媒体总数。rows 按 (date,type) 展开，需去重计天数、求和计媒体数。
+	seen := make(map[string]struct{}, len(rows))
+	var totalDays, totalMedia int
+	for _, row := range rows {
+		d, _ := row["date"].(string)
+		if _, ok := seen[d]; !ok && d != "" {
+			seen[d] = struct{}{}
+			totalDays++
+		}
+		if c, ok := row["count"].(int); ok {
+			totalMedia += c
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days":        rows,
+		"total_days":  totalDays,
+		"total_media": totalMedia,
+	})
 }
 
 // handleMediaTagAdd V8：POST /api/media/tag/add — 给媒体打标签。
