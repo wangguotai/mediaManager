@@ -271,6 +271,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/move-media", s.handleAlbumMoveMedia)
 	// V8：跨相册复制照片（source 不删）
 	s.mux.HandleFunc("/api/media/album/copy-media", s.handleAlbumCopyMedia)
+	// V8：导出相册元数据为 JSON（相册信息 + 内含媒体列表 metadata）
+	s.mux.HandleFunc("/api/media/album/export", s.handleAlbumExport)
 	// V9：批量创建分享链接——一次为多个 media 各生成一个独立分享 token。
 	// 走 /api/media/ 前缀（authMiddleware 自动鉴权），handler 用 userIDFromContext 取 uid。
 	s.mux.HandleFunc("/api/media/batch-share", s.handleMediaBatchShare)
@@ -1917,6 +1919,73 @@ func (s *Server) handleAlbumMediaList(w http.ResponseWriter, r *http.Request) {
 		"album_id": albumID,
 		"items":    items,
 		"count":    len(items),
+	})
+}
+
+// handleAlbumExport V8：GET /api/media/album/export?album_id=xxx — 导出相册元数据为 JSON。
+// 返回相册基本信息（id/name/cover_media_id/created_at）及内含媒体的完整 metadata 列表。
+// 校验相册归属当前用户，仅导出未软删的媒体。
+func (s *Server) handleAlbumExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	albumID := r.URL.Query().Get("album_id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	// 校验相册归属当前用户
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, albumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	// 遍历相册内媒体，取每个 media 的 metadata
+	media := make([]map[string]any, 0, len(album.MediaIDs))
+	for _, mediaID := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || m == nil || m.UserID != uid {
+			continue
+		}
+		if m.Deleted {
+			continue
+		}
+		media = append(media, map[string]any{
+			"id":         m.ID,
+			"filename":   m.Filename,
+			"type":       m.Type,
+			"size":       m.Size,
+			"mime":       m.Mime,
+			"width":      m.Width,
+			"height":     m.Height,
+			"sha256":     m.SHA256,
+			"created_at": m.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"album": map[string]any{
+			"id":             album.ID,
+			"name":           album.Name,
+			"cover_media_id": album.CoverMediaID,
+			"created_at":     album.CreatedAt,
+		},
+		"media_count": len(media),
+		"media":       media,
 	})
 }
 
