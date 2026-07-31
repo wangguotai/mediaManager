@@ -2923,6 +2923,78 @@ private fun MyTabContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V23：相册综合卡片（GET /api/media/album-stats-comprehensive）
+        // 在相册统计卡片后，一次请求合并展示 汇总(总相册/总照片/平均) + 分享(已分享/未分享) +
+        // 排行 top3（🥇🥈🥉 name (count)）。后端返回 null（未登录/异常）时静默跳过，与其他卡片一致。
+        var albumStatsComprehensive by remember { mutableStateOf<MediaService.AlbumStatsComprehensive?>(null) }
+        LaunchedEffect(Unit) { albumStatsComprehensive = MediaService.getAlbumStatsComprehensive() }
+        albumStatsComprehensive?.let { comp ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "相册综合",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // 汇总: N相册 · M照片 · 平均X张（avgPhotos 取一位小数，commonMain 无 String.format，沿用 take 截断）
+                    val avgStr = comp.summary.avgPhotos.toString()
+                    Text(
+                        "汇总: ${comp.summary.totalAlbums}相册 · ${comp.summary.totalPhotos}照片 · " +
+                            "平均${avgStr.take(avgStr.indexOf('.') + 2)}张",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 分享: 已分享N · 未分享M
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "分享: 已分享${comp.sharing.shared} · 未分享${comp.sharing.unshared}",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 排行 top3: 🥇🥈🥉 name (count)
+                    if (comp.ranking.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val medals = listOf("🥇", "🥈", "🥉")
+                        comp.ranking.take(3).forEachIndexed { idx, item ->
+                            val medal = medals.getOrElse(idx) { "•" }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(medal, fontSize = 14.sp)
+                                Text(
+                                    item.name.ifEmpty { "未命名相册" },
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Text(
+                                    "(${item.count})",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // V7：分享链接列表卡片
         var shares by remember { mutableStateOf<List<MediaService.ShareInfo>?>(null) }
         LaunchedEffect(Unit) { shares = MediaService.listShares() }
@@ -4187,6 +4259,27 @@ fun ImagePreviewDialog(
                         }
                     )
 
+                    // 相关照片推荐区：调用后端 /api/media/media-related/{id} 获取与当前
+                    // 媒体相关的推荐（相同标签 / 相同类型+相近日期），横向滚动展示缩略图 +
+                    // 文件名，点击切换到该媒体（在当前 mediaList 中找到索引并滚动 pager）。
+                    // 仅后端源（useBackendLoader=true）时展示——本地相册无后端推荐端点可调。
+                    // 无相关照片（拉取失败或返回空列表）时不显示该区域。
+                    if (useBackendLoader) {
+                        RelatedMediaStrip(
+                            currentMediaId = currentMedia.id,
+                            mediaList = mediaList,
+                            onRelatedClick = { relatedMediaId ->
+                                // 在当前列表中找到目标媒体的索引，滚动 Pager 切换；
+                                // 若不在列表中（理论上不会发生，相关媒体均为当前用户资产）
+                                // 静默忽略，避免越界。
+                                val targetIndex = mediaList.indexOfFirst { it.id == relatedMediaId }
+                                if (targetIndex >= 0) {
+                                    scope.launch { pagerState.animateScrollToPage(targetIndex) }
+                                }
+                            }
+                        )
+                    }
+
                     if (showDetails) {
                         DetailPanel(
                             media = currentMedia,
@@ -5345,6 +5438,157 @@ private fun ThumbnailStripItem(
                     .background(Color.White.copy(alpha = 0.15f))
             )
         }
+    }
+}
+
+/**
+ * 相关照片推荐区（横向滚动）。
+ *
+ * 调用 [MediaService.getRelatedMedia] 获取与 [currentMediaId] 相关的推荐列表，横向滚动展示
+ * 每项的缩略图（经 [BackendImageLoader.loadThumbnail]）+ 文件名。点击某项触发 [onRelatedClick]
+ * （由父组件滚动 Pager 切换到该媒体）。
+ *
+ * 加载策略：[LaunchedEffect] 绑定 [currentMediaId]——用户左右滑动切换当前图片时自动重新拉取
+ * 相关推荐。加载中不显示该区域（避免占位闪烁）；加载失败或返回空列表也不显示（无痕降级），
+ * 满足"如果无相关照片则不显示"的需求。
+ *
+ * 注意：相关推荐的缩略图走后端 [BackendImageLoader]，故本区域仅在 useBackendLoader 场景
+ * 由调用方条件渲染（本地相册源不展示）。
+ *
+ * @param currentMediaId 当前预览的媒体 ID（推荐以此为中心）
+ * @param mediaList 当前预览列表（用于判断点击目标是否在列表内，由父组件处理跳转）
+ * @param onRelatedClick 点击相关照片回调，参数为相关媒体的 ID
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun RelatedMediaStrip(
+    currentMediaId: String,
+    mediaList: List<MediaMetadata>,
+    onRelatedClick: (String) -> Unit
+) {
+    // 相关媒体列表：null=加载中/失败，empty=无相关推荐（均不渲染）。
+    var relatedItems by remember(currentMediaId) {
+        mutableStateOf<List<com.wgt.feature.media.MediaService.RelatedMedia>?>(null)
+    }
+    val scope = rememberCoroutineScope()
+
+    // 切换当前图片即重新拉取相关推荐。
+    LaunchedEffect(currentMediaId) {
+        scope.launch(dispatchers.io) {
+            relatedItems = com.wgt.feature.media.MediaService.getRelatedMedia(currentMediaId)
+        }
+    }
+
+    // 仅在有相关推荐时渲染；加载中（null）与空列表均不显示。
+    val items = relatedItems ?: return
+    if (items.isEmpty()) return
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+        ) {
+            Text(
+                text = "相关照片",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(start = 16.dp, bottom = 2.dp)
+            )
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp)
+            ) {
+                items(
+                    items = items,
+                    key = { it.mediaId },
+                    contentType = { "related_media_item" }
+                ) { related ->
+                    RelatedMediaItem(
+                        related = related,
+                        onClick = { onRelatedClick(related.mediaId) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 相关照片单项：72×72 缩略图 + 文件名（单行省略），点击触发跳转。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun RelatedMediaItem(
+    related: com.wgt.feature.media.MediaService.RelatedMedia,
+    onClick: () -> Unit
+) {
+    var thumbnailBitmap by remember(related.mediaId) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(related.mediaId) { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(related.mediaId) {
+        scope.launch(dispatchers.io) {
+            try {
+                thumbnailBitmap = BackendImageLoader.loadThumbnail(related.mediaId)
+            } catch (e: Exception) {
+                // 加载失败静默
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .width(72.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                isLoading -> {
+                    ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
+                }
+                thumbnailBitmap != null -> {
+                    Image(
+                        bitmap = thumbnailBitmap!!,
+                        contentDescription = related.filename,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                else -> {
+                    // 截断后的视频类型也可能出现在相关推荐里——用占位图标兜底。
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_image_placeholder),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = Color.Gray
+                    )
+                }
+            }
+        }
+        Text(
+            text = related.filename,
+            color = Color.White.copy(alpha = 0.7f),
+            fontSize = 9.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 2.dp)
+        )
     }
 }
 

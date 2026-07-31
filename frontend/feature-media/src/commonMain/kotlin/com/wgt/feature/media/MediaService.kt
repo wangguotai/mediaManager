@@ -156,6 +156,67 @@ object MediaService {
 
     // ============ 认证 ============
 
+    // ============ 相关媒体推荐 ============
+
+    /**
+     * 相关媒体条目（与后端 [handleMediaRelated] 的 relatedItem JSON 对齐）。
+     *
+     * 后端按 `相同标签`（reason="shared_tag:&lt;tag&gt;"）与 `相同类型+相近日期`（reason="same_type_nearby_date"）
+     * 两种策略推荐相关媒体；前端仅消费基础信息，[reason] 可选展示。
+     *
+     * @param mediaId 媒体 ID
+     * @param filename 文件名
+     * @param type 媒体类型字符串（"IMAGE"/"VIDEO"/"LIVE_PHOTO"）
+     * @param reason 推荐原因（shared_tag:&lt;tag&gt; 或 same_type_nearby_date）
+     */
+    data class RelatedMedia(
+        val mediaId: String,
+        val filename: String,
+        val type: String,
+        val reason: String
+    )
+
+    /**
+     * GET /api/media/media-related/{id}?limit=10 — 获取相关媒体推荐列表。
+     *
+     * 后端基于相同标签（优先）与相同类型+相近日期（±7天）两种策略推荐相关媒体，
+     * 去重并截断到 [limit]。响应：`{ "related": [{media_id,filename,type,reason}], "total": N }`。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getStatSummary] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示推荐区）。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param mediaId 目标媒体 ID
+     * @param limit 返回上限（默认 10，后端上限 50）
+     * @return 相关媒体列表；失败返回 null
+     */
+    suspend fun getRelatedMedia(mediaId: String, limit: Int = 10): List<RelatedMedia>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-related/$mediaId") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["related"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val id = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    RelatedMedia(
+                        mediaId = id,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = item["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        reason = item["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getRelatedMedia id=$mediaId status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getRelatedMedia FAILED id=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /**
      * 登录/注册成功响应（与后端 [auth.AuthResult] JSON 对齐）。
      *
@@ -1372,6 +1433,104 @@ object MediaService {
         )
     }
 
+    /**
+     * V23：相册综合统计——GET /api/media/album-stats-comprehensive 返回的合并数据。
+     *
+     * 一次请求合并三组相册维度统计（summary + sharing + ranking top3），供"我的"页
+     * "相册综合"卡片一次渲染，避免并发拉取 stats-summary / sharing-summary / count-ranking。
+     *
+     * 与后端 [handleAlbumStatsComprehensive] 字段对齐：
+     * - summary: {total_albums, total_photos, avg_photos, largest_album{name,count}|null}
+     *   total_photos 为各相册 MediaIDs 长度之和（跨相册不去重，与 stats-summary 口径一致）；
+     *   largest_album 在无相册时为 null。avg_photos 为 0.0（无相册时后端置 0）。
+     * - sharing: {shared, unshared}（store 不可用时全部按 unshared 计）。
+     * - ranking: 按 count 倒序的 top 3，仅 name+count，可能为空数组。
+     *
+     * ranking 复用既有 [AlbumRankItem]（albumId/name/count/coverMediaId）。综合端点只返
+     * name+count，解析时 albumId 置空、coverMediaId 置 null，与 count-ranking 解析同款补默认。
+     * 任一字段缺失回退默认值（0/空/null），与既有 [AlbumStatsSummary] 同款宽容解析。
+     */
+    data class LargestAlbumInfo(
+        val name: String = "",
+        val count: Int = 0
+    )
+
+    data class AlbumSummary(
+        val totalAlbums: Int = 0,
+        val totalPhotos: Int = 0,
+        val avgPhotos: Double = 0.0,
+        val largestAlbum: LargestAlbumInfo? = null
+    )
+
+    data class AlbumSharing(
+        val shared: Int = 0,
+        val unshared: Int = 0
+    )
+
+    data class AlbumStatsComprehensive(
+        val summary: AlbumSummary = AlbumSummary(),
+        val sharing: AlbumSharing = AlbumSharing(),
+        val ranking: List<AlbumRankItem> = emptyList()
+    )
+
+    /**
+     * V23：GET /api/media/album-stats-comprehensive — 相册综合统计。
+     *
+     * 一次请求返回 summary + sharing + ranking top3，供"我的"页"相册综合"卡片渲染。
+     * 需认证（Authorization 头由 [jsonClient] defaultRequest 自动注入）。
+     * 后端不可用/出错时返回 null（与 [getAlbumStatsSummary] 同语义——区分"成功但空"
+     * 与"网络失败"，故用 null 表示失败）。
+     *
+     * 路径为带连字符的 album-stats-comprehensive（不会落入 /api/media/album/ 前缀匹配），
+     * 见后端 [Server.handleAlbumStatsComprehensive]。
+     *
+     * @return 相册综合统计，或 null（失败）
+     */
+    suspend fun getAlbumStatsComprehensive(): AlbumStatsComprehensive? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-stats-comprehensive")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                // summary
+                val s = obj["summary"]?.jsonObject
+                val largestEl = s?.get("largest_album")
+                val largest = if (largestEl == null || largestEl is JsonNull) null
+                              else LargestAlbumInfo(
+                                  name = largestEl.jsonObject["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                                  count = largestEl.jsonObject["count"]?.jsonPrimitive?.intOrNull ?: 0
+                              )
+                val summary = AlbumSummary(
+                    totalAlbums = s?.get("total_albums")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalPhotos = s?.get("total_photos")?.jsonPrimitive?.intOrNull ?: 0,
+                    avgPhotos = s?.get("avg_photos")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    largestAlbum = largest
+                )
+                // sharing
+                val sh = obj["sharing"]?.jsonObject
+                val sharing = AlbumSharing(
+                    shared = sh?.get("shared")?.jsonPrimitive?.intOrNull ?: 0,
+                    unshared = sh?.get("unshared")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                // ranking（top3，仅 name+count；复用 AlbumRankItem，albumId/coverMediaId 补默认）
+                val ranking = obj["ranking"]?.jsonArray?.map { el ->
+                    val r = el.jsonObject
+                    AlbumRankItem(
+                        albumId = r["album_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        name = r["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = r["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        coverMediaId = null
+                    )
+                } ?: emptyList()
+                AlbumStatsComprehensive(summary = summary, sharing = sharing, ranking = ranking)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumStatsComprehensive FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
     /**
      * 相册分享摘要项——GET /api/media/album-sharing-summary 返回的单条相册分享信息。
      *
