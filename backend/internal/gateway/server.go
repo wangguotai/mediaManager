@@ -292,6 +292,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/batch-add", s.handleMediaTagBatchAdd)
 	// V8：批量移除标签
 	s.mux.HandleFunc("/api/media/tag/batch-remove", s.handleMediaTagBatchRemove)
+	// 给整个相册的所有媒体打同一个标签（遍历相册 MediaIDs 逐个 AddMediaTag）。
+	s.mux.HandleFunc("/api/media/tag/batch-tag-album", s.handleBatchTagAlbum)
 	// V8：标签统计（每个标签关联的媒体数量）
 	s.mux.HandleFunc("/api/media/tag/stats", s.handleMediaTagStats)
 	// V21：标签详细统计（每个标签的 count + 关联文件总大小 + 最近 media 创建时间）。
@@ -9971,6 +9973,66 @@ func (s *Server) handleMediaTagBatchByType(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":       "success",
 		"tagged_count": count,
+	})
+}
+
+// handleBatchTagAlbum POST /api/media/tag/batch-tag-album — 给整个相册的所有媒体打同一个标签。
+// 请求体: { album_id, tag_name }
+// 实现：通过 albumStoreProvider 取相册媒体 ID 列表，对每个 media 调 AddMediaTag（与
+// batch-add 一致的逐步落库策略，单个失败不中断），返回实际打标成功数。
+func (s *Server) handleBatchTagAlbum(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" || req.TagName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id and tag_name required"})
+		return
+	}
+	// 取相册及其媒体 ID 列表
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, req.AlbumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	// 对每个 media 打标签（仅对属于当前用户的未软删媒体打标）
+	tagged := 0
+	for _, mediaID := range album.MediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || m == nil || m.UserID != uid || m.Deleted {
+			continue
+		}
+		if err := s.store.AddMediaTag(r.Context(), uid, mediaID, req.TagName); err == nil {
+			tagged++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "success",
+		"tag_name":     req.TagName,
+		"album_id":     req.AlbumID,
+		"tagged_count": tagged,
 	})
 }
 
