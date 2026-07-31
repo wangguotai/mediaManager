@@ -436,6 +436,7 @@ fun MediaListScreen(
                     showShareLinkButton = selectedTab != 0, // V7 §1.2：仅云端源显示分享链接按钮
                     showBatchRenameButton = selectedTab != 0, // V8：仅云端源显示批量重命名
                     showBatchTagButton = selectedTab != 0, // V8：仅云端源显示批量标签
+                    showBatchUnfavoriteButton = selectedTab != 0, // V8：仅云端源显示批量取消收藏
                     onCreateShareLink = {
                         // V7 §1.2：打开配置对话框（密码可选 + 有效期选择）
                         shareLinkError = null
@@ -448,6 +449,10 @@ fun MediaListScreen(
                     onBatchTag = {
                         // V8：打开批量标签对话框
                         showBatchTagDialog = true
+                    },
+                    onBatchUnfavorite = {
+                        // V8：批量取消收藏选中项
+                        viewModel.batchRemoveFavoritesFromSelected()
                     }
                 )
             } else {
@@ -3366,13 +3371,15 @@ fun SelectionBottomBar(
     onCreateShareLink: () -> Unit = {},
     onBatchRename: () -> Unit = {},
     onBatchTag: () -> Unit = {},
+    onBatchUnfavorite: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
     showAddToAlbumButton: Boolean = false,
     showShareLinkButton: Boolean = false,
     showBatchRenameButton: Boolean = false,
-    showBatchTagButton: Boolean = false
+    showBatchTagButton: Boolean = false,
+    showBatchUnfavoriteButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3442,6 +3449,16 @@ fun SelectionBottomBar(
                 Icon(
                     painterResource(Res.drawable.ic_tag),
                     contentDescription = "批量打标签"
+                )
+            }
+        }
+
+        // V8：批量取消收藏（仅云端源显示，用空心星标图标 ☆）
+        if (showBatchUnfavoriteButton) {
+            IconButton(onClick = onBatchUnfavorite) {
+                Icon(
+                    painterResource(Res.drawable.ic_star_outline),
+                    contentDescription = "批量取消收藏"
                 )
             }
         }

@@ -1491,6 +1491,28 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/batch-favorite-remove — 批量取消收藏，返回成功数。 */
+    suspend fun batchRemoveFavorites(mediaIds: List<String>): Int {
+        if (mediaIds.isEmpty()) return 0
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-favorite-remove") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["removed_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRemoveFavorites FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：POST /api/media/album/sort-by-date — 按日期排序相册内媒体。 */
     suspend fun sortAlbumByDate(albumId: String, order: String): Boolean {
         return try {

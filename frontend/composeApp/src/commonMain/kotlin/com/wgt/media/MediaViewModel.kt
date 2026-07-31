@@ -1237,6 +1237,35 @@ class MediaViewModel {
     }
 
     /**
+     * V8：批量取消收藏选中项——调后端 /api/media/batch-favorite-remove。
+     *
+     * 先按本地 [favoriteIds] 过滤出真正已收藏的 id（未收藏的不必提交），
+     * 成功后更新本地 [favoriteIds] 与持久化、退出选择模式并提示。
+     * 若选中的均未收藏，直接提示"无已收藏项"。
+     */
+    fun batchRemoveFavoritesFromSelected() {
+        if (selectedMediaIds.isEmpty()) return
+        val ids = selectedMediaIds.toList()
+        val favoritedIds = ids.filter { favoriteIds.contains(it) }
+        if (favoritedIds.isEmpty()) {
+            errorMessage = "选中项无已收藏内容"
+            return
+        }
+        viewModelScope.launch {
+            val removed = MediaService.batchRemoveFavorites(favoritedIds)
+            if (removed > 0) {
+                favoriteIds = favoriteIds - favoritedIds.toSet()
+                FavoriteStore.saveFavoriteIds(favoriteIds)
+                errorMessage = "已取消收藏 $removed 项"
+                deselectAll()
+            } else {
+                errorMessage = "取消收藏失败，请稍后重试"
+            }
+        }
+    }
+
+
+    /**
      * V8：批量重命名选中项——调后端 /api/media/batch-rename。
      * 成功后刷新列表并退出选择模式。
      */
