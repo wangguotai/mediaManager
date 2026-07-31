@@ -2728,9 +2728,25 @@ fun ImagePreviewDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // 上一张导航：底栏最左侧。第一张禁用。
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_arrow_back,
+                                label = "上一张",
+                                enabled = currentIndex > 0,
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                                    }
+                                }
+                            )
+                            // 中间操作按钮组（编辑/重命名/收藏/删除/详情 等）
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                             // 动态照片按钮：仅当当前图片是 Live Photo 时显示。
                             // 点击播放关联的视频部分（live_photo_video_id）。
                             if (currentMedia.is_live_photo && currentMedia.live_photo_video_id.isNotEmpty()) {
@@ -2815,6 +2831,18 @@ fun ImagePreviewDialog(
                                 iconRes = Res.drawable.ic_slideshow,
                                 label = "幻灯片",
                                 onClick = onSlideshow
+                            )
+                            } // 中间操作按钮组 Row
+                            // 下一张导航：底栏最右侧。最后一张禁用。
+                            PreviewActionButton(
+                                iconRes = Res.drawable.ic_arrow_forward,
+                                label = "下一张",
+                                enabled = currentIndex < mediaList.lastIndex,
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                                    }
+                                }
                             )
                         }
                     }
@@ -3753,9 +3781,14 @@ private fun BlurredBackground(
 private fun PreviewActionButton(
     iconRes: DrawableResource,
     label: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val alpha by animateFloatAsState(
+        targetValue = if (enabled) 1f else 0.35f,
+        label = "navBtnAlpha"
+    )
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -3767,9 +3800,11 @@ private fun PreviewActionButton(
             .clickable(
                 interactionSource = interactionSource,
                 indication = ripple(bounded = true),
+                enabled = enabled,
                 onClick = onClick
             )
             .padding(horizontal = 16.dp, vertical = 6.dp)
+            .alpha(alpha)
     ) {
         Icon(
             painter = painterResource(iconRes),
