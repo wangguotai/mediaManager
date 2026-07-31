@@ -3337,6 +3337,57 @@ object MediaService {
     data class TagPair(val tagA: String, val tagB: String, val count: Int)
 
     /**
+     * V10：GET /api/media/tag/most-used — 最常用标签排行。
+     *
+     * 后端按关联媒体数 count DESC 返回 top N（默认 10，[limit] 透传 query param，
+     * 后端范围 [1,100]）。每条含 tag_name、count（关联媒体数，取自 media_tags 关系表
+     * 口径，不随 media 软删联动清理，故可能大于实际未软删数量）、total_bytes（关联
+     * 未软删 media 的 size 总和）、avg_bytes（total_bytes/count，整数除法）。
+     * 另返回 total_tags（该用户全部标签数）与 total_tagged_media（被任意标签标记的
+     * 未软删去重媒体数），前端目前仅消费 tags 列表渲染排行区。
+     *
+     * 响应: `{tags: [{tag_name, count, total_bytes, avg_bytes}], total_tags, total_tagged_media}`。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过排行区，不崩溃标签管理面板。
+     *
+     * @param limit 取前 N 条（透传 query param）；默认 10，标签管理面板取 top 5。
+     * @return 最常用标签列表（已按 count DESC）；失败返回 null
+     */
+    suspend fun getMostUsedTags(limit: Int = 10): List<MostUsedTag>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/tag/most-used") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    MostUsedTag(
+                        tagName = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        avgBytes = o["avg_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMostUsedTags FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V10：最常用标签排行项（[getMostUsedTags] 返回）。 */
+    data class MostUsedTag(
+        val tagName: String,
+        val count: Int,
+        val totalBytes: Long,
+        val avgBytes: Long
+    )
+
+    /**
      * V9：GET /api/media/tag-network — 标签网络图数据（节点+边）。
      *
      * 与 [getTagCoOccurrence] 同源数据但输出图结构：标签作为节点（[TagNode.count]

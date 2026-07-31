@@ -3101,6 +3101,10 @@ private fun MyTabContent(
                             // 后端只返回 count>=2 的对，且未按 count 排序，此处取 top 5 前先倒序。
                             var tagPairs by remember { mutableStateOf<List<MediaService.TagPair>?>(null) }
                             LaunchedEffect(Unit) { tagPairs = MediaService.getTagCoOccurrence() }
+                            // V10：最常用标签排行（调 GET /api/media/tag/most-used），用于"最常用标签"区。
+                            // 后端已按 count DESC 返回，此处取 top 5 渲染奖牌排行。null/空静默跳过。
+                            var mostUsedTags by remember { mutableStateOf<List<MediaService.MostUsedTag>?>(null) }
+                            LaunchedEffect(Unit) { mostUsedTags = MediaService.getMostUsedTags(limit = 5) }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -3115,6 +3119,46 @@ private fun MyTabContent(
                                                 .fillMaxWidth()
                                                 .verticalScroll(rememberScrollState())
                                         ) {
+                                            // V10：最常用标签排行区——展示关联媒体数最多的 5 个标签，
+                                            // 前 3 名配 🥇🥈🥉 奖牌、4-5 名配 🏅。数据来自
+                                            // getMostUsedTags(limit=5)（后端已按 count DESC 返回）；
+                                            // null（请求失败/未铺量）或空则静默跳过，不影响下方标签列表。
+                                            mostUsedTags?.let { tops ->
+                                                if (tops.isNotEmpty()) {
+                                                    Text(
+                                                        "最常用标签",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    tops.take(5).forEachIndexed { idx, t ->
+                                                        val medal = when (idx) {
+                                                            0 -> "🥇"
+                                                            1 -> "🥈"
+                                                            2 -> "🥉"
+                                                            else -> "🏅"
+                                                        }
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                "$medal #${t.tagName} (${t.count} 项 · ${formatBytesToMB(t.totalBytes)})",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                        }
+                                                    }
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                }
+                                            }
                                             list.forEach { s ->
                                                 Row(
                                                     modifier = Modifier
