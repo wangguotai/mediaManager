@@ -5985,8 +5985,9 @@ func (s *Server) handleMediaTagCloudData(w http.ResponseWriter, r *http.Request)
 //  3. 对每个标签，按 - / : 三种分隔符切分出前缀 parent + 后缀 suffix。
 //     - 若分隔符存在且 parent ∈ tagSet（父标签确实由用户独立使用），则视为
 //       父子关系；否则该标签作为顶层根。
-//     - 优先级：- > / > :（按出现顺序依次尝试，命中即停）。
-//  4. 根节点 = 无父的标签；children = 以该标签为 parent 的后缀标签（按字母序）。
+//     - 优先级：- > / :（按出现顺序依次尝试，命中即停）。
+//     - 仅按第一个分隔符切分：a-b-c 的父为 a（若 a 独立存在），不做多层嵌套，
+//       保持单层父子、简单可预测。
 //     count 取该标签自身关联媒体数（不含子标签的，避免重复统计口径混乱）。
 //
 // 注意：本端点只读，不落任何数据；推断纯基于标签名命名约定。
@@ -6027,8 +6028,8 @@ func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
 		tagSet[t] = struct{}{}
 	}
 	// splitParent 按 - / : 分隔符切分出 (parent, ok)。
-	// 命中即返回；分隔符优先级 - > / > :。仅按第一个分隔符切分
-	// （多级如 a-b-c 的父是 a-b，因 a-b 也需独立存在于 tagSet 才认父子）。
+	// 命中即返回；分隔符优先级 - > / :。仅按第一个分隔符切分
+	// （a-b-c 的父为 a，是非多层嵌套，保持单层简单可预测）。
 	splitParent := func(name string) (parent string, ok bool) {
 		for _, sep := range []string{"-", "/", ":"} {
 			if idx := strings.Index(name, sep); idx > 0 && idx < len(name)-len(sep) {
