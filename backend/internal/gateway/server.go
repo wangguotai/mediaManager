@@ -275,6 +275,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/copy-media", s.handleAlbumCopyMedia)
 	// V8：导出相册元数据为 JSON（相册信息 + 内含媒体列表 metadata）
 	s.mux.HandleFunc("/api/media/album/export", s.handleAlbumExport)
+	// V9：打包整个相册为 zip 下载（GET /api/media/album/download?album_id=xxx）
+	s.mux.HandleFunc("/api/media/album/download", s.handleAlbumDownload)
 	// V9：批量创建分享链接——一次为多个 media 各生成一个独立分享 token。
 	// 走 /api/media/ 前缀（authMiddleware 自动鉴权），handler 用 userIDFromContext 取 uid。
 	s.mux.HandleFunc("/api/media/batch-share", s.handleMediaBatchShare)
@@ -1989,6 +1991,95 @@ func (s *Server) handleAlbumExport(w http.ResponseWriter, r *http.Request) {
 		"media_count": len(media),
 		"media":       media,
 	})
+}
+
+// handleAlbumDownload 处理 GET /api/media/album/download?album_id=xxx，
+// 将整个相册内的媒体文件打包成 zip 流式返回。
+// 校验相册归属当前用户，仅打包未软删的媒体。文件定位逻辑与
+// handleMediaBatchDownload 一致：优先 userUploadsDir，缺失时回退 cloudDir。
+func (s *Server) handleAlbumDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	albumID := r.URL.Query().Get("album_id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	// 校验相册归属当前用户
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	album := provider.GetAlbum(uid, albumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+
+	// 相册名用于 zip 文件名，去掉文件名不安全字符（路径分隔符等）。
+	albumName := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' || r == '"' || r == '<' || r == '>' || r == '|' {
+			return '_'
+		}
+		return r
+	}, album.Name)
+	if albumName == "" {
+		albumName = "album"
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"album_%s.zip\"", albumName))
+	zipWriter := zip.NewWriter(w)
+	defer zipWriter.Close()
+
+	for _, mediaID := range album.MediaIDs {
+		if mediaID == "" || strings.Contains(mediaID, "..") || strings.Contains(mediaID, "/") {
+			continue
+		}
+		// 验证归属
+		media, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || media == nil || media.UserID != uid || media.Deleted {
+			continue
+		}
+		// 定位文件
+		files, err := filepath.Glob(filepath.Join(uploadsDir, mediaID+".*"))
+		if err != nil || len(files) == 0 {
+			if s.cloudDir != "" {
+				files, err = filepath.Glob(filepath.Join(s.cloudDir, mediaID+".*"))
+			}
+			if err != nil || len(files) == 0 {
+				continue
+			}
+		}
+		// 读文件写入 zip
+		data, err := os.ReadFile(files[0])
+		if err != nil {
+			continue
+		}
+		fw, err := zipWriter.Create(media.Filename)
+		if err != nil {
+			continue
+		}
+		fw.Write(data)
+	}
 }
 
 // handleAlbumRename V8：POST /api/media/album/rename — 重命名相册。
