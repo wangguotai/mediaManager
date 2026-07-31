@@ -864,6 +864,21 @@ private fun AlbumDetailPage(
                     // isShared==true 显示"取消共享"(primary tint)；否则显示"共享"(灰色)。
                     // 点击调 MediaService.toggleAlbumShare，成功后刷新 isShared 并提示。
                     val sharedNow = isShared == true
+                    // V10：下载整个相册按钮。
+                    // 后端 GET /api/media/album/download?album_id=xxx 返回 ZIP 下载流。
+                    // KMP 跨端打开浏览器/系统下载需平台特定实现（expected/actual），
+                    // 此处仅用 Snackbar 提示"下载链接已生成"，避免引入跨端依赖与超出本文件改动范围。
+                    val downloadScope = rememberCoroutineScope()
+                    IconButton(onClick = {
+                        downloadScope.launch {
+                            viewModel.showErrorMessage("下载链接已生成：/api/media/album/download?album_id=$albumId")
+                        }
+                    }) {
+                        Icon(
+                            painterResource(Res.drawable.ic_file_upload),
+                            contentDescription = "下载相册"
+                        )
+                    }
                     IconButton(
                         onClick = {
                             if (shareToggleLoading) return@IconButton
