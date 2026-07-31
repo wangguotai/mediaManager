@@ -388,6 +388,10 @@ func (s *Server) registerRoutes() {
 	// 访问次数）及已分享/未分享总数。只读端点，前端用于相册管理页展示分享概况。
 	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
 	s.mux.HandleFunc("/api/media/album-sharing-summary", s.handleAlbumSharingSummary)
+	// 综合：合并 album/stats-summary + album-sharing-summary + album/count-ranking 为一个端点，
+	// 返回 {summary, sharing, ranking}，供相册管理页首屏一次渲染（summary/sharing 全量、ranking 取 top 3）。
+	// 路径为 /api/media/album-stats-comprehensive（带连字符），不会落入 /api/media/album/ 前缀匹配。
+	s.mux.HandleFunc("/api/media/album-stats-comprehensive", s.handleAlbumStatsComprehensive)
 	// V8：批量删除相册
 	s.mux.HandleFunc("/api/media/album/delete-batch", s.handleAlbumDeleteBatch)
 	// V8：复制相册
@@ -10493,6 +10497,104 @@ func (s *Server) handleAlbumSharingSummary(w http.ResponseWriter, r *http.Reques
 		"albums":         infos,
 		"shared_total":   sharedTotal,
 		"unshared_total": unsharedTotal,
+	})
+}
+
+// handleAlbumStatsComprehensive GET /api/media/album-stats-comprehensive — 相册综合统计。
+// 一次请求合并三组相册维度统计，供前端相册管理页首屏一次渲染，避免并发拉取
+// album/stats-summary、album-sharing-summary、album/count-ranking 三个端点：
+//
+//   - summary：总相册数 / 总照片数（各相册 MediaIDs 计数之和，跨相册不去重）/
+//     平均每相册照片数 / 照片数最多的相册（largest_album，仅 name+count，无相册时 null）。
+//   - sharing：已分享 / 未分享相册数；共享判定来自 ListAlbumSharesByAlbum，
+//     store 不可用时全部按"未分享"返回（与 album-sharing-summary 行为一致）。
+//   - ranking：按相册内照片数倒序的 top 3（仅 name+count）。
+//
+// 设计取舍：
+//   - 总照片数口径与 stats-summary / count-ranking 一致——各相册 MediaIDs 长度之和，
+//     同一 media 被多相册收录会重复计入，避免为去重额外拉全量媒体。
+//   - ranking 取 top 3 而非全量（区别于 count-ranking 返回完整排行），且只返 name+count，
+//     省略 album_id/cover_media_id，保持综合端点载荷精简。
+func (s *Server) handleAlbumStatsComprehensive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	type rankItem struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	type albumBrief struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+
+	totalAlbums := len(albums)
+	totalPhotos := 0
+	sharedTotal := 0
+	unsharedTotal := 0
+	ranking := make([]rankItem, 0, len(albums))
+	var largest *albumBrief
+	for _, a := range albums {
+		count := len(a.MediaIDs)
+		totalPhotos += count
+		ranking = append(ranking, rankItem{Name: a.Name, Count: count})
+		if largest == nil || count > largest.Count {
+			largest = &albumBrief{Name: a.Name, Count: count}
+		}
+		// 分享状态判定（与 album-sharing-summary 一致：store 不可用时按未分享处理）。
+		if s.store != nil {
+			shares, err := s.store.ListAlbumSharesByAlbum(r.Context(), a.ID, uid)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			if len(shares) > 0 {
+				sharedTotal++
+			} else {
+				unsharedTotal++
+			}
+		} else {
+			unsharedTotal++
+		}
+	}
+
+	var avgPhotos float64
+	if totalAlbums > 0 {
+		avgPhotos = float64(totalPhotos) / float64(totalAlbums)
+	}
+
+	sort.Slice(ranking, func(i, j int) bool {
+		return ranking[i].Count > ranking[j].Count
+	})
+	if len(ranking) > 3 {
+		ranking = ranking[:3]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": map[string]any{
+			"total_albums":  totalAlbums,
+			"total_photos":  totalPhotos,
+			"avg_photos":    avgPhotos,
+			"largest_album": largest,
+		},
+		"sharing": map[string]any{
+			"shared":   sharedTotal,
+			"unshared": unsharedTotal,
+		},
+		"ranking": ranking,
 	})
 }
 
