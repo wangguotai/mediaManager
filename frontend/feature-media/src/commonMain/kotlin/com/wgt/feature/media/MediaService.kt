@@ -5693,6 +5693,58 @@ object MediaService {
         }
     }
 
+    /** V8：操作时间线条目（与后端 [handleAuditTimeline] item JSON 对齐）。 */
+    data class AuditTimelineItem(
+        val id: String,
+        val action: String,
+        val detail: String,
+        val mediaId: String,
+        val createdAt: String,
+        val relativeTime: String
+    )
+
+    /**
+     * V8：GET /api/media/audit-timeline?limit=50 — 操作时间线。
+     *
+     * 返回当前用户最近 [limit] 条审计记录（按 created_at 倒序），每条附中文相对时间
+     * `relative_time`（如"3分钟前"/"昨天"，由后端 [relativeTimeZh] 计算）。
+     *
+     * 后端响应体：`{ "timeline": [{id,action,detail,media_id,created_at,relative_time}], "total": N }`。
+     * 注意 `id` 为后端 `audit_logs.id`（TEXT PRIMARY KEY），按字符串解析；`detail`/`media_id`
+     * 为 omitempty 字段，缺失时回退空串。`created_at` 为 RFC3339 字符串，前端仅透传不解析。
+     *
+     * 失败返回 null，调用方按空状态展示。
+     *
+     * @param limit 返回上限（默认 50，后端上限 200，<=0 回退默认 50）
+     */
+    suspend fun getAuditTimeline(limit: Int = 50): List<AuditTimelineItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/audit-timeline") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["timeline"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    AuditTimelineItem(
+                        id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        action = o["action"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull ?: "",
+                        relativeTime = o["relative_time"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getAuditTimeline status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAuditTimeline FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /**
      * V8：GET /api/media/audit-log/by-media?media_id=xxx — 单个媒体操作历史。
      *

@@ -1949,6 +1949,88 @@ fun SettingsScreen(
                     )
                 }
             }
+            // V8：操作时间线卡片（GET /api/media/audit-timeline?limit=N）
+            // 逐条展示最近操作，每行：emoji + detail + 相对时间；最多渲染 15 条，
+            // 底部"加载更多"按钮按 +50 递增 limit 重新拉取。
+            var auditTimeline by remember { mutableStateOf<List<MediaService.AuditTimelineItem>?>(null) }
+            var auditTimelineLimit by remember { mutableStateOf(50) }
+            var auditTimelineLoading by remember { mutableStateOf(true) }
+            LaunchedEffect(auditTimelineLimit) {
+                auditTimelineLoading = true
+                auditTimeline = MediaService.getAuditTimeline(auditTimelineLimit)
+                auditTimelineLoading = false
+            }
+            SectionTitle("操作时间线", iconRes = Res.drawable.ic_info)
+            auditTimeline?.let { items ->
+                if (items.isNotEmpty()) {
+                    items.take(15).forEach { entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                auditActionEmoji(entry.action),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                entry.detail.ifEmpty { entry.action },
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                entry.relativeTime,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                    // 已加载但未展示完（items > 15）或已达 limit 上限时可继续加载更多
+                    if (items.size >= 15) {
+                        TextButton(
+                            onClick = { auditTimelineLimit += 50 },
+                            enabled = !auditTimelineLoading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (auditTimelineLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("加载中…")
+                            } else {
+                                Text("加载更多")
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        "暂无操作记录",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                    )
+                }
+            } ?: if (auditTimelineLoading) {
+                Text(
+                    "加载中...",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                )
+            } else {
+                Text(
+                    "加载失败",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                )
+            }
             // V23：媒体覆盖率卡片（GET /api/media/media-coverage）
             // 显示标签/收藏/分享/相册 4 个维度的覆盖率，每行带 LinearProgressIndicator。
             var mediaCoverage by remember { mutableStateOf<MediaService.MediaCoverage?>(null) }
@@ -2331,6 +2413,25 @@ private fun SectionTitle(text: String, iconRes: DrawableResource? = null) {
             color = MaterialTheme.colorScheme.primary
         )
     }
+}
+
+/**
+ * 操作类型 → emoji 映射，用于"操作时间线"卡片每行前缀。
+ *
+ * 后端 [handleAuditTimeline] 的 action 字段取自 audit_log.action，记录时为动词
+ * （upload/delete/share/rename/favorite/tag/restore/rotate 等）。此处按已知动作给 emoji；
+ * 未知动作回退通用 ":memo:"，保证行不破。匹配对大小写不敏感，覆盖后端可能的小写埋点。
+ */
+private fun auditActionEmoji(action: String): String = when (action.lowercase()) {
+    "upload" -> "📤"
+    "delete" -> "🗑️"
+    "share" -> "🔗"
+    "rename" -> "✏️"
+    "favorite" -> "⭐"
+    "tag" -> "🏷️"
+    "restore" -> "♻️"
+    "rotate" -> "🔄"
+    else -> "📝"
 }
 
 /**
