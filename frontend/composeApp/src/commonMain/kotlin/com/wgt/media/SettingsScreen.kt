@@ -721,6 +721,27 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
             }
+            // V8：服务器磁盘使用
+            var diskUsage by remember { mutableStateOf<MediaService.DiskUsage?>(null) }
+            LaunchedEffect(Unit) { diskUsage = MediaService.getDiskUsage() }
+            diskUsage?.let { d ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("服务器磁盘", style = MaterialTheme.typography.bodyLarge)
+                    val usedStr = d.usedGB.toString().let { it.take(it.indexOf('.') + 2) }
+                    val totalStr = d.totalGB.toString().let { it.take(it.indexOf('.') + 2) }
+                    val pctStr = d.usagePercent.toString().let { it.take(it.indexOf('.') + 2) }
+                    Text(
+                        "$usedStr / $totalStr GB ($pctStr%)",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (d.usagePercent > 90) MaterialTheme.colorScheme.error
+                               else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
             // V7：检查 RN 热更新
             var updateStatus by remember { mutableStateOf("") }
             var checkingUpdate by remember { mutableStateOf(false) }

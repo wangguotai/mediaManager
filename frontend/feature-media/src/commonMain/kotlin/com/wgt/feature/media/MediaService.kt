@@ -1419,6 +1419,39 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/disk-usage — 服务器磁盘使用情况。 */
+    suspend fun getDiskUsage(): DiskUsage? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/disk-usage") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                DiskUsage(
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    usedBytes = o["used_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    freeBytes = o["free_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    usagePercent = o["usage_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getDiskUsage FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：磁盘使用 */
+    data class DiskUsage(
+        val totalBytes: Long,
+        val usedBytes: Long,
+        val freeBytes: Long,
+        val usagePercent: Double
+    ) {
+        val totalGB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val usedGB: Double get() = usedBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val freeGB: Double get() = freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+    }
+
     /** V8：GET /api/media/tag/autocomplete?q=xxx — 标签自动补全。 */
     suspend fun tagAutocomplete(query: String): List<String>? {
         return try {
