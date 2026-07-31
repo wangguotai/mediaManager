@@ -2122,6 +2122,77 @@ private fun MyTabContent(
             }
         }
 
+        // 活动流卡片（GET /api/media/activity-feed?limit=20）
+        // 与上方"最近活动"卡片互补：最近活动只覆盖 upload/share/favorite 三类且仅 5 条，
+        // 活动流聚合全库近期操作（含 delete/rename/tag/restore/rotate）为统一时间线，
+        // 最多展示 10 条，每条带 action emoji + detail + 相对时间（如"3分钟前"）。
+        // 后端尚未上线时 getActivityFeed 返回 null，本卡片整体跳过（null-skip），
+        // 不影响其它卡片渲染——与同级 stat 卡片失败语义一致。
+        var activityFeed by remember { mutableStateOf<List<MediaService.ActivityFeedItem>?>(null) }
+        LaunchedEffect(Unit) { activityFeed = MediaService.getActivityFeed() }
+        activityFeed?.let { feed ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "活动流",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (feed.isEmpty()) {
+                        Text(
+                            "暂无活动",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        feed.take(10).forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    when (item.action.lowercase()) {
+                                        "upload" -> "📤"
+                                        "delete" -> "🗑️"
+                                        "share" -> "🔗"
+                                        "rename" -> "✏️"
+                                        "favorite" -> "⭐"
+                                        "tag" -> "🏷️"
+                                        "restore" -> "♻️"
+                                        "rotate" -> "🔄"
+                                        else -> "📋"
+                                    },
+                                    fontSize = 16.sp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    item.detail,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    relativeTime(item.timestamp),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：设备列表卡片
         var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
         LaunchedEffect(Unit) { devices = MediaService.listDevices() }
@@ -4187,6 +4258,137 @@ private fun civilFromDaysPreview(z: Long): Triple<Int, Int, Int> {
 }
 
 private fun Int.pad2Preview(): String = if (this < 10) "0$this" else this.toString()
+
+/**
+ * 把活动流时间戳字符串转成相对中文描述（"刚刚"/"3分钟前"/"2小时前"/"昨天"/"5天前"），
+ * 超过 30 天或解析失败则回退到 `YYYY/MM/DD` 日期展示（复用 [formatPreviewDate]）。
+ *
+ * 输入兼容两种后端时间戳口径：
+ * 1. **纯数字串**：先按 epoch 秒（10 位）再按 epoch 毫秒（13 位）尝试 [toLongOrNull]，
+ *   秒值 *1000 统一到毫秒。这样既支持 Go `Unix()`（秒）也支持 `UnixMilli()`（毫秒）。
+ * 2. **RFC3339 字符串**（如 `"2026-08-01T12:34:56Z"` 或带时区偏移 `"2026-08-01T12:34:56+08:00"`）：
+ *    手写解析日期/时间分量，用 calendar-to-days 算法（同 [civilFromDaysPreview] 的逆运算）
+ *    把 (年,月,日,时,分,秒) 转回 epoch 毫秒。commonMain 无 java.time，且本仓库未引
+ *    kotlinx-datetime，故不做更严格的时区归一化——把"本地分量直接当 UTC 分量"算 epoch，
+ *    再 [systemTimeZoneOffsetMillis] 回补偏移，使相对差值在数小时/数天尺度上足够准确
+ *    （活动流是展示性时间线，不需要分钟级时区精确）。
+ *
+ * 设计动机：活动流后端时间戳字段格式尚未固化（[MediaService.ActivityFeedItem].timestamp
+ * 是 String），故前端宽容解析、失败回退日期，避免因格式不匹配而整列显示空。
+ */
+private fun relativeTime(timestamp: String): String {
+    val ts = timestamp.trim()
+    if (ts.isEmpty()) return ""
+
+    // —— 路径 1：纯数字（epoch 秒 / 毫秒）——
+    val asLong = ts.toLongOrNull()
+    if (asLong != null) {
+        val millis = if (asLong < 1_000_000_000_000L) asLong * 1000L else asLong
+        return relativeFromMillis(millis)
+    }
+
+    // —— 路径 2：ISO8601/RFC3339 手写解析 ——
+    val parsed = parseIso8601ToEpochMillis(ts) ?: return ""
+    return relativeFromMillis(parsed)
+}
+
+/** 由 epoch 毫秒算相对描述（内部共用）。 */
+private fun relativeFromMillis(epochMillis: Long): String {
+    if (epochMillis <= 0L) return ""
+    val now = nowEpochMillis()
+    val diff = now - epochMillis
+    if (diff < 0L) {
+        // 时间戳在未来（时钟偏移/后端时区导致）—— 显示日期兜底，不编造"未来"措辞。
+        return formatPreviewDate(epochMillis)
+    }
+    val sec = diff / 1000L
+    if (sec < 60L) return "刚刚"
+    val min = sec / 60L
+    if (min < 60L) return "${min}分钟前"
+    val hour = min / 60L
+    if (hour < 24L) return "${hour}小时前"
+    val day = hour / 24L
+    if (day == 1L) return "昨天"
+    if (day < 30L) return "${day}天前"
+    return formatPreviewDate(epochMillis)
+}
+
+/**
+ * 手写 ISO8601/RFC3339 解析：`YYYY-MM-DDThh:mm:ss[.frac][Z|±hh:mm]` → epoch 毫秒。
+ *
+ * 仅取日期 + 秒级时间分量，小数秒丢弃（活动流时间线不需要亚秒精度）。
+ * 时区处理策略：把解析出的"年月日时分秒"先按 UTC 求 epoch（天用 calendar-to-days
+ * 算法），若带 `Z`/`+00:00` 则不加偏移；若带非零 `±hh:mm` 偏移，则减去该偏移得到 UTC
+ * 毫秒，再加 [systemTimeZoneOffsetMillis] 转本地——这样相对"现在"的差值与本地时钟一致。
+ * 解析失败返回 null，调用方回退空串/日期。
+ *
+ * 算法参考 [civilFromDaysPreview] 的逆：把 (年,月,日) 经 Howard Hinnant 的
+ * days_from_civil 公式得到自 1970-01-01 起的天数，*86400000 + 时分秒毫秒即 epoch。
+ */
+private fun parseIso8601ToEpochMillis(s: String): Long? {
+    // 把 ISO8601/RFC3339 串拆成「日期」「时间」「时区」三段，避免 indexOfFirst 里
+    // 混用 Char/Int 比较（曾在 `s.indexOf('-') < it` 处触发 Int<Char 类型歧义编译错）。
+    // 形如 "2026-08-01T12:34:56Z" / "2026-08-01 12:34:56+08:00" / "2026-08-01"。
+    val normalized = s.trim().replace(' ', 'T')
+    // 日期段：取首个 'T' 之前；无 'T' 则整串当日期。
+    val tIdx = normalized.indexOf('T')
+    val (datePart, restAfterDate) = if (tIdx >= 0) {
+        normalized.substring(0, tIdx) to normalized.substring(tIdx + 1)
+    } else {
+        normalized to ""
+    }
+    val d = datePart.split('-')
+    if (d.size < 3) return null
+    val year = d[0].toIntOrNull() ?: return null
+    val month = d[1].toIntOrNull() ?: return null
+    val day = d[2].toIntOrNull() ?: return null
+
+    // 时间段 + 时区段：restAfterDate 形如 "12:34:56Z" / "12:34:56.789+08:00" / ""（仅日期）
+    // 时区起始字符为 'Z' / 'z' 或最后一个 '+' / '-'（时间分量里不会出现 +/-，故末个即偏移号）。
+    val timeClean = restAfterDate.substringBefore('.')
+    val tzStart = timeClean.indexOfFirst { ch -> ch == 'Z' || ch == 'z' }
+        .let { zIdx -> if (zIdx >= 0) zIdx else timeClean.indexOfLast { ch -> ch == '+' || ch == '-' } }
+    val (timePart, tzPart) = if (tzStart >= 0 && tzStart < timeClean.length) {
+        timeClean.substring(0, tzStart) to timeClean.substring(tzStart)
+    } else {
+        timeClean to ""
+    }
+    val t = if (timePart.isEmpty()) listOf("0", "0", "0") else timePart.split(':')
+    val hour = t.getOrNull(0)?.toIntOrNull() ?: 0
+    val minute = t.getOrNull(1)?.toIntOrNull() ?: 0
+    val second = t.getOrNull(2)?.toIntOrNull() ?: 0
+
+    // —— (年,月,日) → 自 1970-01-01 的天数（Howard Hinnant days_from_civil）——
+    val y = if (month <= 2) year - 1 else year
+    val era = (if (y >= 0) y else y - 399) / 400
+    val yoe = (y - era * 400).toLong()
+    val doy = (153 * (if (month > 2) month - 3 else month + 9) + 2) / 5 + day - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    val daysSinceEpoch = era * 146097L + doe - 719468L
+
+    var epochMillis = daysSinceEpoch * 86_400_000L +
+        hour * 3_600_000L + minute * 60_000L + second * 1_000L
+
+    // —— 时区归一化到本地 ——
+    val tz = tzPart.trim()
+    when {
+        tz.isEmpty() || tz.equals("Z", ignoreCase = true) -> {
+            // 无偏移/UTC：加本地时区偏移使其与本地时钟对齐
+            epochMillis += systemTimeZoneOffsetMillis()
+        }
+        tz.length >= 3 && (tz[0] == '+' || tz[0] == '-') -> {
+            // ±hh:mm 或 ±hhmm 或 ±hh
+            val sign = if (tz[0] == '-') -1 else 1
+            val rest = tz.substring(1).replace(":", "")
+            val tzH = rest.substring(0, 2).toIntOrNull() ?: 0
+            val tzM = rest.drop(2).take(2).toIntOrNull() ?: 0
+            val offsetMillis = sign * (tzH * 3_600_000L + tzM * 60_000L)
+            // 先减去该偏移回 UTC，再加本地偏移到本地时钟
+            epochMillis = epochMillis - offsetMillis + systemTimeZoneOffsetMillis()
+        }
+    }
+    return epochMillis
+}
 
 /**
  * 预览底部缩略图条：水平滚动列表，当前项高亮，点击跳转。

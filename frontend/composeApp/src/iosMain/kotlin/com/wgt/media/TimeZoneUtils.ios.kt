@@ -13,3 +13,10 @@ import platform.Foundation.secondsFromGMT
  */
 actual fun systemTimeZoneOffsetMillis(): Long =
     NSTimeZone.defaultTimeZone().secondsFromGMT() * 1000L
+
+/**
+ * iOS 端：[platform.Foundation.NSDate].timeIntervalSince1970 返回秒（Double），
+ * *1000 转毫秒取整，与 Android [nowEpochMillis] 口径一致。
+ */
+actual fun nowEpochMillis(): Long =
+    (platform.Foundation.NSDate().timeIntervalSince1970() * 1000.0).toLong()

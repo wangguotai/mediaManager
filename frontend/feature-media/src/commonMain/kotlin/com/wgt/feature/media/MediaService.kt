@@ -1769,6 +1769,72 @@ object MediaService {
     )
 
     /**
+     * 活动流条目 —— [getActivityFeed] 返回的单条记录。
+     *
+     * 与 V7 的 [ActivityInfo] 并存而非合并，因两者字段口径不同：活动流后端
+     * （GET /api/media/activity-feed）额外带 [action]（用于 emoji 映射），且
+     * [timestamp] 是字符串（后端 time.Time 的 RFC3339 串，或 epoch 数字串），
+     * 而 [ActivityInfo].timestamp 是 [Long]。并发演进比强行抽象更稳。
+     *
+     * @param type 活动大类（upload/delete/share/...）—— 与 [action] 通常一致，
+     *             保留二字以便后端区分"大类/具体动作"时仍可用。
+     * @param action 具体动作关键字，用作 emoji 映射键（见活动流卡片 [MediaListScreen]）
+     * @param detail 人类可读描述，原样展示
+     * @param mediaId 关联媒体 ID，缺失为空串
+     * @param timestamp 时间戳字符串 —— RFC3339（如 "2026-08-01T12:34:56Z"）或 epoch 秒/毫秒数字串
+     */
+    data class ActivityFeedItem(
+        val type: String,
+        val action: String,
+        val detail: String,
+        val mediaId: String,
+        val timestamp: String
+    )
+
+    /**
+     * 统一活动流：GET /api/media/activity-feed?limit=20。
+     *
+     * 后端返回 `{feed: [{type, action, detail, media_id, timestamp}], total}`，
+     * 聚合全库近期操作（上传/删除/分享/重命名/收藏/打标签/恢复/旋转…）为一条统一时间线，
+     * 按 timestamp 倒序。前端最多取 [limit] 条，UI 再 take(10) 展示。
+     *
+     * 解析沿用 [getRecentActivity]/[getFileTypes] 的运行时 JSON 操作（无 serialization
+     * 编译器插件依赖）。[timestamp] 作为字符串原样透传，相对时间换算交给 UI 侧
+     * （[MediaListScreen] 的 `relativeTime` 辅助函数，支持 RFC3339 与 epoch 数字串）。
+     *
+     * 失败后盾：return null（与同级 stat 方法一致），UI 侧 null-skip 不渲染该卡片，
+     * 不抛异常——活动流是锦上添花的展示卡片，不应因后端未上线/暂时性网络错误搞挂"我的"Tab。
+     *
+     * @param limit 请求条数上限，默认 20（UI 侧再裁剪到 10 显示）
+     * @return 活动流条目列表（后端原序，通常已倒序）；HTTP 非 200 或异常返回 null
+     */
+    suspend fun getActivityFeed(limit: Int = 20): List<ActivityFeedItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/activity-feed") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["feed"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    ActivityFeedItem(
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        action = o["action"]?.jsonPrimitive?.contentOrNull
+                            ?: o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        timestamp = o["timestamp"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getActivityFeed FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 后端搜索历史条目 —— 对应 GET /api/media/search-history 返回的 history[] 元素。
      *
      * 后端结构：`{ "id": "...", "action": "...", "detail": "...", "created_at": "..." }`。

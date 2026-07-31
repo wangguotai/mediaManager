@@ -13,3 +13,15 @@ package com.wgt.media
  * epoch 毫秒对齐到本地午夜做"今天/昨天"判定与时分展示。
  */
 expect fun systemTimeZoneOffsetMillis(): Long
+
+/**
+ * 当前时间的 Unix 毫秒。
+ *
+ * commonMain 拿不到 `System.currentTimeMillis()`（JVM-only）也不想引 kotlinx-datetime，
+ * 故由各平台 actual 提供本机时钟读数：
+ *   - Android：[System.currentTimeMillis]
+ *   - iOS：[platform.Foundation.NSDate].[timeIntervalSince1970] * 1000
+ *
+ * 供活动流卡片 [MediaListScreen] 的 `relativeTime` 计算与"现在"的差值。
+ */
+expect fun nowEpochMillis(): Long

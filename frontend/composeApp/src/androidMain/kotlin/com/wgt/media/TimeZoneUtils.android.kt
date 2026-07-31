@@ -9,3 +9,8 @@ import java.util.TimeZone
  * 不含 DST 当时的临时调整——对"按本地午夜划日界"已足够。
  */
 actual fun systemTimeZoneOffsetMillis(): Long = TimeZone.getDefault().rawOffset.toLong()
+
+/**
+ * Android 端：直接读 [System.currentTimeMillis]。
+ */
+actual fun nowEpochMillis(): Long = System.currentTimeMillis()
