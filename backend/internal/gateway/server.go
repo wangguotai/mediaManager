@@ -279,6 +279,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/album/sort-by-date", s.handleAlbumSortByDate)
 	// V8：批量给所有无封面相册自动设封面（用第一个 media）
 	s.mux.HandleFunc("/api/media/album/auto-cover-all", s.handleAlbumAutoCoverAll)
+	// V8：按媒体类型批量打标签（IMAGE→照片/VIDEO→视频/LIVE_PHOTO→动态照片）
+	s.mux.HandleFunc("/api/media/tag/batch-by-type", s.handleMediaTagBatchByType)
 	// V8：自动清理重复媒体
 	s.mux.HandleFunc("/api/media/duplicate-cleanup", s.handleMediaDuplicateCleanup)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
@@ -4457,6 +4459,34 @@ func (s *Server) handleAlbumAutoCoverAll(w http.ResponseWriter, r *http.Request)
 		"status":        "success",
 		"updated_count": updated,
 		"total_albums":  total,
+	})
+}
+
+// handleMediaTagBatchByType V8：POST /api/media/tag/batch-by-type — 按媒体类型
+// 批量打标签。IMAGE → 照片, VIDEO → 视频, LIVE_PHOTO → 动态照片。
+// 无请求体。跳过已删除或类型未知的媒体。返回 { status, tagged_count }。
+func (s *Server) handleMediaTagBatchByType(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	count, err := s.store.BatchTagByType(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "success",
+		"tagged_count": count,
 	})
 }
 

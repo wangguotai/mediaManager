@@ -655,6 +655,30 @@ func (s *Store) DeleteTag(ctx context.Context, userID, tagName string) (int, err
 	return int(n), nil
 }
 
+// BatchTagByType V8：按媒体类型批量打标签。
+// IMAGE → 照片, VIDEO → 视频, LIVE_PHOTO → 动态照片
+func (s *Store) BatchTagByType(ctx context.Context, userID string) (int, error) {
+	mediaList, err := s.ListMediaByUser(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	typeTagMap := map[string]string{"IMAGE": "照片", "VIDEO": "视频", "LIVE_PHOTO": "动态照片"}
+	count := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		tag, ok := typeTagMap[m.Type]
+		if !ok {
+			continue
+		}
+		if err := s.AddMediaTag(ctx, userID, m.ID, tag); err == nil {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // ===== ShareToken =====（PRD-v7 §1.2 分享链接）
 
 // CreateShareToken 插入一行 share_tokens。Token/UserID/MediaIDs 必填；
