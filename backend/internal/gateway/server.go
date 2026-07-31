@@ -137,6 +137,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-stats", s.handleMediaStorageStats)
 	// V7：重复文件检测端点（基于 SHA256 分组）
 	s.mux.HandleFunc("/api/media/duplicates", s.handleMediaDuplicates)
+	// 近似重复检测（SHA256 不同但同类型+大小相近<5%+同分辨率），
+	// 可能是不同格式/质量的同一照片，与 /duplicates（精确 SHA 去重）互补。
+	s.mux.HandleFunc("/api/media/media-duplicates-similar", s.handleMediaDuplicatesSimilar)
 	// V7：媒体库综合摘要端点
 	s.mux.HandleFunc("/api/media/summary", s.handleMediaSummary)
 	// V7：按月份分组的时间轴端点
@@ -3062,6 +3065,151 @@ func (s *Server) handleMediaDuplicates(w http.ResponseWriter, r *http.Request) {
 		"wasted_bytes": totalWasted,
 		"wasted_mb":    float64(totalWasted) / (1024 * 1024),
 		"user_id":      uid,
+	})
+}
+
+// handleMediaDuplicatesSimilar 处理 GET /api/media/media-duplicates-similar，
+// 返回近似重复媒体对：SHA256 不同（排除精确重复）但同类型 + 文件大小差距 <5%
+// + 宽*高分辨率完全相同。这类媒体可能是同一照片的不同格式/质量版本
+// （如一张 JPEG 导出又存了 PNG/HEIC，或不同压缩级的同一张图）。
+//
+// 查询参数：?limit=50（默认 50，上限 500）。返回 {pairs:[...], total}。
+// 与 handleMediaDuplicates（精确 SHA256 分组）互补：后者抓完全相同的文件，
+// 本端点抓"看起来是同一张图但内容指纹不同"的可疑对。
+func (s *Server) handleMediaDuplicatesSimilar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// limit：默认 50，上限 500，下限 0（允许返回空）。
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 只保留有效记录：未软删 + 有 SHA256 + 有分辨率信息（无尺寸无法判定同分辨率）。
+	type cand struct {
+		id       string
+		filename string
+		size     int64
+		sha      string
+		typ      string
+		width    int32
+		height   int32
+	}
+	cands := make([]cand, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m == nil || m.Deleted || m.SHA256 == "" {
+			continue
+		}
+		if m.Width <= 0 || m.Height <= 0 {
+			continue // 无尺寸信息无法比对分辨率
+		}
+		cands = append(cands, cand{
+			id:       m.ID,
+			filename: m.Filename,
+			size:     m.Size,
+			sha:      m.SHA256,
+			typ:      m.Type,
+			width:    m.Width,
+			height:   m.Height,
+		})
+	}
+
+	// 两两比对：O(n^2)，但近似重复检测本就是离线/低频分析端点，n 为单用户库规模，可接受。
+	type pair struct {
+		MediaAID   string `json:"media_a_id"`
+		MediaBID   string `json:"media_b_id"`
+		FilenameA  string `json:"filename_a"`
+		FilenameB  string `json:"filename_b"`
+		Size       int64  `json:"size"`       // 较大者的 size
+		Resolution string `json:"resolution"` // "WxH"
+		Type       string `json:"type"`
+		SizeDiff   int64  `json:"size_diff"` // 两文件 size 绝对差
+	}
+	pairs := make([]pair, 0)
+	for i := 0; i < len(cands); i++ {
+		for j := i + 1; j < len(cands); j++ {
+			a, b := cands[i], cands[j]
+			// a) 同类型（IMAGE/VIDEO/LIVE_PHOTO）。
+			if a.typ != b.typ {
+				continue
+			}
+			// b) SHA256 必须不同（精确重复由 /duplicates 负责）。
+			if a.sha == b.sha {
+				continue
+			}
+			// c) 同分辨率：宽*高总像素完全相同（允许宽高比不同但同总像素，仍属可疑对）。
+			if int64(a.width)*int64(a.height) != int64(b.width)*int64(b.height) {
+				continue
+			}
+			// d) 文件大小差距 < 5%（以较大者为基准，避免被一对大小悬殊的误判）。
+			var maxSize, minSize int64
+			if a.size >= b.size {
+				maxSize, minSize = a.size, b.size
+			} else {
+				maxSize, minSize = b.size, a.size
+			}
+			if maxSize <= 0 {
+				continue
+			}
+			diffRatio := float64(maxSize-minSize) / float64(maxSize)
+			if diffRatio >= 0.05 {
+				continue
+			}
+			pairs = append(pairs, pair{
+				MediaAID:   a.id,
+				MediaBID:   b.id,
+				FilenameA:  a.filename,
+				FilenameB:  b.filename,
+				Size:       maxSize,
+				Resolution: fmt.Sprintf("%dx%d", a.width, a.height),
+				Type:       a.typ,
+				SizeDiff:   maxSize - minSize,
+			})
+		}
+	}
+
+	// 按 size_diff 升序（差距越小越可疑）+ id 稳定 tie-break。
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].SizeDiff != pairs[j].SizeDiff {
+			return pairs[i].SizeDiff < pairs[j].SizeDiff
+		}
+		return pairs[i].MediaAID < pairs[j].MediaAID
+	})
+
+	total := len(pairs)
+	if len(pairs) > limit {
+		pairs = pairs[:limit]
+	}
+	if pairs == nil {
+		pairs = []pair{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pairs":   pairs,
+		"total":   total, // 全部匹配对数（截断前），便于前端判断是否还有更多
+		"user_id": uid,
 	})
 }
 
