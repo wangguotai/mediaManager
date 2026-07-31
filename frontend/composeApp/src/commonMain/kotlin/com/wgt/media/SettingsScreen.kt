@@ -296,6 +296,10 @@ fun SettingsScreen(
     var yearlyReview by remember { mutableStateOf<MediaService.YearlyReview?>(null) }
     var yearlyReviewYear by remember { mutableStateOf(2026) }
 
+    // V16：重复文件详情对话框状态
+    var showDuplicateReport by remember { mutableStateOf(false) }
+    var duplicateReport by remember { mutableStateOf<MediaService.DupReport?>(null) }
+
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
@@ -322,6 +326,19 @@ fun SettingsScreen(
             year = yearlyReviewYear,
             review = yearlyReview,
             onDismiss = { showYearlyReview = false }
+        )
+    }
+
+    // V16：重复文件详情对话框——打开时加载，关闭时清空以便下次重新拉取
+    if (showDuplicateReport) {
+        LaunchedEffect(Unit) {
+            if (duplicateReport == null) {
+                duplicateReport = MediaService.getDupReport()
+            }
+        }
+        DuplicateReportDialog(
+            report = duplicateReport,
+            onDismiss = { showDuplicateReport = false }
         )
     }
 
@@ -1096,11 +1113,22 @@ fun SettingsScreen(
                 ) {
                     Text("🔄 重复文件", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        "${r.duplicates.count} 个 · 可回收 ${formatBytesToMB(r.duplicates.reclaimableBytes)}",
+                        "${r.duplicates.count} 个 · 可回收 ${formatBytesToMB(r.totalReclaimableBytes.toDouble())}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
+                // V16：查看重复文件详情按钮——弹 Dialog 列出每组重复的文件名/大小/可回收空间
+                TextButton(
+                    onClick = {
+                        duplicateReport = null  // 清空以触发重新拉取
+                        showDuplicateReport = true
+                    },
+                    enabled = r.duplicates.count > 0,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                ) { Text("查看重复详情") }
                 // 📦 大文件（top 3，后端已按 size 倒序，本地取前 3）
                 if (r.largeFiles.isNotEmpty()) {
                     Row(
@@ -1518,6 +1546,104 @@ private fun modeLabel(mode: ThemeMode): String = when (mode) {
     ThemeMode.LIGHT -> "浅色"
     ThemeMode.DARK -> "暗色"
     ThemeMode.AMOLED -> "AMOLED 纯黑"
+}
+
+/**
+ * V16：重复文件详情对话框。
+ *
+ * 调 [MediaService.getDupReport] 展示按 SHA256 分组的重复文件列表。每组显示
+ * SHA256 前 8 位 + 重复数 + 可回收空间，列出前 3 个文件名；底部汇总总可回收空间。
+ * [report] 为 null 时显示加载中；拉取失败仍为 null 时显示错误提示。内容垂直可滚动。
+ */
+@Composable
+private fun DuplicateReportDialog(
+    report: MediaService.DupReport?,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("重复文件详情", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            if (report == null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("加载中...", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else if (report.duplicates.isEmpty()) {
+                Text(
+                    "暂无重复文件",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(vertical = 24.dp)
+                )
+            } else {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    report.duplicates.forEach { group ->
+                        // 每组：SHA256 前 8 位 · N 重复 · 可回收 MB
+                        Text(
+                            "${group.sha256.take(8)} · ${group.count} 个重复 ·" +
+                                " 可回收 ${formatBytesToMB(group.size)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        // 前 3 个文件名 + 大小
+                        group.media.take(3).forEach { m ->
+                            Text(
+                                "  ${m.filename.ifEmpty { "(未命名)" }} · ${formatBytesToMB(m.size)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                maxLines = 1
+                            )
+                        }
+                        if (group.media.size > 3) {
+                            Text(
+                                "  …及其余 ${group.media.size - 3} 个",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                        }
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                    // 底部汇总
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "总可回收",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            formatBytesToMB(report.totalReclaimableBytes),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 /** 一天对应的毫秒数（UTC）。 */

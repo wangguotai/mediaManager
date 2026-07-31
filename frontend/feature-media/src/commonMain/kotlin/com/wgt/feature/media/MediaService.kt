@@ -1345,7 +1345,7 @@ object MediaService {
     }
 
     /** V7：重复文件检测结果 */
-    data class DuplicateMedia(
+    data class DupReportMedia(
         val id: String,
         val filename: String,
         val size: Long,
@@ -1353,14 +1353,14 @@ object MediaService {
         val type: String,
         val createdAt: Long
     )
-    data class DuplicateGroup(
+    data class DupReportGroup(
         val sha256: String,
         val count: Int,
         val size: Long,
-        val media: List<DuplicateMedia>
+        val media: List<DupReportMedia>
     )
     data class DuplicateResult(
-        val groups: List<DuplicateGroup>,
+        val groups: List<DupReportGroup>,
         val groupCount: Int,
         val totalDupes: Int,
         val wastedBytes: Long
@@ -1411,7 +1411,7 @@ object MediaService {
                     val go = g.jsonObject
                     val media = go["media"]?.jsonArray?.map { m ->
                         val mo = m.jsonObject
-                        DuplicateMedia(
+                        DupReportMedia(
                             id = mo["id"]?.jsonPrimitive?.content ?: "",
                             filename = mo["filename"]?.jsonPrimitive?.content ?: "",
                             size = mo["size"]?.jsonPrimitive?.longOrNull ?: 0L,
@@ -1420,7 +1420,7 @@ object MediaService {
                             createdAt = mo["created_at"]?.jsonPrimitive?.longOrNull ?: 0L
                         )
                     } ?: emptyList()
-                    DuplicateGroup(
+                    DupReportGroup(
                         sha256 = go["sha256"]?.jsonPrimitive?.content ?: "",
                         count = go["count"]?.jsonPrimitive?.intOrNull ?: 0,
                         size = go["size"]?.jsonPrimitive?.longOrNull ?: 0L,
@@ -3831,6 +3831,71 @@ object MediaService {
         val oldFiles: OldInfo,
         val totalReclaimableBytes: Long,
         val recommendationCount: Int
+    )
+
+    /**
+     * V16：GET /api/media/duplicate-report — 重复文件详细报告（仅报告，不删除）。
+     *
+     * 与 [getStorageRecommendations] 的 duplicates 子统计不同，本端点返回每组重复的
+     * 完整媒体条目（id/filename/size/created_at），用于设置页「查看重复详情」Dialog
+     * 展示具体文件名与可回收空间。响应结构（与后端 [handleMediaDuplicateReport] 对齐）：
+     * ```
+     * { "duplicates": [{ "sha256", "count", "media": [{ "id","filename","size","created_at" }],
+     *                     "reclaimable_bytes" }],
+     *   "total_groups": N,
+     *   "total_reclaimable_bytes": N,
+     *   "total_duplicate_count": N }
+     * ```
+     * 复用既有 [DuplicateMedia] / [DuplicateGroup]（V7 getDuplicates 同款）；后端不返回
+     * media.type，置空串。组的 [DuplicateGroup.size] 存 reclaimable_bytes（可回收字节），
+     * 与 [getDuplicates] 中 size 语义一致（均为浪费/可回收空间）。失败返回 null。
+     */
+    suspend fun getDupReport(): DupReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/duplicate-report") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val dups = o["duplicates"]?.jsonArray?.map { g ->
+                    val go = g.jsonObject
+                    val media = go["media"]?.jsonArray?.map { m ->
+                        val mo = m.jsonObject
+                        DupReportMedia(
+                            id = mo["id"]?.jsonPrimitive?.contentOrNull ?: "",
+                            filename = mo["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                            size = mo["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                            sha256 = go["sha256"]?.jsonPrimitive?.contentOrNull ?: "",
+                            type = mo["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                            createdAt = mo["created_at"]?.jsonPrimitive?.longOrNull ?: 0L
+                        )
+                    } ?: emptyList()
+                    DupReportGroup(
+                        sha256 = go["sha256"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = go["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        size = go["reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        media = media
+                    )
+                } ?: emptyList()
+                DupReport(
+                    duplicates = dups,
+                    totalGroups = o["total_groups"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalReclaimableBytes = o["total_reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    totalDuplicateCount = o["total_duplicate_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getDupReport FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V16：duplicate-report 汇总（重复分组列表 + 全局总计）。复用 [DuplicateGroup]。 */
+    data class DupReport(
+        val duplicates: List<DupReportGroup>,
+        val totalGroups: Int,
+        val totalReclaimableBytes: Long,
+        val totalDuplicateCount: Int
     )
 
     /**
