@@ -281,6 +281,10 @@ func (s *Server) registerRoutes() {
 	// 每个标签占用的存储量与活跃度。实现：TagStats 取标签计数，ListMediaByUser 一次拉
 	// 全量 media 建索引，SearchMediaByTag 取每个标签关联的 media_id，汇总落 sum/max。
 	s.mux.HandleFunc("/api/media/tag-stat-detailed", s.handleMediaTagStatDetailed)
+	// 按媒体类型统计标签使用：每个标签在 IMAGE/VIDEO/LIVE_PHOTO 中的分布。
+	// 区别于 tag/stats（仅 count）与 tag-stat-detailed（count+size+时间），本端点聚焦
+	// 类型维度，供前端展示"图片标签 vs 视频标签"分布。
+	s.mux.HandleFunc("/api/media/tag/stat-by-type", s.handleTagStatByType)
 	// 标签共现分析（哪些标签经常一起出现在同一 media 上）。
 	// 对每对标签统计同时拥有两者的 media 数量，只返回 co-occurrence >= 2 的标签对。
 	s.mux.HandleFunc("/api/media/tag-co-occurrence", s.handleTagCoOccurrence)
@@ -5325,6 +5329,84 @@ func (s *Server) handleMediaTagStatDetailed(w http.ResponseWriter, r *http.Reque
 			row["last_created_at"] = nil
 		}
 		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       out,
+		"total_tags": len(out),
+	})
+}
+
+// handleTagStatByType GET /api/media/tag/stat-by-type — 按媒体类型统计标签使用。
+// 对每个标签返回：tag_name + total（关联媒体总数）+ image_count/video_count/live_count
+// （该标签在 IMAGE/VIDEO/LIVE_PHOTO 三类媒体中的分布数量）。
+// 响应: { tags: [{tag_name, total, image_count, video_count, live_count}], total_tags }。
+//
+// 实现策略（避免 N+1 查询 media 行，与 handleMediaTagStatDetailed 一致）：
+//  1. ListAllTags 取该用户全量标签名（按名字升序）。
+//  2. ListMediaByUser 一次拉该用户全量 media，构造 id→*Media 索引。
+//  3. 对每个标签调 SearchMediaByTag 取关联 media_id 列表，用索引查 m.Type 统计分布。
+//     LIVE_PHOTO 计入 live_count；未在索引中命中（软删/缺失）的 id 跳过，best-effort。
+func (s *Server) handleTagStatByType(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 一次拉全量 media 建索引，避免对每个 media_id 单独 GetMedia。
+	medias, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	idx := make(map[string]*storage.Media, len(medias))
+	for _, m := range medias {
+		idx[m.ID] = m
+	}
+	type tagTypeStat struct {
+		TagName     string `json:"tag_name"`
+		Total       int    `json:"total"`
+		ImageCount  int    `json:"image_count"`
+		VideoCount  int    `json:"video_count"`
+		LiveCount   int    `json:"live_count"`
+	}
+	out := make([]tagTypeStat, 0, len(tags))
+	for _, tagName := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		st := tagTypeStat{TagName: tagName}
+		for _, id := range ids {
+			m, ok := idx[id]
+			if !ok {
+				// 软删或缺失，跳过类型统计（best-effort），不计入 total。
+				continue
+			}
+			switch m.Type {
+			case "IMAGE":
+				st.ImageCount++
+			case "VIDEO":
+				st.VideoCount++
+			case "LIVE_PHOTO":
+				st.LiveCount++
+			}
+			st.Total++
+		}
+		out = append(out, st)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":       out,
