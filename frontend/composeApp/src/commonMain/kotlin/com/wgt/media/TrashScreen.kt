@@ -78,7 +78,15 @@ fun TrashScreen(onBack: () -> Unit) {
                 },
                 actions = {
                     if (selectedIds.isNotEmpty()) {
-                        TextButton(onClick = { restore() }) { Text("恢复") }
+                        // V8：恢复选中（走 batch-restore 端点）
+                        TextButton(onClick = {
+                            scope.launch {
+                                val count = MediaService.batchRestore(selectedIds.toList())
+                                snackbarMsg = "已恢复 $count 项"
+                                items = MediaService.getTrash()
+                                selectedIds = emptySet()
+                            }
+                        }) { Text("恢复选中") }
                         TextButton(onClick = { purge() }) { Text("彻底删除") }
                     } else if (items.isNotEmpty()) {
                         // V7：恢复全部

@@ -2243,6 +2243,28 @@ object MediaService {
         }
     }
 
+    /** V8：POST /api/media/batch-restore — 批量恢复，返回成功数。 */
+    suspend fun batchRestore(mediaIds: List<String>): Int {
+        if (mediaIds.isEmpty()) return 0
+        return try {
+            val body = Json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+            })
+            val response: HttpResponse = jsonClient.post("${rnBackendBaseUrl()}/api/media/batch-restore") {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val respBody: String = response.body()
+                val obj = Json.parseToJsonElement(respBody).jsonObject
+                obj["restored_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else 0
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRestore failed: ${e.message}")
+            0
+        }
+    }
+
     /** POST /api/media/purge — 彻底删除。返回成功数。 */
     suspend fun purgeMedia(mediaIds: List<String>): Int {
         if (mediaIds.isEmpty()) return 0
