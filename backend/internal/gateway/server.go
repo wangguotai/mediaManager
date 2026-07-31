@@ -268,6 +268,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
+	// V8：自动设置相册封面（用第一个 media）
+	s.mux.HandleFunc("/api/media/album/auto-cover", s.handleAlbumAutoCover)
 	// V8：清理孤立记录（磁盘文件缺失的媒体软删除）
 	s.mux.HandleFunc("/api/media/cleanup-orphan", s.handleMediaCleanupOrphan)
 
@@ -4152,6 +4154,64 @@ func (s *Server) handleAlbumMerge(w http.ResponseWriter, r *http.Request) {
 		"merged_count":    added,
 		"target_album_id": req.TargetAlbumID,
 		"deleted_source":  req.SourceAlbumID,
+	})
+}
+
+// handleAlbumAutoCover V8：POST /api/media/album/auto-cover — 自动设置相册封面。
+// 请求体: { album_id }
+// 如果相册没有封面，用第一个 media 作为封面。
+func (s *Server) handleAlbumAutoCover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumID string `json:"album_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if req.AlbumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_id required"})
+		return
+	}
+	album := provider.GetAlbum(uid, req.AlbumID)
+	if album == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "album not found"})
+		return
+	}
+	// 已有封面则不覆盖
+	if album.CoverMediaID != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":         "already_set",
+			"cover_media_id": album.CoverMediaID,
+		})
+		return
+	}
+	// 用第一个 media 作为封面
+	if len(album.MediaIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album is empty"})
+		return
+	}
+	coverID := album.MediaIDs[0]
+	if err := provider.SetAlbumCover(uid, req.AlbumID, coverID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "success",
+		"cover_media_id": coverID,
 	})
 }
 
