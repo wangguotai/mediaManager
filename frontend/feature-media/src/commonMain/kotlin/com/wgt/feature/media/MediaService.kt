@@ -1051,6 +1051,56 @@ object MediaService {
     }
 
     /**
+     * 相册排单项——GET /api/media/album/count-ranking 返回的排行榜中的一条。
+     *
+     * 后端字段：album_id / name / count / cover_media_id（见 [handleAlbumCountRanking]）。
+     * [count] 为该相册内的媒体项数，按降序排列；[coverMediaId] 可空（相册无封面时为 null）。
+     */
+    data class AlbumRankItem(
+        val albumId: String,
+        val name: String,
+        val count: Int = 0,
+        val coverMediaId: String? = null
+    )
+
+    /**
+     * V9：GET /api/media/album/count-ranking — 获取按媒体项数降序排列的相册排行榜。
+     *
+     * 后端返回 `{"ranking":[{album_id,name,count,cover_media_id}], "total_albums":N}`。
+     * ranking 已按 count 降序排好；本方法原样返回列表，"相册排行"卡片.take(5) 取前 5。
+     *
+     * 后端不可用/出错时返回 null（与 [getAllAlbumsSummary] 的 emptyList 语义不同——
+     * 排行榜为空是合理的"暂无数据"状态，但网络失败应与"成功但空"区分，故用 null）。
+     *
+     * @return 排行榜列表（已按 count 降序），或 null（失败）
+     */
+    suspend fun getAlbumCountRanking(): List<AlbumRankItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/count-ranking")
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val arr = obj["ranking"]?.jsonArray ?: JsonArray(emptyList())
+                arr.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val albumId = o["album_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    AlbumRankItem(
+                        albumId = albumId,
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        coverMediaId = o["cover_media_id"]?.jsonPrimitive?.contentOrNull
+                    )
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumCountRanking FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 发送命令到 OpenClaw (通过后端桥梁)
      *
      * @param path OpenClaw gateway 上的路径，必须以 '/' 开头

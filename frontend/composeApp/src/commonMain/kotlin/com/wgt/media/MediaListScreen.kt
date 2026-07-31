@@ -1843,6 +1843,84 @@ private fun MyTabContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // V9：相册排行卡片（GET /api/media/album/count-ranking）
+        // 在相册概览后展示照片最多的 top 5 相册，带奖牌 emoji 与相对最大值的进度条。
+        var albumRanking by remember { mutableStateOf<List<MediaService.AlbumRankItem>?>(null) }
+        LaunchedEffect(Unit) { albumRanking = MediaService.getAlbumCountRanking() }
+        albumRanking?.let { ranking ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "相册排行",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (ranking.isEmpty()) {
+                        Text(
+                            "暂无相册",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        val top5 = ranking.take(5)
+                        val maxCount = top5.maxOf { it.count }.coerceAtLeast(1)
+                        top5.forEachIndexed { idx, item ->
+                            val medal = when (idx) {
+                                0 -> "🥇"
+                                1 -> "🥈"
+                                2 -> "🥉"
+                                else -> "${idx + 1}"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    medal,
+                                    fontSize = 16.sp,
+                                    modifier = Modifier.width(28.dp)
+                                )
+                                Text(
+                                    item.name.ifEmpty { "未命名相册" },
+                                    fontSize = 13.sp,
+                                    fontWeight = if (idx < 3) FontWeight.Medium else FontWeight.Normal,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { (item.count.toFloat() / maxCount).coerceIn(0f, 1f) },
+                                    modifier = Modifier.width(72.dp).height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text(
+                                    "${item.count} 项",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.width(44.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // V7：分享链接列表卡片
         var shares by remember { mutableStateOf<List<MediaService.ShareInfo>?>(null) }
         LaunchedEffect(Unit) { shares = MediaService.listShares() }
