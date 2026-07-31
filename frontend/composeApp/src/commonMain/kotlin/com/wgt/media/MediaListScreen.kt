@@ -809,6 +809,44 @@ private fun MyTabContent(
             }
         }
 
+        // V7：收藏快速统计
+        var favCount by remember { mutableStateOf<Int?>(null) }
+        LaunchedEffect(Unit) {
+            favCount = MediaService.getFavorites()?.size
+        }
+        favCount?.let { count ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("⭐", fontSize = 24.sp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            "收藏",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "$count",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
         // V7：设备列表卡片
         var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
         LaunchedEffect(Unit) { devices = MediaService.listDevices() }
