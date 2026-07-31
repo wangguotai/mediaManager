@@ -2877,6 +2877,38 @@ object MediaService {
     }
 
     /**
+     * V23：POST /api/media/apply-tag-recommendations — 一键应用全部标签推荐。
+     *
+     * 后端复用 [getTagRecommendations] 的推荐计算逻辑，对每条推荐的匹配媒体逐个落库
+     * （AddMediaTag，INSERT OR IGNORE 幂等），返回已应用的标签-Media 关联总数。
+     *
+     * 响应：`{status, applied_count, tags_applied:[{tag_name,count}]}`。
+     * 成功返回 [applied_count][Result.appliedCount]（≥0）；失败/非 200 返回 null，
+     * 调用方按 null 降级并提示错误。
+     *
+     * 与 [autoTag] 区别：autoTag 按文件名前缀规则笼统打标签（单一 tagged_count），
+     * 本方法按推荐列表逐条应用并返回每标签明细，语义上覆盖推荐区列出的全部匹配媒体。
+     */
+    suspend fun applyTagRecommendations(): Int? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/apply-tag-recommendations") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["applied_count"]?.jsonPrimitive?.intOrNull ?: 0
+            } else {
+                logger.info("MediaService", "applyTagRecommendations status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "applyTagRecommendations FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/tag/export — 导出标签数据。
      *
      * 返回后端原始 JSON 字符串（包含全部标签及其关联媒体），供前端复制到剪贴板

@@ -645,6 +645,40 @@ fun SearchBar(
                         )
                     }
                 }
+                // V23：一键应用全部推荐——底部 TextButton，调 POST /api/media/apply-tag-recommendations。
+                // 成功后用 adoptMsg（本区已有的轻量提示状态）展示"已为 N 个媒体添加推荐标签"，
+                // 并刷新推荐列表（已应用的标签会被后端跳过，自然从列表消失）。
+                var applying by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        enabled = !applying,
+                        onClick = {
+                            if (applying) return@TextButton
+                            applying = true
+                            tagScope.launch {
+                                val count = MediaService.applyTagRecommendations()
+                                applying = false
+                                adoptMsg = if (count != null) {
+                                    if (count > 0) "已为 $count 个媒体添加推荐标签"
+                                    else "没有新的可标记媒体"
+                                } else {
+                                    "应用推荐失败，请稍后重试"
+                                }
+                                if (count != null && count > 0) {
+                                    // 刷新推荐列表：已应用的标签会被后端跳过，列表更新反映新状态。
+                                    recommendations = MediaService.getTagRecommendations() ?: emptyList()
+                                }
+                            }
+                        }
+                    ) {
+                        Text(if (applying) "应用中…" else "一键应用全部推荐", fontSize = 13.sp)
+                    }
+                }
                 // 采纳结果提示：非空时以小字展示在推荐区底部，点过后短暂可见。
                 adoptMsg?.let { msg ->
                     Spacer(modifier = Modifier.height(2.dp))
