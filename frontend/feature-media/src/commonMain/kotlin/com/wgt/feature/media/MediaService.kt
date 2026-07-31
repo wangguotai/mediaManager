@@ -884,6 +884,51 @@ object MediaService {
     }
 
     /**
+     * 智能选封面：POST /api/media/album/cover-auto-pick。
+     *
+     * 后端遍历相册内所有媒体，按优先级「图片类型 > 最大尺寸(width*height) >
+     * 最近上传」挑选最佳封面并 SetAlbumCover 落库；无论是否已有封面都重选覆盖。
+     *
+     * 请求体: `{album_id}`；响应: `{status, album_id, cover_media_id, reason}`。
+     * reason 取值如 "best_image_by_size_and_recency" / "no_image_fallback_to_most_recent_media"。
+     *
+     * @param albumId 目标相册 id
+     * @return 成功时的选封面结果；HTTP 非 200 / 异常返回 null（stat 方法失败姿态，不抛）
+     */
+    suspend fun autoPickAlbumCover(albumId: String): AutoPickResult? {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/cover-auto-pick") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                AutoPickResult(
+                    status = obj["status"]?.jsonPrimitive?.contentOrNull ?: "",
+                    coverMediaId = obj["cover_media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                    reason = obj["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else {
+                logger.info("MediaService", "autoPickAlbumCover status=${response.status} albumId=$albumId")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "autoPickAlbumCover FAILED albumId=$albumId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 智能选封面结果（与后端 cover-auto-pick 响应对齐）。 */
+    data class AutoPickResult(
+        val status: String,
+        val coverMediaId: String,
+        val reason: String
+    )
+
+    /**
      * 删除相册。
      *
      * DELETE /api/media/album/{id}

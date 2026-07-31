@@ -1067,6 +1067,37 @@ private fun AlbumDetailPage(
                             contentDescription = "下载相册"
                         )
                     }
+                    // V11：智能选封面按钮 🎯 — 调 cover-auto-pick，成功后 Snackbar 提示并刷新列表。
+                    var coverPicking by remember { mutableStateOf(false) }
+                    val coverPickScope = rememberCoroutineScope()
+                    IconButton(
+                        onClick = {
+                            if (coverPicking) return@IconButton
+                            coverPicking = true
+                            coverPickScope.launch {
+                                val result = MediaService.autoPickAlbumCover(albumId)
+                                coverPicking = false
+                                if (result != null) {
+                                    viewModel.showErrorMessage("已智能选择封面")
+                                    // 刷新相册列表与当前详情，使新封面立即可见
+                                    viewModel.loadAlbums(forceRefresh = true)
+                                    viewModel.loadAlbumDetail(albumId)
+                                } else {
+                                    viewModel.showErrorMessage("智能选封面失败")
+                                }
+                            }
+                        },
+                        enabled = !coverPicking
+                    ) {
+                        if (coverPicking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("🎯", fontSize = 20.sp)
+                        }
+                    }
                     IconButton(
                         onClick = {
                             if (shareToggleLoading) return@IconButton
