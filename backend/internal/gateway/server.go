@@ -142,6 +142,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/timeline", s.handleMediaTimeline)
 	// V7：按类型+月份分组的存储统计
 	s.mux.HandleFunc("/api/media/storage-breakdown", s.handleMediaStorageBreakdown)
+	// V7：搜索建议（基于文件名前缀）
+	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V7：批量下载（zip）
@@ -2133,6 +2135,60 @@ func (s *Server) handleMediaStorageBreakdown(w http.ResponseWriter, r *http.Requ
 			"bytes": totalBytes,
 			"mb":    float64(totalBytes) / (1024 * 1024),
 		},
+	})
+}
+
+// handleMediaSearchSuggestions V7：GET /api/media/search-suggestions?q=xxx
+// 基于当前用户的媒体文件名做前缀匹配，返回去重的建议列表（最多 10 条）。
+func (s *Server) handleMediaSearchSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := strings.ToLower(r.URL.Query().Get("q"))
+	if len(q) < 1 {
+		writeJSON(w, http.StatusOK, map[string]any{"suggestions": []string{}})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	seen := make(map[string]bool)
+	var suggestions []string
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		name := strings.ToLower(m.Filename)
+		if strings.Contains(name, q) {
+			// 去掉扩展名作为建议
+			base := m.Filename
+			if idx := strings.LastIndex(base, "."); idx > 0 {
+				base = base[:idx]
+			}
+			if !seen[base] {
+				seen[base] = true
+				suggestions = append(suggestions, base)
+				if len(suggestions) >= 10 {
+					break
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"q":           q,
 	})
 }
 
