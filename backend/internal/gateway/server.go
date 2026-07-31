@@ -364,6 +364,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/audit-log/stats", s.handleAuditLogStats)
 	s.mux.HandleFunc("/api/media/audit-log/by-media", s.handleAuditLogByMedia)
 	s.mux.HandleFunc("/api/media/audit-log/record", s.handleAuditLogRecord)
+	// 统一活动流：合并审计日志 + 最近上传，按时间倒序返回统一时间线。
+	s.mux.HandleFunc("/api/media/activity-feed", s.handleMediaActivityFeed)
 	// V17：搜索历史端点——从 audit_log 中提取 action="search" 的记录。
 	// 当前无 search 类埋点时，回退返回全部 audit log 作为"最近操作历史"。
 	s.mux.HandleFunc("/api/media/search-history", s.handleMediaSearchHistory)
@@ -7887,6 +7889,107 @@ func (s *Server) handleAuditLogByMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"logs":  out,
 		"total": len(out),
+	})
+}
+
+// handleMediaActivityFeed GET /api/media/activity-feed?limit=20
+// 统一活动流：合并审计日志（最近所有操作）与最近上传（前 5 个 media），
+// 按时间倒序返回统一时间线。响应: {feed: [{type,action,detail,media_id,timestamp}], total}。
+//
+// 数据来源：
+//   - 审计日志来自 s.store.ListAuditLogs（取 ?limit 条，最近在前，已按 created_at DESC）。
+//   - 最近上传来自 s.store.ListMediaByUser（按 created_at DESC，取前 5 个未软删 media）。
+//
+// 合并后按 timestamp（unix 秒）倒序排序，截断到 limit。两条时间戳相同的记录顺序不特定
+// （sort.Slice 非稳定排序，但活动流场景对同秒事件的相对顺序无语义要求）。
+//
+// 未登录返回 401；store 不可用返回 503；limit<=0 默认 20。
+func (s *Server) handleMediaActivityFeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	type feedItem struct {
+		Type      string `json:"type"`      // "audit" | "upload"
+		Action    string `json:"action"`    // upload / share / album / favorite / delete / ...
+		Detail    string `json:"detail"`    // 人类可读描述
+		MediaID   string `json:"media_id"`  // 可空（非媒体级操作为空）
+		Timestamp int64  `json:"timestamp"` // unix 秒
+	}
+
+	feed := make([]feedItem, 0, limit+5)
+
+	// 1. 审计日志（最近操作，已按 created_at DESC）
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	for _, a := range logs {
+		detail := a.Detail
+		if detail == "" {
+			detail = a.Action
+		}
+		feed = append(feed, feedItem{
+			Type:      "audit",
+			Action:    a.Action,
+			Detail:    detail,
+			MediaID:   a.MediaID,
+			Timestamp: a.CreatedAt.Unix(),
+		})
+	}
+
+	// 2. 最近上传（前 5 个未软删 media，作为 upload 类型活动）
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err == nil {
+		count := 0
+		for _, m := range mediaList {
+			if m.Deleted {
+				continue
+			}
+			feed = append(feed, feedItem{
+				Type:      "upload",
+				Action:    "upload",
+				Detail:    "上传了 " + m.Filename,
+				MediaID:   m.ID,
+				Timestamp: m.CreatedAt.Unix(),
+			})
+			count++
+			if count >= 5 {
+				break
+			}
+		}
+	}
+
+	// 合并后按时间倒序排序
+	sort.Slice(feed, func(i, j int) bool {
+		return feed[i].Timestamp > feed[j].Timestamp
+	})
+
+	// 截断到 limit
+	if len(feed) > limit {
+		feed = feed[:limit]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"feed":  feed,
+		"total": len(feed),
 	})
 }
 
