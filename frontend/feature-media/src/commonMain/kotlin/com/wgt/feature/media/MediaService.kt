@@ -5572,6 +5572,65 @@ object MediaService {
     /** V9：年度上传最多的一天。 */
     data class TopDay(val date: String, val count: Int)
 
+    /**
+     * GET /api/media/media-year-stats?year=YYYY — 按年份统计媒体。
+     *
+     * 与 [getYearlyReview]（调 yearly-review 端点）互补：本端点返回更精简的
+     * {year, total_count, total_bytes, by_month:[{month,count,bytes}], by_type:{IMAGE,VIDEO,LIVE}}。
+     * 差异点：
+     * - by_month 的 month 字段每项含 **bytes**（[MonthStat]），而 [MonthCount] 只有 count
+     * - by_type 的键为**大写** IMAGE/VIDEO/LIVE（yearly-review 用小写 image/video/live），
+     *   解析时按大写键取值，缺失回退 0
+     *
+     * 后端 by_month 固定返回 12 项（含 count=0），但仍按 month 字段映射以宽容缺失月份。
+     * 非 200 或异常返回 null，UI 侧静默降级。
+     */
+    suspend fun getMediaYearStats(year: Int): MediaYearStats? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-year-stats") {
+                parameter("year", year)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val byMonth = o["by_month"]?.jsonArray?.map { el ->
+                    val mc = el.jsonObject
+                    MonthStat(
+                        month = mc["month"]?.jsonPrimitive?.intOrNull ?: 0,
+                        count = mc["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = mc["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                } ?: emptyList()
+                val typeObj = o["by_type"]?.jsonObject
+                MediaYearStats(
+                    year = o["year"]?.jsonPrimitive?.intOrNull ?: year,
+                    totalCount = o["total_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    byMonth = byMonth,
+                    byType = mapOf(
+                        "IMAGE" to (typeObj?.get("IMAGE")?.jsonPrimitive?.intOrNull ?: 0),
+                        "VIDEO" to (typeObj?.get("VIDEO")?.jsonPrimitive?.intOrNull ?: 0),
+                        "LIVE" to (typeObj?.get("LIVE")?.jsonPrimitive?.intOrNull ?: 0)
+                    )
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaYearStats FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** media-year-stats 响应体。 */
+    data class MediaYearStats(
+        val year: Int,
+        val totalCount: Int,
+        val totalBytes: Long,
+        val byMonth: List<MonthStat>,
+        val byType: Map<String, Int>
+    )
+
+    /** media-year-stats 单月统计（含 bytes，区别于 [MonthCount]）。 */
+    data class MonthStat(val month: Int, val count: Int, val bytes: Long)
+
     // ---- 解析 ----
 
     /**

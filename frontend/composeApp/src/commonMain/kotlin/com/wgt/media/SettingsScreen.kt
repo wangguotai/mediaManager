@@ -2904,35 +2904,8 @@ private fun YearlyReviewDialog(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
                     }
-                    // 12 个月柱状图：FlowRow 方块，深浅表示当月上传统计强度
-                    val maxMonthCount = review.byMonth.maxOf { it.count }.coerceAtLeast(1)
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        review.byMonth.forEach { mc ->
-                            val intensity = if (mc.count == 0) 0.08f
-                            else (mc.count.toFloat() / maxMonthCount).coerceIn(0.15f, 1f)
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(22.dp)
-                                        .height(36.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(
-                                            MaterialTheme.colorScheme.primary.copy(alpha = intensity)
-                                        )
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    "${mc.month}月",
-                                    fontSize = 9.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-                    }
+                    // 月度分布柱状图（调 media-year-stats 端点，独立 Composable 自取数据）
+                    YearStatsChart(year = year)
                     // 收藏数（如果 >0）
                     if (review.favorites > 0) {
                         Text(
@@ -2948,6 +2921,107 @@ private fun YearlyReviewDialog(
             TextButton(onClick = onDismiss) { Text("关闭") }
         }
     )
+}
+
+/**
+ * 月度分布柱状图——调 [MediaService.getMediaYearStats]（media-year-stats 端点）。
+ *
+ * 独立 @Composable，自取数据（[LaunchedEffect] 按 year 拉取），不依赖外层
+ * [YearlyReviewDialog] 已加载的 yearly-review 数据——二者数据源不同但语义互补：
+ * - 这里的柱状条高度 ∝ 当月 count / 全年峰值，直观体现月度分布
+ * - 每条上方标注当月数量，便于精确读数
+ *
+ * 三态：加载中（小 spinner）→ 失败/空（占位文案）→ 成功（12 列柱状图）。
+ * 函数提出来避免 [YearlyReviewDialog] 进一步膨胀（任务要求提取为独立函数）。
+ */
+@Composable
+private fun YearStatsChart(year: Int) {
+    var stats by remember { mutableStateOf<MediaService.MediaYearStats?>(null) }
+    var loaded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(year) {
+        stats = null
+        loaded = false
+        stats = MediaService.getMediaYearStats(year)
+        loaded = true
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "月度分布",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        when {
+            !loaded || stats == null -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("加载月度数据...", fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+            }
+            stats!!.totalCount == 0 -> {
+                Text(
+                    "该年暂无媒体",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
+            }
+            else -> {
+                val byMonth = stats!!.byMonth
+                val maxCount = byMonth.maxOf { it.count }.coerceAtLeast(1)
+                val maxBarHeight = 64.dp
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    byMonth.forEach { mc ->
+                        val ratio = if (mc.count == 0) 0f
+                        else (mc.count.toFloat() / maxCount).coerceIn(0.08f, 1f)
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Bottom
+                        ) {
+                            Text(
+                                if (mc.count > 0) "${mc.count}" else "",
+                                fontSize = 8.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Box(
+                                modifier = Modifier
+                                    .width(18.dp)
+                                    .height((maxBarHeight.value * ratio + 2f).dp)
+                                    .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                                    .background(
+                                        if (mc.count == 0) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                                        else MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+                                    )
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "${mc.month}月",
+                                fontSize = 8.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun modeLabel(mode: ThemeMode): String = when (mode) {
