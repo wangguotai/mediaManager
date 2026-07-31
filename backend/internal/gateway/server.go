@@ -329,6 +329,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/audit-log/stats", s.handleAuditLogStats)
 	s.mux.HandleFunc("/api/media/audit-log/by-media", s.handleAuditLogByMedia)
 	s.mux.HandleFunc("/api/media/audit-log/record", s.handleAuditLogRecord)
+	// V17：搜索历史端点——从 audit_log 中提取 action="search" 的记录。
+	// 当前无 search 类埋点时，回退返回全部 audit log 作为"最近操作历史"。
+	s.mux.HandleFunc("/api/media/search-history", s.handleMediaSearchHistory)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V8：自动设置相册封面（用第一个 media）
@@ -6100,6 +6103,73 @@ func (s *Server) handleAuditLogByMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"logs":  out,
 		"total": len(out),
+	})
+}
+
+// handleMediaSearchHistory V17：GET /api/media/search-history
+// 返回用户搜索历史。设计为从 audit_log 中过滤 action="search" 的记录；
+// 但当前搜索端点尚未埋点（无 search 类 audit log 写入），若过滤结果为空，
+// 则回退返回全部 audit log 作为"最近操作历史"，保证端点可用。
+//
+// 响应:
+//
+//	有 search 记录时: {history: [{id, detail, created_at}], total}
+//	无 search 记录时: {history: [{id, action, detail, created_at}], total}
+//
+// 永远取最近 20 条（ListAuditLogs limit=20）。未登录 401；store 不可用 503。
+func (s *Server) handleMediaSearchHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 20)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 先尝试过滤 action="search" 的记录。
+	var searchLogs []*storage.AuditLog
+	for _, a := range logs {
+		if a.Action == "search" {
+			searchLogs = append(searchLogs, a)
+		}
+	}
+
+	out := make([]map[string]any, 0, len(logs))
+	if len(searchLogs) > 0 {
+		// 有 search 类埋点：只返回搜索记录（id/detail/created_at）。
+		for _, a := range searchLogs {
+			out = append(out, map[string]any{
+				"id":         a.ID,
+				"detail":     a.Detail,
+				"created_at": a.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	} else {
+		// 无 search 埋点：回退返回全部 audit log 作为"最近操作历史"，
+		// 额外带 action 字段以便前端区分操作类型。
+		for _, a := range logs {
+			out = append(out, map[string]any{
+				"id":         a.ID,
+				"action":     a.Action,
+				"detail":     a.Detail,
+				"created_at": a.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"history": out,
+		"total":   len(out),
 	})
 }
 
