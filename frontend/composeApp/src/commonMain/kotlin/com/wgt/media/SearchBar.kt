@@ -816,6 +816,58 @@ fun SearchBar(
                 }
             }
         }
+
+        // V26：文件名前缀补全区——展开态且输入非空时，调
+        // GET /api/media/media-search-suggestions?q=xxx&limit=5 拉取文件名前缀补全建议。
+        // 与上面 V24 增强建议区并列（均随输入实时刷新、debounce 300ms），
+        // 区别：本区聚焦"补全"语义——后端仅大小写不敏感前缀匹配，保留完整文件名
+        // （含扩展名），每条 📄 + 完整文件名。点击触发本地搜索（与搜索历史 chip 一致）。
+        var prefixSuggestions by remember {
+            mutableStateOf<List<MediaService.MediaSearchSuggestion>>(emptyList())
+        }
+        LaunchedEffect(queryText) {
+            if (expanded && queryText.length >= 2) {
+                delay(SEARCH_DEBOUNCE_MS)
+                prefixSuggestions =
+                    MediaService.getMediaSearchSuggestions(queryText.trim(), 5) ?: emptyList()
+            } else {
+                prefixSuggestions = emptyList()
+            }
+        }
+
+        if (expanded && queryText.isNotEmpty() && prefixSuggestions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(prefixSuggestions.size) { index ->
+                    val ps = prefixSuggestions[index]
+                    AssistChip(
+                        onClick = {
+                            val query = ps.text
+                            queryText = query
+                            queryVisible = true
+                            onDebouncedQueryChange(query)
+                            SearchHistory.add(query)
+                        },
+                        label = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("📄", fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                // 文件名含扩展名，可能较长，单行截断避免撑爆 chip。
+                                Text(ps.text, fontSize = 13.sp, maxLines = 1)
+                            }
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                        )
+                    )
+                }
+            }
+        }
     }
 }
 

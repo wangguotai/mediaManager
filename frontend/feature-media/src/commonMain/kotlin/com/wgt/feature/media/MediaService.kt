@@ -2119,6 +2119,58 @@ object MediaService {
     }
 
     /**
+     * V26：文件名前缀补全建议（GET /api/media/media-search-suggestions?q=xxx&limit=5）。
+     *
+     * 与 [getEnhancedSearchSuggestions] 的区别：本端点聚焦"补全"语义——
+     * 后端仅做大小写不敏感前缀匹配（HasPrefix），保留完整文件名（含扩展名），
+     * 每条建议携带 [mediaId] 便于前端潜在跳转；后者是多源子串合并建议。
+     *
+     * 响应：`{suggestions:[{text,type:"filename",media_id?}], total}`。
+     * 成功返回 [MediaSearchSuggestion] 列表（可能为空）；失败/非 200 返回 null，
+     * 调用方按 null 降级（隐藏补全区）。鉴权由 [jsonClient] defaultRequest 统一附加。
+     *
+     * 与 [EnhancedSuggestion] 字段差异：此处 [type] 对应后端 "type"（固定 "filename"），
+     * [mediaId] 为可为空媒体 ID（后端 `media_id,omitempty`）——补全文本即完整文件名，
+     * 不做去扩展名处理。
+     */
+    data class MediaSearchSuggestion(
+        val text: String = "",
+        val type: String = "",
+        val mediaId: String? = null
+    )
+
+    suspend fun getMediaSearchSuggestions(query: String, limit: Int = 5): List<MediaSearchSuggestion>? {
+        return try {
+            val q = query.trim()
+            if (q.isEmpty()) return emptyList()
+            val url = "${backendBaseUrl()}/api/media/media-search-suggestions?q=${q.encodeURLQueryComponent()}&limit=$limit"
+            val response: HttpResponse = jsonClient.get(url) {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["suggestions"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    MediaSearchSuggestion(
+                        text = o["text"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = o["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaId = o["media_id"]?.let { el ->
+                            if (el is JsonNull) null
+                            else el.jsonPrimitive.contentOrNull
+                        }
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaSearchSuggestions status=${response.status} (no body)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSearchSuggestions FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：GET /api/media/recent-activity — 最近活动
      */
     suspend fun getRecentActivity(): List<ActivityInfo>? {
