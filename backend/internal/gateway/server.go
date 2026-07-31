@@ -150,6 +150,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-trend", s.handleMediaStorageTrend)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
+	// V8：批量重命名
+	s.mux.HandleFunc("/api/media/batch-rename", s.handleMediaBatchRename)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
@@ -2398,6 +2400,89 @@ func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"media_id": req.MediaID,
 		"filename": req.Filename,
+	})
+}
+
+// handleMediaBatchRename V8：POST /api/media/batch-rename
+// 批量重命名，支持模板模式：{prefix}_{seq} 格式。
+// 请求体: { media_ids: ["id1","id2"], pattern: "vacation_{seq}", start_seq: 1 }
+func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	var req struct {
+		MediaIDs []string `json:"media_ids"`
+		Pattern  string   `json:"pattern"`
+		StartSeq int      `json:"start_seq"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.MediaIDs) == 0 || req.Pattern == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "media_ids and pattern required"})
+		return
+	}
+	if len(req.MediaIDs) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max 100 files per batch"})
+		return
+	}
+	if !strings.Contains(req.Pattern, "{seq}") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "pattern must contain {seq}"})
+		return
+	}
+
+	seq := req.StartSeq
+	if seq <= 0 {
+		seq = 1
+	}
+	type renameResult struct {
+		ID       string `json:"media_id"`
+		Filename string `json:"filename"`
+	}
+	succeeded := make([]renameResult, 0, len(req.MediaIDs))
+	failed := make([]batchOpFailure, 0)
+	for _, mediaID := range req.MediaIDs {
+		media, err := s.store.GetMedia(r.Context(), mediaID)
+		if err != nil || media == nil {
+			failed = append(failed, batchOpFailure{ID: mediaID, Reason: "not_found"})
+			continue
+		}
+		if media.UserID != uid {
+			failed = append(failed, batchOpFailure{ID: mediaID, Reason: "not_owner"})
+			continue
+		}
+		// 保留文件扩展名
+		ext := ""
+		if i := strings.LastIndex(media.Filename, "."); i >= 0 {
+			ext = media.Filename[i:]
+		}
+		newName := strings.ReplaceAll(req.Pattern, "{seq}", fmt.Sprintf("%d", seq)) + ext
+		seq++
+
+		media.Filename = newName
+		if err := s.store.UpdateMedia(r.Context(), media); err != nil {
+			failed = append(failed, batchOpFailure{ID: mediaID, Reason: "error"})
+			continue
+		}
+		succeeded = append(succeeded, renameResult{ID: mediaID, Filename: newName})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"renamed_count": len(succeeded),
+		"renamed":       succeeded,
+		"failed":        failed,
 	})
 }
 
