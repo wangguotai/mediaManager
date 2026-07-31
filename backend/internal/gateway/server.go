@@ -230,6 +230,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/tag/rename", s.handleMediaTagRename)
 	// V8：删除标签
 	s.mux.HandleFunc("/api/media/tag/delete", s.handleMediaTagDelete)
+	// V8：标签自动补全
+	s.mux.HandleFunc("/api/media/tag/autocomplete", s.handleMediaTagAutocomplete)
 	// V8：用户存储配额
 	s.mux.HandleFunc("/api/media/user-quota", s.handleUserQuota)
 	// V8：最近上传的媒体
@@ -3408,6 +3410,47 @@ func (s *Server) handleMediaUploadCalendar(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"days":  stats,
 		"total": len(stats),
+	})
+}
+
+// handleMediaTagAutocomplete V8：GET /api/media/tag/autocomplete?q=xxx — 标签自动补全。
+func (s *Server) handleMediaTagAutocomplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"suggestions": []string{}, "q": q})
+		return
+	}
+	allTags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	qLower := strings.ToLower(q)
+	var suggestions []string
+	for _, t := range allTags {
+		if strings.Contains(strings.ToLower(t), qLower) {
+			suggestions = append(suggestions, t)
+			if len(suggestions) >= 10 {
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": suggestions,
+		"q":           q,
 	})
 }
 
