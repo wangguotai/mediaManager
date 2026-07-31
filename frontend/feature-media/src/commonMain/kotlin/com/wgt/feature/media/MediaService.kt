@@ -1419,6 +1419,32 @@ object MediaService {
         }
     }
 
+    /** V8：GET /api/media/upload-calendar — 按天统计上传量（最近30天）。 */
+    suspend fun getUploadCalendar(): List<UploadDay>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/upload-calendar") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["days"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    UploadDay(
+                        date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getUploadCalendar FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：上传日（按天统计） */
+    data class UploadDay(val date: String, val count: Int, val bytes: Long)
+
     /** V8：GET /api/media/orphan-check — 孤立文件检查。 */
     suspend fun orphanCheck(): OrphanCheckResult? {
         return try {

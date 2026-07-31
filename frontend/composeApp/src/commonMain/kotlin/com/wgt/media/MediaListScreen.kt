@@ -989,6 +989,47 @@ private fun MyTabContent(
             }
         }
 
+        // V8：上传日历热力图
+        var calendar by remember { mutableStateOf<List<MediaService.UploadDay>?>(null) }
+        LaunchedEffect(Unit) { calendar = MediaService.getUploadCalendar() }
+        calendar?.let { days ->
+            if (days.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("上传日历", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val maxCount = days.maxOf { it.count }.coerceAtLeast(1)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            days.forEach { d ->
+                                val intensity = (d.count.toFloat() / maxCount).coerceIn(0.1f, 1f)
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = intensity)
+                                        )
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "最近 ${days.size} 天有上传记录",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V8：文件类型分布
         var fileTypes by remember { mutableStateOf<List<MediaService.FileTypeStat>?>(null) }
         LaunchedEffect(Unit) { fileTypes = MediaService.getFileTypes() }
