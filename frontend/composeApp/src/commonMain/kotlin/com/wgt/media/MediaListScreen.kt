@@ -2744,6 +2744,53 @@ private fun MyTabContent(
             }
         }
 
+        // V8：分享分析卡片（调 /api/media/share-analytics 展示活跃/过期/密码保护统计）
+        var shareAnalytics by remember { mutableStateOf<MediaService.ShareAnalytics?>(null) }
+        LaunchedEffect(Unit) { shareAnalytics = MediaService.getShareAnalytics() }
+        shareAnalytics?.let { sa ->
+            if (sa.total > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "分享分析",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "📊 总分享 ${sa.total} 个",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "✅ 活跃 ${sa.active} 个 (${sa.activePercentage}%)",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "⏰ 即将过期 ${sa.expiringSoon} 个",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "🔒 密码保护 ${sa.passwordProtected} 个",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
         // V8：最近上传卡片
         var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
         LaunchedEffect(Unit) { recentUploads = MediaService.getRecentUploads() }

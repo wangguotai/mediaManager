@@ -2990,6 +2990,50 @@ object MediaService {
     data class FileTypeStat(val mime: String, val count: Int, val bytes: Long)
 
     /**
+     * GET /api/media/share-analytics — 分享链接分析统计。
+     *
+     * 后端返回 `{total, active, expired, password_protected, expiring_soon,
+     * active_percentage, user_id}`，前端取前六项渲染"分享分析"卡片
+     * （总分享 / 活跃率 / 即将过期 / 密码保护）。`active_percentage` 已由后端
+     * 保留两位小数（active/total*100，total=0 时为 0）。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过卡片，不崩溃"我的"Tab。
+     */
+    suspend fun getShareAnalytics(): ShareAnalytics? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/share-analytics") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                ShareAnalytics(
+                    total = o["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    active = o["active"]?.jsonPrimitive?.intOrNull ?: 0,
+                    expired = o["expired"]?.jsonPrimitive?.intOrNull ?: 0,
+                    passwordProtected = o["password_protected"]?.jsonPrimitive?.intOrNull ?: 0,
+                    expiringSoon = o["expiring_soon"]?.jsonPrimitive?.intOrNull ?: 0,
+                    activePercentage = o["active_percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getShareAnalytics FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 分享分析统计（[getShareAnalytics] 返回）。 */
+    data class ShareAnalytics(
+        val total: Int,
+        val active: Int,
+        val expired: Int,
+        val passwordProtected: Int,
+        val expiringSoon: Int,
+        val activePercentage: Double
+    )
+
+    /**
      * GET /api/media/favorite-timeline — 收藏时间线，按收藏时间倒序。
      *
      * 后端返回 `{favorites:[{media_id,filename,type,favorited_at}],total}`，其中
