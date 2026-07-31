@@ -955,6 +955,67 @@ private fun MyTabContent(
             }
         }
 
+        // V9：存储预测卡片——在配额进度条卡片之后，展示月均增长/未来用量/预计满配额月数。
+        // 后端尚未铺量到生产时 getStorageForecast 返回 null，此处静默跳过不渲染占位。
+        var storageForecast by remember { mutableStateOf<MediaService.StorageForecast?>(null) }
+        LaunchedEffect(Unit) { storageForecast = MediaService.getStorageForecast() }
+        storageForecast?.let { sf ->
+            // 月均增长 <=0 说明样本不足（后端样本月数<2 置 0），不展示预测卡片以免误导。
+            if (sf.monthlyAverageBytes > 0L) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "存储预测",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 月均增长 MB（一位小数，commonMain 无 String.format，沿用 take 截断）
+                        val mbStr = sf.monthlyAverageMB.toString()
+                        val mbStr1 = mbStr.take(mbStr.indexOf('.') + 2)
+                        Text(
+                            "月均增长 $mbStr1 MB",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // 预测 1/3/6 个月后用量——只展示存在的预测点，缺失跳过
+                        val predictions = listOf(1, 3, 6).mapNotNull { m ->
+                            sf.predictedBytes(m)?.let { m to it }
+                        }
+                        if (predictions.isNotEmpty()) {
+                            val parts = predictions.joinToString(" · ") { (m, b) ->
+                                val mb = b.toDouble() / (1024.0 * 1024.0)
+                                val s = mb.toString()
+                                "${m}月后 ${s.take(s.indexOf('.') + 2)} MB"
+                            }
+                            Text(
+                                parts,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                        // 预估满配额时间：monthsUntilFull 非 null 时展示，否则提示样本不足/已超配额。
+                        sf.monthsUntilFull?.let { n ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "预计 $n 个月后用满",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (n <= 2) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：媒体库综合摘要（时间跨度）
         var mediaSummary by remember { mutableStateOf<MediaService.MediaSummary?>(null) }
         LaunchedEffect(Unit) { mediaSummary = MediaService.getMediaSummary() }

@@ -2615,6 +2615,74 @@ object MediaService {
         val addedMB: Double get() = addedBytes.toDouble() / (1024.0 * 1024.0)
     }
 
+    /**
+     * V9：GET /api/media/storage-forecast — 存储预测。
+     *
+     * 后端基于最近 6 个月上传趋势线性外推 1/3/6 个月后用量，并估算配额耗尽月数。
+     * 字段对齐后端 [b12cc8e] 响应：current_bytes / monthly_average_bytes /
+     * growth_rate_percent / forecast[{months_ahead,predicted_bytes}] /
+     * quota_bytes / months_until_full（Int?，已超配额或样本不足时为 null）。
+     *
+     * 与 [getStorageTrend] 同走 GET + 运行时 Json 解析；非 200 或异常返回 null，
+     * UI 侧静默跳过预测卡片。
+     */
+    suspend fun getStorageForecast(): StorageForecast? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-forecast") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val forecast = o["forecast"]?.jsonArray?.mapNotNull { item ->
+                    val fo = item.jsonObject
+                    StorageForecastPoint(
+                        monthsAhead = fo["months_ahead"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null,
+                        predictedBytes = fo["predicted_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                } ?: emptyList()
+                StorageForecast(
+                    currentBytes = o["current_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    monthlyAverageBytes = o["monthly_average_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    growthRatePercent = o["growth_rate_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    forecast = forecast,
+                    quotaBytes = o["quota_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    monthsUntilFull = o["months_until_full"]?.let {
+                        // 后端可能返回 null（无上限）或 0（已超配额），两者均视作"无有效预计"
+                        if (it is JsonNull) null else it.jsonPrimitive?.intOrNull?.takeIf { v -> v > 0 }
+                    }
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageForecast FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** V9：存储预测结果。 */
+    data class StorageForecast(
+        val currentBytes: Long,
+        val monthlyAverageBytes: Long,
+        val growthRatePercent: Double,
+        val forecast: List<StorageForecastPoint>,
+        val quotaBytes: Long,
+        val monthsUntilFull: Int?
+    ) {
+        /** 月均增长 MB（保留一位小数由 UI 文字截断处理，遵循 commonMain 无 String.format 约定）。 */
+        val monthlyAverageMB: Double get() = monthlyAverageBytes.toDouble() / (1024.0 * 1024.0)
+
+        /** 取指定月数后的预测字节；预测点缺失返回 null。 */
+        fun predictedBytes(monthsAhead: Int): Long? =
+            forecast.firstOrNull { it.monthsAhead == monthsAhead }?.predictedBytes
+    }
+
+    /** V9：存储预测单点（months_ahead → predicted_bytes）。 */
+    data class StorageForecastPoint(
+        val monthsAhead: Int,
+        val predictedBytes: Long
+    ) {
+        val predictedMB: Double get() = predictedBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
     // ---- 解析 ----
 
     /**
