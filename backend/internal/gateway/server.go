@@ -210,6 +210,8 @@ func (s *Server) registerRoutes() {
 	// V9：一键切换相册共享状态（已共享则取消，未共享则创建公开分享链接）。
 	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
 	s.mux.HandleFunc("/api/media/album/share-toggle", s.handleAlbumShareToggle)
+	// V12：批量强制设置相册封面（覆盖已有封面，区别于 auto-cover-all 仅处理空封面）。
+	s.mux.HandleFunc("/api/media/album/batch-set-cover", s.handleAlbumBatchSetCover)
 	// V8：相册内媒体完整 metadata
 	s.mux.HandleFunc("/api/media/album/media-list", s.handleAlbumMediaList)
 	// V8：重命名相册
@@ -5906,6 +5908,66 @@ func (s *Server) handleAlbumAutoCoverAll(w http.ResponseWriter, r *http.Request)
 		"status":        "success",
 		"updated_count": updated,
 		"total_albums":  total,
+	})
+}
+
+// handleAlbumBatchSetCover V12：POST /api/media/album/batch-set-cover — 批量强制
+// 设置多个相册的封面。请求体: { album_ids: ["id1","id2"] }。与 auto-cover-all 不同：
+// batch-set-cover 接受显式 album_ids 列表，且即使已有封面也覆盖；空相册跳过。
+// 返回 { status, updated_count, skipped_count }。
+func (s *Server) handleAlbumBatchSetCover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
+		return
+	}
+	if len(req.AlbumIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "album_ids required"})
+		return
+	}
+	updated, skipped := 0, 0
+	for _, albumID := range req.AlbumIDs {
+		album := provider.GetAlbum(uid, albumID)
+		if album == nil {
+			// 相册不存在或不属于当前用户 — 跳过，不中断整体流程。
+			skipped++
+			continue
+		}
+		// 空相册无法设封面 — 跳过。
+		if len(album.MediaIDs) == 0 {
+			skipped++
+			continue
+		}
+		// 强制设封面：用相册第一个 media，覆盖已有封面。
+		if err := provider.SetAlbumCover(uid, albumID, album.MediaIDs[0]); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":    err.Error(),
+				"album_id": albumID,
+			})
+			return
+		}
+		updated++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "success",
+		"updated_count":  updated,
+		"skipped_count":  skipped,
 	})
 }
 
