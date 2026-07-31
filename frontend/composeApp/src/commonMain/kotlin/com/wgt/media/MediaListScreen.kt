@@ -7375,7 +7375,8 @@ private fun ShareLinkConfigDialog(
 
 /**
  * V8：批量重命名对话框 — 输入 prefix + 起始序号，自动递增生成新文件名。
- * 预览前几个结果（prefix + seq 递增）。后端按 startIndex 开始递增。
+ * 「预览」按钮调 media-batch-rename-suggest 显示 old→new 列表（最多 10 条），
+ * 确认后执行 batchRename 落盘。
  */
 @Composable
 fun BatchRenameDialog(
@@ -7389,12 +7390,11 @@ fun BatchRenameDialog(
     val startIndex = startIndexText.trim().toIntOrNull()
     val valid = prefix.isNotBlank() && startIndex != null && startIndex > 0 && selectedCount > 0
 
-    // 预览前 3 个文件名
-    val previews = if (valid && startIndex != null) {
-        (0 until minOf(3, selectedCount)).map { i ->
-            "${prefix}${startIndex + i}.ext"
-        }
-    } else emptyList()
+    // V8：预览建议列表（调 media-batch-rename-suggest，只读）。
+    var previewLoading by remember { mutableStateOf(false) }
+    var previewError by remember { mutableStateOf<String?>(null) }
+    var suggestions by remember { mutableStateOf<List<MediaService.RenameSuggestion>?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -7430,13 +7430,6 @@ fun BatchRenameDialog(
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
-                if (previews.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("预览:", fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                    previews.forEach { p ->
-                        Text("  $p", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
                 if (!valid && prefix.isNotBlank() && startIndex == null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -7444,6 +7437,64 @@ fun BatchRenameDialog(
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.error
                     )
+                }
+
+                // 预览按钮：调后端只读接口拉 old→new 建议列表。
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        if (!valid || startIndex == null) return@OutlinedButton
+                        previewLoading = true
+                        previewError = null
+                        suggestions = null
+                        // 取 min(selectedCount, 10) 条建议，与 UI 展示上限一致。
+                        val limit = minOf(selectedCount, 10)
+                        coroutineScope.launch {
+                            val result = MediaService.getBatchRenameSuggest(prefix.trim(), startIndex, limit)
+                            previewLoading = false
+                            if (result != null) {
+                                suggestions = result
+                                if (result.isEmpty()) previewError = "暂无可预览的媒体"
+                            } else {
+                                previewError = "预览失败，请稍后重试"
+                            }
+                        }
+                    },
+                    enabled = valid && !previewLoading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (previewLoading) "预览中…" else "预览")
+                }
+
+                // 预览结果：old → new 列表（最多 10 条，可滚动）。
+                previewError?.let { err ->
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(err, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                }
+                suggestions?.let { list ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "预览 (${list.size}):",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        list.forEach { s ->
+                            Text(
+                                "${s.oldName}  →  ${s.suggestedName}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
         },

@@ -5169,6 +5169,48 @@ object MediaService {
      data class BatchRenameItem(val mediaId: String, val filename: String)
      data class BatchRenameFailure(val id: String, val reason: String)
 
+     /** V8：批量重命名建议（只读预览，与 media-batch-rename-suggest 配对） */
+     data class RenameSuggestion(
+         val mediaId: String,
+         val oldName: String,
+         val suggestedName: String
+     )
+
+     /**
+      * V8：GET /api/media/media-batch-rename-suggest — 批量重命名前置预览。
+      * 返回 old→new 建议列表（最多 limit 条），不落库。前端在 BatchRenameDialog
+      * 中展示供用户确认后，再调 batchRename 落盘。
+      */
+     suspend fun getBatchRenameSuggest(
+         prefix: String,
+         start: Int,
+         limit: Int
+     ): List<RenameSuggestion>? {
+         return try {
+             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-batch-rename-suggest") {
+                 getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                 // 与后端一致：prefix 默认 IMG_，start 默认 1，limit 默认 10。
+                 parameter("prefix", prefix)
+                 parameter("start", start.toString())
+                 parameter("limit", limit.toString())
+             }
+             if (response.status == HttpStatusCode.OK) {
+                 val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                 obj["suggestions"]?.jsonArray?.mapNotNull { item ->
+                     val o = item.jsonObject
+                     RenameSuggestion(
+                         mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                         oldName = o["old_name"]?.jsonPrimitive?.contentOrNull ?: "",
+                         suggestedName = o["suggested_name"]?.jsonPrimitive?.contentOrNull ?: ""
+                     )
+                 }
+             } else null
+         } catch (e: Exception) {
+             logger.error("MediaService", "getBatchRenameSuggest FAILED: ${e::class.simpleName} ${e.message}")
+             null
+         }
+     }
+
      /**
       * V7：GET /api/media/storage-trend — 存储增长趋势
       */
