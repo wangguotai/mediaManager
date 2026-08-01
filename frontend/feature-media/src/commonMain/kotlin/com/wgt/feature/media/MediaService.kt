@@ -5480,6 +5480,90 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-storage-audit — 存储审计报告。
+     *
+     * 合并 orphan + error + duplicate + near-duplicate 四项检查为一份完整审计报告，
+     * 并据此计算审计评分（0-100）与等级（A/B/C/D）+ 针对性建议。单次遍历 + 单次磁盘扫描
+     * 同时完成四类检查，避免前端并发拉取 cleanup-orphan/orphan-check/error-check/
+     * duplicates/duplicates-similar 五个端点各自重扫磁盘的 IO 放大。
+     *
+     * 响应字段（[backend handler](backend/internal/gateway/server.go) `handleMediaStorageAudit`）：
+     * `audit_score`(0-100) / `grade`(A-D) / `orphans`{count,samples} / `errors`{count,samples} /
+     * `duplicates`{groups,count,**reclaimable**(注意是 `reclaimable` 非 `reclaimable_bytes`)} /
+     * `near_duplicates`{pairs,count,total,samples} / `total_media` / `recommendations`[string]。
+     *
+     * 解析沿用 [getMediaIntegrityReport] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip 静默跳过卡片。
+     */
+    suspend fun getMediaStorageAudit(): StorageAudit? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-storage-audit") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val orp = o["orphans"]?.jsonObject
+                val err = o["errors"]?.jsonObject
+                val dup = o["duplicates"]?.jsonObject
+                val near = o["near_duplicates"]?.jsonObject
+                StorageAudit(
+                    auditScore = o["audit_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = o["grade"]?.jsonPrimitive?.contentOrNull ?: "D",
+                    orphans = AuditSection(
+                        count = orp?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    errors = AuditSection(
+                        count = err?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    duplicates = AuditDupSection(
+                        groups = dup?.get("groups")?.jsonPrimitive?.intOrNull ?: 0,
+                        count = dup?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    nearDuplicates = AuditNearSection(
+                        pairs = near?.get("pairs")?.jsonPrimitive?.intOrNull ?: 0,
+                        count = near?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    recommendations = o["recommendations"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: emptyList()
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaStorageAudit FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 存储审计报告（[getMediaStorageAudit] 返回）。四维度选 0-100 综合评分 + A-D 等级 + 建议。 */
+    data class StorageAudit(
+        val auditScore: Int,          // 0-100
+        val grade: String,            // A/B/C/D
+        val orphans: AuditSection,
+        val errors: AuditSection,
+        val duplicates: AuditDupSection,
+        val nearDuplicates: AuditNearSection,
+        val totalMedia: Int,
+        val recommendations: List<String>
+    )
+
+    /** 审计维度（孤立/错误）：仅取计数用于卡片汇总展示（samples 后端仍返回，前端卡片层不展示明细）。 */
+    data class AuditSection(
+        val count: Int
+    )
+
+    /** 重复维度：组数 + 总重复份数。 */
+    data class AuditDupSection(
+        val groups: Int,
+        val count: Int
+    )
+
+    /** 近似重复维度：对数 + 涉及媒体数。 */
+    data class AuditNearSection(
+        val pairs: Int,
+        val count: Int
+    )
+
+    /**
      * GET /api/media/favorite-timeline — 收藏时间线，按收藏时间倒序。
      *
      * 后端返回 `{favorites:[{media_id,filename,type,favorited_at}],total}`，其中

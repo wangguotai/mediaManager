@@ -1982,6 +1982,11 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // 存储审计卡片 —— 调 /api/media/media-storage-audit 显示综合审计评分 + 四维度（孤立/
+            // 错误/重复组/近似重复对）+ 建议列表。后端单次遍历合并四类检查 + 评分，替代前端并发
+            // 拉 cleanup-orphan/orphan-check/error-check/duplicates/duplicates-similar 五个端点。
+            StorageAuditCard()
+
             // V9：数据概览卡片 —— 一次调 /api/media/stat-summary 拿多组汇总数据
             // （媒体总数 / 图片·视频·Live 计数 / 收藏 / 分享 / 相册 / 回收站），
             // 替代为分散统计多次请求。后端 best-effort：子统计失败回退零值，前端据此渲染。
@@ -4567,6 +4572,141 @@ private fun gradeColorFor(score: Int): Color = when {
     score >= 60 -> Color(0xFF2196F3)
     score >= 40 -> Color(0xFFFF9800)
     else -> Color(0xFFF44336)
+}
+
+
+/**
+ * 存储审计卡片（[SettingsScreen] 设置页）。
+ *
+ * 调 `GET /api/media/media-storage-audit` 显示综合审计评分（0-100）+ A/B/C/D 等级 +
+ * 四维度（孤立 / 错误 / 重复组 / 近似重复对）+ 针对性建议列表。后端单次遍历合并四类检查
+ * （orphan + error + duplicate + near-duplicate）并同时算分，替代前端并发拉取
+ * cleanup-orphan/orphan-check/error-check/duplicates/duplicates-similar 五个端点各自重扫磁盘。
+ *
+ * 与上方"完整性报告"卡片互补：那个用 [MediaService.getMediaIntegrityReport]（另起端点，
+ * 含 samples 明细 + 一键删除重复）；这个是后端聚合的"一站式评分 + 建议"视图，无 sample 展示、
+ * 无操作按钮，专为快速了解存储健康全貌而设。
+ *
+ * 三态自洽（loading / null-错误 / data）。字段缺失（非 200 或异常 → null）时显示"无法获取
+ * 存储审计"错误提示，不崩溃设置页。独立顶级 @Composable，自取数据（[LaunchedEffect] 拉取一次）。
+ */
+@Composable
+private fun StorageAuditCard() {
+    var audit by remember { mutableStateOf<MediaService.StorageAudit?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        audit = MediaService.getMediaStorageAudit()
+        loading = false
+    }
+    SectionTitle("🧮 存储审计", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (audit == null) {
+        Text(
+            "无法获取存储审计报告",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val a = audit!!
+        // 等级颜色：A 绿 / B 蓝 / C 橙 / D 红（与完整性报告卡片同色板）
+        val gradeColor = when (a.grade) {
+            "A" -> Color(0xFF2E7D32)
+            "B" -> Color(0xFF1565C0)
+            "C" -> Color(0xFFE65100)
+            else -> MaterialTheme.colorScheme.error
+        }
+        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            // 大字号：审计评分 / 100 + 等级徽章
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Text(
+                    "${a.auditScore}",
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = gradeColor
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+                Text(
+                    "/ 100",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    a.grade,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = gradeColor
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            // 进度条：评分 / 100
+            LinearProgressIndicator(
+                progress = { (a.auditScore / 100.0).toFloat().coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(6.dp),
+                color = gradeColor,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            // 四维度统计行：孤立 / 错误 / 重复组 / 近似重复对
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${a.orphans.count}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("孤立", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${a.errors.count}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("错误", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${a.duplicates.groups}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("重复组", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${a.nearDuplicates.pairs}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("近似重复", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+            }
+            // 建议列表（非空时展示，每条前缀 •）
+            if (a.recommendations.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    "建议",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                a.recommendations.forEach { rec ->
+                    Text(
+                        "• $rec",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(start = 4.dp, top = 1.dp, bottom = 1.dp)
+                    )
+                }
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Spacer(modifier = Modifier.height(8.dp))
 }
 
 
