@@ -9258,4 +9258,260 @@ object MediaService {
             null
         }
     }
+
+    /**
+     * GET /api/media/media-summary-report?year=YYYY — 年度报告（合并 8 大维度）。
+     *
+     * 后端一次请求聚合以下 8 个维度，供前端\"年度报告\"全屏 Dialog 精美展示：
+     * 1. stats      —— 统计概览（total_media/image_count/video_count/album_count/favorite_count）
+     * 2. yearly     —— 月度分布（year/summary{total_count,total_bytes}/by_month[{month,count}]/by_type/first_upload/last_upload/top_day/favorites）
+     * 3. tags       —— 标签 Top5（[{tag,count}] 按 count DESC）
+     * 4. health     —— 健康度（score 0-100 / grade A-D / duplicate_rate / quota_usage / age_score / suggestions[]）
+     * 5. activity   —— 活跃度（active_days/total_uploads/avg_per_day/streak/max_streak/most_active_month）
+     * 6. diversity  —— 多样性（type_count/tag_count/album_count/source_count/diversity_score 0-100）
+     * 7. highlights —— 月度亮点（[{month,highlight,count}] 每月一项代表性事件）
+     * 8. ranking    —— 上传排行（[{rank/user_or_device/count/bytes}] Top N）
+     *
+     * 解析沿用运行时 [Json.parseToJsonElement]（feature-media 无 serialization 编译器插件，
+     * 与 [getYearlyReview]/[getMediaCollectionHealth] 同款），**逐字段宽容**——缺失/类型不符
+     * 回退零值/空集合，保证 UI 在后端字段未齐或部分维度异常时永不崩。HTTP 非 200 或网络
+     * 异常返回 null，调用方（[com.wgt.media.SettingsScreen] 的年度报告 Dialog）按\"加载失败\"提示。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param year 年度筛选（默认 2026，透传 query param）
+     * @return 8 维度年度报告；失败返回 null
+     */
+    suspend fun getMediaSummaryReport(year: Int = 2026): SummaryReport? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-summary-report") {
+                parameter("year", year)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+
+                // —— 维度 1：stats 统计概览 ——
+                val statsObj = o["stats"]?.jsonObject
+                val stats = SummaryStats(
+                    totalMedia = statsObj?.get("total_media")?.jsonPrimitive?.intOrNull ?: 0,
+                    imageCount = statsObj?.get("image_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    videoCount = statsObj?.get("video_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    liveCount = statsObj?.get("live_count")?.jsonPrimitive?.intOrNull
+                        ?: statsObj?.get("live_photo_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    albumCount = statsObj?.get("album_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    favoriteCount = statsObj?.get("favorite_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = statsObj?.get("total_bytes")?.jsonPrimitive?.longOrNull ?: 0L
+                )
+
+                // —— 维度 2：yearly 月度分布 ——
+                val yearlyObj = o["yearly"]?.jsonObject
+                val monthsArr = yearlyObj?.get("by_month")?.jsonArray
+                val byMonth = (1..12).map { m ->
+                    val mc = monthsArr?.firstOrNull {
+                        it.jsonObject["month"]?.jsonPrimitive?.intOrNull == m
+                    }?.jsonObject
+                    MonthCount(
+                        month = m,
+                        count = mc?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+                val typeObj = yearlyObj?.get("by_type")?.jsonObject
+                val summaryObj = yearlyObj?.get("summary")?.jsonObject
+                val topDayObj = yearlyObj?.get("top_day")?.jsonObject
+                val yearly = SummaryYearly(
+                    year = yearlyObj?.get("year")?.jsonPrimitive?.intOrNull ?: year,
+                    totalCount = summaryObj?.get("total_count")?.jsonPrimitive?.intOrNull
+                        ?: yearlyObj?.get("total_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = summaryObj?.get("total_bytes")?.jsonPrimitive?.longOrNull
+                        ?: yearlyObj?.get("total_bytes")?.jsonPrimitive?.longOrNull ?: 0L,
+                    byMonth = byMonth,
+                    imageCount = typeObj?.get("image")?.jsonPrimitive?.intOrNull ?: 0,
+                    videoCount = typeObj?.get("video")?.jsonPrimitive?.intOrNull ?: 0,
+                    liveCount = typeObj?.get("live")?.jsonPrimitive?.intOrNull
+                        ?: typeObj?.get("live_photo")?.jsonPrimitive?.intOrNull ?: 0,
+                    firstUpload = yearlyObj?.get("first_upload")?.jsonPrimitive?.contentOrNull ?: "",
+                    lastUpload = yearlyObj?.get("last_upload")?.jsonPrimitive?.contentOrNull ?: "",
+                    topDay = TopDay(
+                        date = topDayObj?.get("date")?.jsonPrimitive?.contentOrNull ?: "",
+                        count = topDayObj?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    favorites = yearlyObj?.get("favorites")?.jsonPrimitive?.intOrNull ?: 0
+                )
+
+                // —— 维度 3：tags 标签 Top5 ——
+                val tags = o["tags"]?.jsonArray?.mapNotNull { el ->
+                    val t = el.jsonObject
+                    val name = t["tag"]?.jsonPrimitive?.contentOrNull
+                        ?: t["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    SummaryTag(
+                        name = name,
+                        count = t["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+
+                // —— 维度 4：health 健康度 ——
+                val healthObj = o["health"]?.jsonObject
+                val health = SummaryHealth(
+                    score = healthObj?.get("score")?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = healthObj?.get("grade")?.jsonPrimitive?.contentOrNull ?: "",
+                    duplicateRate = healthObj?.get("duplicate_rate")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    quotaUsage = healthObj?.get("quota_usage")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    ageScore = healthObj?.get("age_score")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    suggestions = healthObj?.get("suggestions")?.jsonArray?.mapNotNull {
+                        it.jsonPrimitive.contentOrNull
+                    } ?: emptyList()
+                )
+
+                // —— 维度 5：activity 活跃度 ——
+                val actObj = o["activity"]?.jsonObject
+                val activity = SummaryActivity(
+                    activeDays = actObj?.get("active_days")?.jsonPrimitive?.intOrNull ?: 0,
+                    totalUploads = actObj?.get("total_uploads")?.jsonPrimitive?.intOrNull ?: 0,
+                    avgPerDay = actObj?.get("avg_per_day")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    streak = actObj?.get("streak")?.jsonPrimitive?.intOrNull ?: 0,
+                    maxStreak = actObj?.get("max_streak")?.jsonPrimitive?.intOrNull ?: 0,
+                    mostActiveMonth = actObj?.get("most_active_month")?.jsonPrimitive?.intOrNull ?: 0
+                )
+
+                // —— 维度 6：diversity 多样性 ——
+                val divObj = o["diversity"]?.jsonObject
+                val diversity = SummaryDiversity(
+                    typeCount = divObj?.get("type_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    tagCount = divObj?.get("tag_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    albumCount = divObj?.get("album_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    sourceCount = divObj?.get("source_count")?.jsonPrimitive?.intOrNull ?: 0,
+                    diversityScore = divObj?.get("diversity_score")?.jsonPrimitive?.intOrNull ?: 0
+                )
+
+                // —— 维度 7：highlights 月度亮点 ——
+                val highlights = o["highlights"]?.jsonArray?.mapNotNull { el ->
+                    val h = el.jsonObject
+                    val month = h["month"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                    SummaryHighlight(
+                        month = month,
+                        highlight = h["highlight"]?.jsonPrimitive?.contentOrNull
+                            ?: h["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = h["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+
+                // —— 维度 8：ranking 上传排行 ——
+                val ranking = o["ranking"]?.jsonArray?.mapNotNull { el ->
+                    val r = el.jsonObject
+                    SummaryRank(
+                        rank = r["rank"]?.jsonPrimitive?.intOrNull ?: 0,
+                        name = r["user"]?.jsonPrimitive?.contentOrNull
+                            ?: r["device"]?.jsonPrimitive?.contentOrNull
+                            ?: r["user_or_device"]?.jsonPrimitive?.contentOrNull
+                            ?: r["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = r["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = r["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                } ?: emptyList()
+
+                logger.info(
+                    "MediaService",
+                    "getMediaSummaryReport year=$year OK: stats=${stats.totalMedia} tags=${tags.size} " +
+                        "highlights=${highlights.size} ranking=${ranking.size}"
+                )
+                SummaryReport(
+                    year = o["year"]?.jsonPrimitive?.intOrNull ?: year,
+                    stats = stats,
+                    yearly = yearly,
+                    tags = tags,
+                    health = health,
+                    activity = activity,
+                    diversity = diversity,
+                    highlights = highlights,
+                    ranking = ranking
+                )
+            } else {
+                logger.info("MediaService", "getMediaSummaryReport year=$year status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSummaryReport FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** media-summary-report 年度报告（8 维度合并）。 */
+    data class SummaryReport(
+        val year: Int,
+        val stats: SummaryStats,
+        val yearly: SummaryYearly,
+        val tags: List<SummaryTag>,
+        val health: SummaryHealth,
+        val activity: SummaryActivity,
+        val diversity: SummaryDiversity,
+        val highlights: List<SummaryHighlight>,
+        val ranking: List<SummaryRank>
+    )
+
+    /** 维度 1：统计概览。 */
+    data class SummaryStats(
+        val totalMedia: Int,
+        val imageCount: Int,
+        val videoCount: Int,
+        val liveCount: Int,
+        val albumCount: Int,
+        val favoriteCount: Int,
+        val totalBytes: Long
+    ) {
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /** 维度 2：月度分布。 */
+    data class SummaryYearly(
+        val year: Int,
+        val totalCount: Int,
+        val totalBytes: Long,
+        val byMonth: List<MonthCount>,
+        val imageCount: Int,
+        val videoCount: Int,
+        val liveCount: Int,
+        val firstUpload: String,
+        val lastUpload: String,
+        val topDay: TopDay,
+        val favorites: Int
+    ) {
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /** 维度 3：标签 Top5 条目。 */
+    data class SummaryTag(val name: String, val count: Int)
+
+    /** 维度 4：健康度。 */
+    data class SummaryHealth(
+        val score: Int,
+        val grade: String,
+        val duplicateRate: Double,
+        val quotaUsage: Double,
+        val ageScore: Double,
+        val suggestions: List<String>
+    )
+
+    /** 维度 5：活跃度。 */
+    data class SummaryActivity(
+        val activeDays: Int,
+        val totalUploads: Int,
+        val avgPerDay: Double,
+        val streak: Int,
+        val maxStreak: Int,
+        val mostActiveMonth: Int
+    )
+
+    /** 维度 6：多样性。 */
+    data class SummaryDiversity(
+        val typeCount: Int,
+        val tagCount: Int,
+        val albumCount: Int,
+        val sourceCount: Int,
+        val diversityScore: Int
+    )
+
+    /** 维度 7：月度亮点条目。 */
+    data class SummaryHighlight(val month: Int, val highlight: String, val count: Int)
+
+    /** 维度 8：上传排行条目。 */
+    data class SummaryRank(val rank: Int, val name: String, val count: Int, val bytes: Long)
 }
