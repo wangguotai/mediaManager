@@ -1825,6 +1825,17 @@ private fun MyTabContent(
             }
         }
 
+        // V8：文件名模式分布卡片（调 media-filename-pattern，显示前缀分布 top5 + 示例文件名）。
+        // 后端按文件名前缀分组（取首个分隔符 _ - 空格 . 之前部分）统计 count/percentage/example，
+        // 按 count 倒序返回；此处取前 5 行渲染。请求失败或无数据时返回 null，静默跳过。
+        var filenamePatterns by remember { mutableStateOf<List<MediaService.FilenamePattern>?>(null) }
+        LaunchedEffect(Unit) { filenamePatterns = MediaService.getMediaFilenamePattern() }
+        filenamePatterns?.let { patterns ->
+            if (patterns.isNotEmpty() && patterns.sumOf { it.count } > 0) {
+                FilenamePatternCard(patterns)
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
@@ -4489,6 +4500,77 @@ private fun CameraStatsCard(cameras: List<MediaService.CameraStat>) {
                         modifier = Modifier.width(76.dp),
                         textAlign = androidx.compose.ui.text.style.TextAlign.End
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V8：文件名模式分布卡片 —— 「我的」Tab 中展示文件名前缀分布 top5 + 示例文件名。
+ *
+ * 后端 [/api/media/media-filename-pattern] 按文件名前缀（取首个分隔符 _ - 空格 . 之前部分；
+ * 无分隔符取前 4 rune）分组，统计 count / percentage / example，按 count 倒序返回。
+ * 本卡片取前 5 行渲染，每行格式：`<prefix> (<N> 项 · <X>%) · 示例: <example>`，
+ * 与 [CameraStatsCard] 的左标签 + 进度条 + 右数值布局一致，便于「我的」Tab 统计卡视觉统一。
+ *
+ * 抽取为独立 [Composable] 以保持 [MyTabContent] 可读性。
+ * 调用方负责 null/空态过滤，本函数假定 [patterns] 非空且总数 > 0。
+ *
+ * @param patterns 已按数量倒序的前缀模式列表（最多取前 5 行）
+ */
+@Composable
+private fun FilenamePatternCard(patterns: List<MediaService.FilenamePattern>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("文件名模式", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+            // 后端已按 count 倒序，取前 5 行；总占比用作进度条分母。
+            val top = patterns.take(5).filter { it.count > 0 }
+            val maxCount = top.maxOf { it.count }.coerceAtLeast(1)
+            top.forEach { stat ->
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            stat.prefix,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        LinearProgressIndicator(
+                            progress = { (stat.count.toFloat() / maxCount).coerceIn(0f, 1f) },
+                            modifier = Modifier.width(72.dp).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surface
+                        )
+                        Text(
+                            "${stat.count} 项 · ${formatPercent(stat.percentage)}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.width(76.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.End
+                        )
+                    }
+                    // 示例文件名：次要色 + 小字体，超长省略。
+                    if (stat.example.isNotEmpty()) {
+                        Text(
+                            "示例: ${stat.example}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 0.dp, top = 2.dp)
+                        )
+                    }
                 }
             }
         }

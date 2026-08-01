@@ -3787,6 +3787,55 @@ object MediaService {
     data class CameraStat(val camera: String, val count: Int, val percentage: Double)
 
     /**
+     * V8：GET /api/media/media-filename-pattern — 文件名模式分析。
+     *
+     * 后端按文件名前缀（取首个分隔符 _ - 空格 . 之前部分；无分隔符取前 4 rune）分组，
+     * 统计每种前缀的 count / percentage / example，按 count 倒序返回。响应（与后端
+     * [handleMediaFilenamePattern] 对齐）：
+     *
+     * `{patterns: [{prefix, count, percentage, example}], total}`
+     *
+     * - [prefix] 文件名前缀（如 "IMG"、"PXL"、"Screenshot"）。
+     * - [count] 该前缀下媒体数量。
+     * - [percentage] 占总量百分比（0~100，Double）。
+     * - [example] 该前缀下的一条示例文件名。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaCameraStats] / [getMediaByHour] 同语义。
+     */
+    suspend fun getMediaFilenamePattern(): List<FilenamePattern>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-filename-pattern") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["patterns"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val prefix = o["prefix"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    FilenamePattern(
+                        prefix = prefix,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        example = o["example"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaFilenamePattern FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：文件名模式单条统计（前缀 + 数量 + 百分比 + 示例，与后端 patterns[] 对齐）。 */
+    data class FilenamePattern(
+        val prefix: String,
+        val count: Int,
+        val percentage: Double,
+        val example: String
+    )
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与
