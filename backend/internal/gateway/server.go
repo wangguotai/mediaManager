@@ -383,6 +383,11 @@ func (s *Server) registerRoutes() {
 	// 与 tag-co-occurrence 互补：后者只返 co>=2 的标签对（列表视角），本端点返完整
 	// 图结构（nodes+edges），所有共现 >=1 均纳入以便前端按权重过滤渲染。
 	s.mux.HandleFunc("/api/media/tag-network", s.handleTagNetwork)
+	// 标签关联性矩阵（N×N 热力图数据）：取 top N 标签，cell[i][j] = 同时拥有
+	// tag_i 和 tag_j 的 media 数量，含对角线（自关联 = 该标签 count）。
+	// 与 tag-co-occurrence 的区别：后者只返 co>=2 的稀疏标签对（列表视角），
+	// 本端点返完整 N×N 矩阵，适合热力图 / 弦图等矩阵可视化。
+	s.mux.HandleFunc("/api/media/media-tag-correlation", s.handleMediaTagCorrelation)
 	// 标签层级分析：自动分析标签名中的分隔符（- / : 等）推断父子关系，
 	// 如 "旅行-国内"、"旅行-国外" 的父节点为 "旅行"。无分隔符的标签作为顶层。
 	// 返回 {hierarchy: [{tag, count, children: [...]}], total_roots}，供前端树形展示。
@@ -8848,6 +8853,113 @@ func (s *Server) handleTagNetwork(w http.ResponseWriter, r *http.Request) {
 		"edges":       edges,
 		"total_nodes": len(nodes),
 		"total_edges": len(edges),
+	})
+}
+
+// handleMediaTagCorrelation GET /api/media/media-tag-correlation — 标签关联性矩阵。
+// 取 count DESC 排序后的 top N 标签（?limit=10，默认 10，上限 100），构建 N×N
+// 矩阵：cell[i][j] = 同时拥有 tag_i 和 tag_j 的 media 数量；对角线 cell[i][i] =
+// 该标签自身关联的 media 数（即该标签 count）。矩阵对称。
+//
+// 响应: { tags: [tag1, tag2, ...], matrix: [[...], ...], total_tags }。
+//   - tags: top N 标签名数组，顺序即矩阵行/列索引顺序
+//   - matrix: N×N 整数矩阵，matrix[i][j] = |media(tag_i) ∩ media(tag_j)|
+//   - total_tags: 该用户全部标签数（含未入选 top N 者）
+//
+// 与 tag-co-occurrence 的区别：后者只返 co>=2 的稀疏标签对列表（适合"哪些标签
+// 经常共现"的查询）；本端点返完整 N×N 矩阵，适合热力图 / 弦图等矩阵可视化。
+//
+// 实现策略（与 handleTagNetwork 同构）：TagStats 取全量标签计数（已按 count DESC
+// 排序）截取前 limit 作为 top N；对每个 top 标签调 SearchMediaByTag 取关联
+// media_id 集合；对每对 (i,j) 求交集大小填入 cell[i][j]。count 口径沿用
+// handleTagNetwork（用集合大小，不直接取 TagStats 的 count，避免软删标签关系行
+// 不联动导致口径不一致）。
+func (s *Server) handleMediaTagCorrelation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	// limit：默认 10，范围 [1,100]。
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 100 {
+				n = 100
+			}
+			limit = n
+		}
+	}
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalTags := len(stats)
+	if limit > len(stats) {
+		limit = len(stats)
+	}
+	top := stats[:limit]
+	// 为每个 top 标签构造 media_id 集合；同时取标签名数组。
+	tagNames := make([]string, 0, limit)
+	tagMedia := make([]map[string]struct{}, 0, limit)
+	for _, st := range top {
+		tagName, _ := st["tag"].(string)
+		if tagName == "" {
+			continue
+		}
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tagName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		tagNames = append(tagNames, tagName)
+		tagMedia = append(tagMedia, set)
+	}
+	n := len(tagNames)
+	// 构建 N×N 矩阵。cell[i][j] = set_i ∩ set_j 大小；对角线 cell[i][i] = set_i
+	// 大小 = 该标签 count。利用对称性只算上三角再镜像。
+	matrix := make([][]int, n)
+	for i := 0; i < n; i++ {
+		matrix[i] = make([]int, n)
+		setI := tagMedia[i]
+		// 对角线：自关联 = 该标签关联 media 数。
+		matrix[i][i] = len(setI)
+		for j := i + 1; j < n; j++ {
+			setJ := tagMedia[j]
+			// 求交集大小：遍历较小的集合查较大的集合。
+			small, large := setI, setJ
+			if len(small) > len(large) {
+				small, large = large, small
+			}
+			count := 0
+			for id := range small {
+				if _, ok := large[id]; ok {
+					count++
+				}
+			}
+			matrix[i][j] = count
+			matrix[j][i] = count
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       tagNames,
+		"matrix":     matrix,
+		"total_tags": totalTags,
 	})
 }
 
