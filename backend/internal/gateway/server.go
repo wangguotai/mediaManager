@@ -578,6 +578,9 @@ func (s *Server) registerRoutes() {
 	// 含完整度评分 0-100 与 A/B/C/D 等级）。一次 ListMediaByUser 拉全量 + 单次磁盘扫描，
 	// 同时检测 DB 有记录磁盘缺失（orphan）、size<=0 或大小不符（error）、SHA256 重复（duplicate）。
 	s.mux.HandleFunc("/api/media/media-integrity-report", s.handleMediaIntegrityReport)
+	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
+	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -10493,6 +10496,102 @@ func (s *Server) handleMediaAgeDistribution(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ranges": buckets,
 		"total":  total,
+	})
+}
+
+// handleMediaDecadeDistribution GET /api/media/media-decade-distribution —
+// 按年代统计媒体分布。
+//
+// 基于 created_at（上传时间）的 UTC 年份将所有未软删媒体归入年代分桶：
+//
+//	2020s  （2020-2029）
+//	2010s  （2010-2019）
+//	2000s  （2000-2009）
+//	更早   （< 2000 年）
+//
+// 每个年代统计 count 与 bytes（累计该年代媒体的 Size），并计算 percentage（该年代
+// 媒体数占参与统计的未软删媒体总数的百分比，保留两位小数）。另返回 total 为参与统计
+// 的未软删媒体总数。
+//
+// 需认证（user_id 从 context 取），按 user_id 隔离；store 未注入返回 503。
+// 软删（deleted=1）媒体跳过。
+//
+// 响应结构：
+//
+//	{
+//	  "decades": [
+//	    {"decade":"2020s","count":N,"bytes":N,"percentage":12.34},
+//	    {"decade":"2010s","count":N,"bytes":N,"percentage":0.00},
+//	    {"decade":"2000s","count":N,"bytes":N,"percentage":0.00},
+//	    {"decade":"更早","count":N,"bytes":N,"percentage":0.00}
+//	  ],
+//	  "total": N  // 参与统计的未软删媒体总数
+//	}
+func (s *Server) handleMediaDecadeDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 4 个年代档，顺序固定（新→旧），count/bytes 预置 0。用切片而非 map 以保证返回顺序。
+	type decadeBucket struct {
+		Decade     string  `json:"decade"`
+		Count      int64   `json:"count"`
+		Bytes      int64   `json:"bytes"`
+		Percentage float64 `json:"percentage"`
+	}
+	buckets := []decadeBucket{
+		{Decade: "2020s"},
+		{Decade: "2010s"},
+		{Decade: "2000s"},
+		{Decade: "更早"},
+	}
+	decadeIdx := func(year int) int {
+		switch {
+		case year >= 2020:
+			return 0 // 2020s
+		case year >= 2010:
+			return 1 // 2010s
+		case year >= 2000:
+			return 2 // 2000s
+		default:
+			return 3 // 更早
+		}
+	}
+
+	var total int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		idx := decadeIdx(m.CreatedAt.UTC().Year())
+		buckets[idx].Count++
+		buckets[idx].Bytes += m.Size
+		total++
+	}
+	// percentage = count / total * 100，保留两位小数；total=0 时全部为 0。
+	for i := range buckets {
+		if total > 0 {
+			buckets[i].Percentage = math.Round(float64(buckets[i].Count)/float64(total)*10000) / 100
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decades": buckets,
+		"total":   total,
 	})
 }
 
