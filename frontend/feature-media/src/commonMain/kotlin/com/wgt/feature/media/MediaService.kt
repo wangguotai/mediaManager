@@ -4650,6 +4650,70 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-content-diversity — 媒体内容多样性评分（Shannon 熵四维度）。
+     *
+     * 后端对当前用户全部未软删媒体，按四维度计算 Shannon 熵并归一化（entropy / ln(k)，
+     * k 为该维度类别数；单一类别时熵为 0、归一化为 0；均匀分布时归一化为 1）：
+     *   - type  IMAGE / VIDEO / LIVE_PHOTO 分布的类型熵
+     *   - mime  各 MIME 类型分布的 MIME 熵（如 image/jpeg、video/mp4）
+     *   - hour  按 created_at 所在小时（0-23）分布的时段熵
+     *   - tag   各标签关联媒体数分布的标签熵（来自 TagStats）
+     *
+     * 综合多样性 = average(各维度归一化熵)，等级 A(>=0.8) / B(>=0.6) / C(>=0.4) / D(<0.4)；
+     * total=0 时 score=0 grade=D 各维度熵均为 0。
+     *
+     * 响应结构：`{diversity_score: Double(0-1), grade: String,
+     *   breakdown: {type:{entropy,categories,distribution}, mime:{...}, hour:{...}, tag:{...}},
+     *   total: Int}`
+     * - [diversityScore] 为 0-1 归一化值，UI 显示时乘 100 体现为百分制。
+     * - [breakdown] 仅取各维度的归一化熵值，类别数与分布详情
+     *   前端卡片暂不展示（保持四维度卡片简洁，与照片心情/色温等同密度）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getMediaMoodAnalysis] 同款）。HTTP 非 200 / 网络异常返回 null，调用方按空态处理。
+     *
+     * @return 多样性评分聚合；失败返回 null。total=0 时由 UI 静默跳过。
+     */
+    suspend fun getMediaContentDiversity(): ContentDiversity? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-content-diversity")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val breakdown = obj["breakdown"]?.jsonObject
+                // 每维度结构 {entropy: Double, categories: Int, distribution: {k:v}}；
+                // 前端只取 entropy（归一化 0-1），缺失维度默认 0.0 不会误判为高多样性。
+                fun dim(key: String): Double =
+                    breakdown?.get(key)?.jsonObject?.get("entropy")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                ContentDiversity(
+                    diversityScore = obj["diversity_score"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    grade = obj["grade"]?.jsonPrimitive?.contentOrNull ?: "D",
+                    breakdown = mapOf(
+                        "type" to dim("type"),
+                        "mime" to dim("mime"),
+                        "hour" to dim("hour"),
+                        "tag" to dim("tag")
+                    ),
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaContentDiversity status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaContentDiversity FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 媒体内容多样性评分（综合多样性 0-1 + 等级 + 四维度归一化熵 + 媒体总数）。 */
+    data class ContentDiversity(
+        val diversityScore: Double,
+        val grade: String,
+        val breakdown: Map<String, Double>,
+        val total: Int
+    )
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：

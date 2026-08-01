@@ -2561,6 +2561,19 @@ private fun MyTabContent(
             }
         }
 
+        // 内容多样性卡片（调 media-content-diversity，Shannon 熵四维度归一化评分）。
+        // 后端对全部未软删媒体按 type / mime / hour / tag 四维度计算 Shannon 熵并归一化
+        // (entropy / ln(k))，综合多样性 = 四维度均值；等级 A(>=0.8)/B(>=0.6)/C(>=0.4)/D(<0.4)。
+        // 返回 diversity_score(0-1) / grade / breakdown{type,mime,hour,tag:{entropy,categories,distribution}} / total。
+        // 请求失败或 total=0 静默跳过，与照片心情/色温分布等卡片同语义。
+        var contentDiversity by remember { mutableStateOf<MediaService.ContentDiversity?>(null) }
+        LaunchedEffect(Unit) { contentDiversity = MediaService.getMediaContentDiversity() }
+        contentDiversity?.let { cd ->
+            if (cd.total > 0) {
+                ContentDiversityCard(cd)
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
@@ -5508,6 +5521,122 @@ private fun StatItem(label: String, count: Int, bytes: Long) {
         Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("$count", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Text(formatBytesToMB(bytes), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+    }
+}
+
+/**
+ * 内容多样性评分卡片 —— 「我的」Tab 中展示 Shannon 熵四维度归一化多样性。
+ *
+ * 后端 [/api/media/media-content-diversity] 对全部未软删媒体按 type / mime / hour / tag
+ * 四维度计算 Shannon 熵并归一化（entropy / ln(k)），综合多样性 = 四维度均值；
+ * 等级 A(>=0.8) / B(>=0.6) / C(>=0.4) / D(<0.4)。本卡片展示综合评分（百分制）+ 等级 +
+ * 四维度归一化熵（百分制）比例条，与照片心情/色温分布等卡片的 Box 比例条样式一致。
+ *
+ * 抽取为独立 [Composable] 以保持 [MyTabContent] 可读性。
+ * 调用方负责 null/空态过滤，本函数假定 [cd.total] > 0。
+ *
+ * @param cd 多样性评分聚合（综合多样性 0-1 + 等级 + 四维度归一化熵 0-1 + 媒体总数）
+ */
+@Composable
+private fun ContentDiversityCard(cd: MediaService.ContentDiversity) {
+    // 四维度固定顺序与中文标签（与后端 breakdown 键一致）。
+    val dims = listOf(
+        "type" to "类型熵",
+        "mime" to "MIME 熵",
+        "hour" to "时段熵",
+        "tag" to "标签熵"
+    )
+    // 综合评分百分制（0-100，整数；commonMain 无 String.format，用toDouble后toInt取整）。
+    val scorePct = (cd.diversityScore * 100).toInt().coerceIn(0, 100)
+    // 等级配色：A 绿、B 蓝、C 橙、D 灰（直观体现多样性高低）。
+    val gradeColor = when (cd.grade) {
+        "A" -> MaterialTheme.colorScheme.primary
+        "B" -> MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+        "C" -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+    }
+    // 最高熵维度高亮（多样性最丰富的维度），与照片心情主调档同款高亮约定。
+    val topDim = cd.breakdown.maxByOrNull { it.value }?.key
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("内容多样性", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("$scorePct/100", fontWeight = FontWeight.Bold, color = gradeColor)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    // 等级徽章：圆角着色小块，色随等级变化。
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(gradeColor.copy(alpha = 0.15f))
+                            .padding(horizontal = 6.dp, vertical = 1.dp)
+                    ) {
+                        Text(cd.grade, fontWeight = FontWeight.Bold, fontSize = 11.sp, color = gradeColor)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            dims.forEach { (key, label) ->
+                val entropy = cd.breakdown[key] ?: 0.0
+                val isTop = key == topDim && entropy > 0.0
+                val rowColor = if (isTop) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                val barColor = if (isTop) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                // 归一化熵已是 0-1，直接作比例条宽度；百分制显示（整数）。
+                val ratio = entropy.coerceIn(0.0, 1.0).toFloat()
+                val entropyPct = (entropy * 100).toInt().coerceIn(0, 100)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(label, fontSize = 12.sp,
+                        fontWeight = if (isTop) FontWeight.Bold else FontWeight.Normal,
+                        color = rowColor)
+                    Text("$entropyPct%",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                }
+                // 比例条：最高熵维度着色更深（与照片心情/色温分布卡片同款 Box 比例条）。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(ratio)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(barColor)
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "🌈 综合 ${scorePct}/100 · 等级 ${cd.grade} · 共 ${cd.total} 项",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+            )
+            Text(
+                "按类型 / MIME / 时段 / 标签四维度 Shannon 熵归一化（entropy / ln(k)）",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
     }
 }
 
