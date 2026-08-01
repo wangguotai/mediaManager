@@ -1881,6 +1881,12 @@ fun SettingsScreen(
             // 放在 V22 归档建议之后、V25 照片组织建议之前。最多展示 top 5 评分条目。
             ArchiveRecommendV2Card()
 
+            // V27：一键清理计划卡片 —— 调 /api/media/media-cleanup-plan 显示按优先级（score 倒序）
+            // 合并的清理清单（重复/孤儿/错误/归档），顶部汇总 N 项建议 · 可回收 X MB，
+            // top 5 优先级条目（type emoji + filename + score + action）。
+            // 独立 @Composable，自取数据；紧跟归档建议后，作为"减少存量"系列的操作入口。
+            CleanupPlanCard()
+
             Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
@@ -5060,6 +5066,169 @@ private fun ArchiveRecommendV2Card() {
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             "💾 潜在节省空间：${formatDouble2(savingsMb)} MB",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+    }
+}
+
+/**
+ * V27：一键清理计划卡片 —— 调 GET /api/media/media-cleanup-plan 展示按优先级（score 倒序）
+ * 排序的合并清理清单（完全重复 / 孤儿文件 / 近似重复 / 错误文件 / 旧大文件归档）。
+ *
+ * 后端把 5 大清理来源合并为单一 plan，每条含 type/media_id/filename/score/action/
+ * reclaimable_bytes；total_items/total_reclaimable_bytes 为截断前全量汇总。
+ * 本卡片展示 top 5 优先级条目 + 顶部汇总（N 项建议 · 可回收 X MB）。
+ *
+ * 数据获取走 [MediaService.getMediaCleanupPlan]（返回原始 JSON 字符串），此处用
+ * kotlinx.serialization 运行时 JSON API 解析——与 [ArchiveRecommendV2Card] 同款口径。
+ * 失败/空列表静默降级为提示文本，不阻塞设置页其余卡片。
+ *
+ * 独立 @Composable，自管 loading / error / 空态，与 [ArchiveRecommendV2Card] 同模式。
+ *
+ * type → emoji 映射（按任务规范）：
+ * - exact_duplicates / near_duplicates → 🔁 duplicate
+ * - orphan_files                       → 🔗 orphan
+ * - error_files                        → ⚠️ error
+ * - archive_candidates                 → 📦 archive
+ * 未知 type 回退 🔁，保证行不破。
+ */
+@Composable
+private fun CleanupPlanCard() {
+    // rawJson: null=加载中或失败；非 null=已获取后端原始 JSON 字符串
+    // （getMediaCleanupPlan 失败返回 null，成功返回字符串）
+    var rawJson by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val result = MediaService.getMediaCleanupPlan(limit = 20)
+        if (result == null) {
+            failed = true
+        } else {
+            rawJson = result
+        }
+        loading = false
+    }
+
+    SectionTitle("🧹 一键清理计划", iconRes = Res.drawable.ic_info)
+
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+    if (failed) {
+        Text(
+            "无法获取清理计划",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    // 解析后端原始 JSON：{plan:[{type,media_id,filename,score,action,reclaimable_bytes,...}],
+    // total_items, total_reclaimable_bytes, estimated_time_min, source_counts:{...}, ...}
+    val parsed: JsonObject = try {
+        Json.parseToJsonElement(rawJson!!).jsonObject
+    } catch (e: Exception) {
+        logger.error(TAG, "CleanupPlanCard parse FAILED: ${e::class.simpleName} ${e.message}")
+        Text(
+            "清理计划数据解析失败",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    val plan: JsonArray = parsed["plan"]?.jsonArray ?: JsonArray(emptyList())
+    val totalItems = parsed["total_items"]?.jsonPrimitive?.intOrNull ?: plan.size
+    val totalReclaimableBytes = parsed["total_reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+
+    if (plan.isEmpty() && totalItems == 0) {
+        Text(
+            "🎉 暂无清理建议，媒体库很整洁",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        // 顶部汇总：N 项建议 · 可回收 X MB
+        Text(
+            "🧹 共 $totalItems 项建议 · 可回收 ${formatBytesToMB(totalReclaimableBytes)}",
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // top 5 优先级条目：type emoji + filename + score + action
+        plan.take(5).forEach { el ->
+            val item = el.jsonObject
+            val type = item["type"]?.jsonPrimitive?.contentOrNull ?: ""
+            val filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: ""
+            val mediaId = item["media_id"]?.jsonPrimitive?.contentOrNull ?: ""
+            val score = item["score"]?.jsonPrimitive?.intOrNull ?: 0
+            val action = item["action"]?.jsonPrimitive?.contentOrNull ?: ""
+            val reclaimable = item["reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+
+            // type → emoji 映射（按任务规范）
+            val emoji = when (type) {
+                "exact_duplicates", "near_duplicates" -> "🔁"
+                "orphan_files" -> "🔗"
+                "error_files" -> "⚠️"
+                "archive_candidates" -> "📦"
+                else -> "🔁"
+            }
+
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(emoji, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        filename.ifEmpty { mediaId },
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "$score 分",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                // action 行：建议执行动作 + 可回收字节
+                if (action.isNotEmpty()) {
+                    Text(
+                        "  · $action · 可回收 ${formatBytesToMB(reclaimable)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(start = 12.dp, top = 1.dp)
+                    )
+                }
+            }
+        }
+
+        // 底部强调可回收总量
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "💾 预计可回收空间：${formatBytesToMB(totalReclaimableBytes)}",
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.tertiary,

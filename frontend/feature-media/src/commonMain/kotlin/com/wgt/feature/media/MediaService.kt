@@ -5336,6 +5336,47 @@ object MediaService {
     }
 
     /**
+     * V27：GET /api/media/media-cleanup-plan — 一键清理计划（多来源合并的优先级清单）。
+     *
+     * 后端合并五大清理来源为单一执行清单，按 score 倒序排序：
+     *   - exact_duplicates  (score=100) 相同 SHA256 完全重复；action="delete_duplicate"
+     *   - orphan_files      (score=90)  DB 有记录但磁盘文件缺失；action="cleanup_orphan"
+     *   - near_duplicates   (score=70)  近似重复对；action="review_near_duplicate"
+     *   - error_files       (score=60)  size<=0 或 size 不符；action="fix_error_file"
+     *   - archive_candidates(score=40)  >180天 且 >=50MB 旧大文件；action="archive_old_large"
+     *
+     * 响应结构：
+     * `{plan:[{type,media_id,filename,score,action,reclaimable_bytes,...}],
+     *  total_items, total_reclaimable_bytes, estimated_time_min, source_counts:{...},
+     *  disk_check, user_id}`。total_items/total_reclaimable_bytes 为截断前全量汇总。
+     *
+     * 本方法返回**原始 JSON 字符串**（简化：不在此层解析为 data class，由调用方
+     * [com.wgt.media.SettingsScreen] 的 [com.wgt.media.CleanupPlanCard] 自行运行时解析），
+     * 与 [getMediaArchiveRecommendV2] 同款口径。HTTP 非 200 / 网络异常返回 null，
+     * 调用方静默跳过卡片渲染（非阻塞设置项）。
+     *
+     * @param limit 返回上限（默认 20，后端钳制 [0,500]）
+     * @return 后端原始 JSON 字符串；失败返回 null
+     */
+    suspend fun getMediaCleanupPlan(limit: Int = 20): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-cleanup-plan") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                response.body<String>()
+            } else {
+                logger.info("MediaService", "getMediaCleanupPlan status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaCleanupPlan FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V25：照片组织建议单条（GET /api/media/photo-organize-suggest 返回）。
      *
      * 后端从 月份(by_month)/类型(by_type)/未标签(untagged) 三个维度对全量媒体做
