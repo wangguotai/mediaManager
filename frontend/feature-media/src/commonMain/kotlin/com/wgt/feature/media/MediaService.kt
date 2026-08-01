@@ -8948,6 +8948,70 @@ object MediaService {
     }
 
     /**
+     * 相册覆盖率 —— 媒体归入相册的覆盖率画像。
+     *
+     * 后端 `GET /api/media/media-album-coverage` 统计当前用户全部未软删媒体中有多少
+     * 被归入至少一个相册（[inAlbum]）、多少属于未分类（[notInAlbum]），并给出覆盖率
+     * 百分比、相册数、每相册平均项数与一条整理建议。前端用于"我的"Tab 相册覆盖率卡片
+     * 展示进度条 + 分类统计 + 建议。
+     *
+     * @param totalMedia       媒体总数（未软删）
+     * @param inAlbum          已归入相册的媒体数
+     * @param notInAlbum       未归入任何相册的媒体数
+     * @param coveragePercent  覆盖率百分比 0~100
+     * @param albumCount       相册总数
+     * @param avgPerAlbum      每个相册的平均媒体项数
+     * @param suggestion       整理建议文字；无建议时为空串
+     */
+    data class AlbumCoverage(
+        val totalMedia: Int,
+        val inAlbum: Int,
+        val notInAlbum: Int,
+        val coveragePercent: Double,
+        val albumCount: Int,
+        val avgPerAlbum: Double,
+        val suggestion: String
+    )
+
+    /**
+     * GET /api/media/media-album-coverage — 相册覆盖率。
+     *
+     * 后端统计媒体归入相册的覆盖率，返回
+     * `{total_media, in_album, not_in_album, coverage_percent, album_count, avg_per_album, suggestion}`。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaGrowthMilestone] 同款）。**不附加 per-call
+     * 鉴权头**——Bearer token 由 [jsonClient] 的 `defaultRequest` 统一注入。各字段宽容回退
+     *（`?: 0` / `?: 0.0` / `?: ""`），后端端点上线后即可联调。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @return 覆盖率对象；失败返回 null
+     */
+    suspend fun getMediaAlbumCoverage(): AlbumCoverage? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-album-coverage")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                AlbumCoverage(
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    inAlbum = o["in_album"]?.jsonPrimitive?.intOrNull ?: 0,
+                    notInAlbum = o["not_in_album"]?.jsonPrimitive?.intOrNull ?: 0,
+                    coveragePercent = o["coverage_percent"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    albumCount = o["album_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgPerAlbum = o["avg_per_album"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    suggestion = o["suggestion"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else {
+                logger.info("MediaService", "getMediaAlbumCoverage status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaAlbumCoverage FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；

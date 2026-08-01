@@ -1058,6 +1058,98 @@ private fun MyTabContent(
             }
         }
 
+        // 相册覆盖率卡片 —— 调 media-album-coverage 展示进度条 + 分类统计 + 建议。
+        // 置于成长里程碑卡片之后、用户信息卡片之前。null 或 totalMedia==0 时静默跳过
+        //（不占位），与总览/里程碑卡片同等空态处理（aggregate guard shape）。
+        var albumCoverage by remember { mutableStateOf<MediaService.AlbumCoverage?>(null) }
+        LaunchedEffect(Unit) { albumCoverage = MediaService.getMediaAlbumCoverage() }
+        albumCoverage?.let { ac ->
+            if (ac.totalMedia > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "相册覆盖率",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 进度条：已归入相册 / 总数 (X%)。
+                        // ratio = inAlbum / totalMedia（coerceIn 0..1，totalMedia>0 已由外层 guard 保证）。
+                        val ratio = (ac.inAlbum.toDouble() / ac.totalMedia).coerceIn(0.0, 1.0).toFloat()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "${ac.inAlbum}/${ac.totalMedia}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            LinearProgressIndicator(
+                                progress = { ratio },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surface
+                            )
+                            Text(
+                                formatPercent(ac.coveragePercent),
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 13.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 分类统计：📁 在相册 N · 🔍 未分类 N
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                "📁 在相册 ${ac.inAlbum}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "🔍 未分类 ${ac.notInAlbum}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            // 平均每相册 N 项（avgPerAlbum 截断一位小数，commonMain 无 String.format）。
+                            val avgStr = ac.avgPerAlbum.toString().let { s ->
+                                s.take(s.indexOf('.').coerceAtLeast(0) + 2)
+                            }
+                            Text(
+                                "📚 相册 ${ac.albumCount} · 均 $avgStr 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                        // 建议文字（如果有）
+                        if (ac.suggestion.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "💡 ${ac.suggestion}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(
