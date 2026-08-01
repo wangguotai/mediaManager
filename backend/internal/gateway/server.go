@@ -229,6 +229,10 @@ func (s *Server) registerRoutes() {
 	// V21：综合报告（合并 quick-stats/yearly-review/storage/tag/pattern/duplicate 为一次请求），
 	// 供前端"年度报告"风格页面一次加载全部数据，避免并发拉 6 个端点。
 	s.mux.HandleFunc("/api/media/full-report", s.handleMediaFullReport)
+	// V26：媒体库摘要报告（合并 quick_stats/yearly_review/top_tags/storage_health/
+	// activity_score/diversity_score/monthly_highlights/upload_ranking 8 大维度为一次请求），
+	// 供前端"年度报告"风格页面一次加载完整概要，避免并发拉 8 个端点。
+	s.mux.HandleFunc("/api/media/media-summary-report", s.handleMediaSummaryReport)
 	// V8：按天统计媒体数量热力图（一年 GitHub 风格贡献图，按 taken_at 优先、created_at 回退）。
 	s.mux.HandleFunc("/api/media/media-heatmap", s.handleMediaHeatmap)
 	// 整年日历热力数据：按 created_at 日期分组，返回指定年份 12 个月的每日媒体数量与
@@ -8582,6 +8586,525 @@ func (s *Server) handleMediaFullReport(w http.ResponseWriter, r *http.Request) {
 		"pattern":     pattern,
 		"duplicates":  duplicates,
 		"user_id":     uid,
+	})
+}
+
+// handleMediaSummaryReport GET /api/media/media-summary-report — 媒体库摘要报告。
+//
+// 一次请求返回当前用户媒体库的完整概要，合并 8 大维度，供前端"年度报告"风格页面
+// 一次加载全部数据，避免并发拉 8 个端点：
+//
+//   - quick_stats      ：媒体总量/图片数/视频数/字节数/收藏数/相册数/分享数（全库口径）
+//   - yearly_review    ：指定年份的月分布/类型分布/首末上传/最忙日/收藏数
+//   - top_tags         ：使用最多的前 5 个标签（TagStats 口径，best-effort）
+//   - storage_health   ：存储健康度评分（0-100）+ A/B/C/D 等级（同 storage-health 口径）
+//   - activity_score   ：用户活跃度评分（加权 upload/favorite/share/tag/rename/rotate）+ 等级
+//   - diversity_score  ：内容多样性评分（type/mime/hour/tag 四维归一化熵均值）+ 等级
+//   - monthly_highlights：指定年份按月聚合的 top 3 亮点月（count 倒序、并列取月份升序）
+//   - upload_ranking   ：指定年份按日上传量排名 top 3（count 倒序、并列取日期升序）
+//
+// year 默认当年（UTC），?year=2026 指定；非法回退当年。需认证，按 user_id 隔离；
+// store 未注入返回 503。各维度均做 best-effort：单项数据源失败时该项置零/空而不中断
+// 整体响应（与 full-report / dashboard 一致的容错策略）。
+//
+// 响应结构：
+//
+//	{
+//	  "year":            2026,
+//	  "stats":           {quick_stats},
+//	  "yearly":          {yearly_review},
+//	  "tags":            [{tag,count}, ...top5],
+//	  "health":          {score,grade,...},
+//	  "activity":        {score,level,breakdown,...},
+//	  "diversity":       {diversity_score,grade,...},
+//	  "highlights":      [{month,count,first,largest,last}, ...top3],
+//	  "ranking":         [{rank,date,count,bytes}, ...top3],
+//	  "user_id":         "..."
+//	}
+func (s *Server) handleMediaSummaryReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// year 默认当年（UTC），?year=2026 指定；非法回退到当年（同 yearly-review/full-report）。
+	now := time.Now().UTC()
+	year := now.Year()
+	if q := r.URL.Query().Get("year"); q != "" {
+		if y, err := strconv.Atoi(q); err == nil && y >= 1970 && y <= 9999 {
+			year = y
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// ---- 一次性遍历派生 quick_stats + yearly + health + diversity + highlights + ranking ----
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 storage-health/dashboard 一致
+	type hlRef struct {
+		ID         string
+		Filename   string
+		Size       int64
+		OccurredAt time.Time
+	}
+	type rankDay struct {
+		Date  string
+		Count int64
+		Bytes int64
+	}
+	var (
+		// quick_stats（全库未删口径）
+		totalMedia int
+		imgCount   int
+		vidCount   int
+		totalBytes int64
+		// yearly（指定年份）
+		yearCount                                          int64
+		yearBytes                                          int64
+		yearImg, yearVid, yearLive                         int64
+		monthCounts                                        = make([]int64, 12)
+		dayCounts                                          = make(map[string]int64)
+		firstUpload, lastUpload                            time.Time
+		yearIDs                                            = make(map[string]struct{})
+		// storage_health
+		coldCount                                          int
+		shaCounts                                          = make(map[string]int)
+		// diversity（全库未删口径）
+		typeCounts                                         = make(map[string]int)
+		mimeCounts                                         = make(map[string]int)
+		hourCounts                                         = make(map[string]int, 24)
+		// monthly_highlights（指定年份）：按月聚合 first/largest/last
+		monthHLFirst   [12]*hlRef
+		monthHLLast    [12]*hlRef
+		monthHLLargest [12]*hlRef
+		// upload_ranking（指定年份）：按日聚合 count/bytes
+		rankByDay = make(map[string]*rankDay)
+	)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		// --- quick_stats ---
+		totalMedia++
+		totalBytes += m.Size
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			imgCount++
+		case "VIDEO":
+			vidCount++
+		}
+		// --- storage_health ---
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+		// --- diversity ---
+		typeCounts[m.Type]++
+		if m.Mime != "" {
+			mimeCounts[m.Mime]++
+		}
+		hourCounts[strconv.Itoa(m.CreatedAt.Hour())]++
+
+		// --- yearly / highlights / ranking（仅指定年份）---
+		ca := m.CreatedAt.UTC()
+		if ca.Year() != year {
+			continue
+		}
+		yearCount++
+		yearBytes += m.Size
+		yearIDs[m.ID] = struct{}{}
+		mi := int(ca.Month()) - 1 // 0=Jan
+		monthCounts[mi]++
+		dayKey := ca.Format("2006-01-02")
+		dayCounts[dayKey]++
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			yearImg++
+		case "VIDEO":
+			yearVid++
+		case "LIVE_PHOTO", "LIVE":
+			yearLive++
+		}
+		if firstUpload.IsZero() || ca.Before(firstUpload) {
+			firstUpload = ca
+		}
+		if lastUpload.IsZero() || ca.After(lastUpload) {
+			lastUpload = ca
+		}
+		// monthly_highlights：first/largest/last（同 media-monthly-highlights 口径）。
+		ref := &hlRef{ID: m.ID, Filename: m.Filename, Size: m.Size, OccurredAt: ca}
+		if monthHLFirst[mi] == nil || ref.OccurredAt.Before(monthHLFirst[mi].OccurredAt) {
+			monthHLFirst[mi] = ref
+		}
+		if monthHLLast[mi] == nil || ref.OccurredAt.After(monthHLLast[mi].OccurredAt) {
+			monthHLLast[mi] = ref
+		}
+		if monthHLLargest[mi] == nil {
+			monthHLLargest[mi] = ref
+		} else if ref.Size > monthHLLargest[mi].Size {
+			monthHLLargest[mi] = ref
+		} else if ref.Size == monthHLLargest[mi].Size && ref.OccurredAt.Before(monthHLLargest[mi].OccurredAt) {
+			monthHLLargest[mi] = ref
+		}
+		// upload_ranking：按日聚合。
+		if _, ok := rankByDay[dayKey]; !ok {
+			rankByDay[dayKey] = &rankDay{Date: dayKey}
+		}
+		rankByDay[dayKey].Count++
+		rankByDay[dayKey].Bytes += m.Size
+	}
+
+	// ---- quick_stats: album/favorite/share counts（同 summary/full-report 口径）----
+	favoriteCount := 0
+	var favoriteIDs []string
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteIDs = fav.ListFavorites(uid)
+		favoriteCount = len(favoriteIDs)
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+	shareCount := 0
+	if tokens, serr := s.store.ListShareTokensByUser(r.Context(), uid); serr == nil {
+		shareCount = len(tokens)
+	} else {
+		slog.Warn("summary-report: list share tokens failed", "error", serr)
+	}
+	quickStats := map[string]any{
+		"total_media":    totalMedia,
+		"total_bytes":    totalBytes,
+		"image_count":    imgCount,
+		"video_count":    vidCount,
+		"album_count":    albumCount,
+		"favorite_count": favoriteCount,
+		"shares":         shareCount,
+	}
+
+	// ---- yearly: by_month / top_day / favorites（同 yearly-review 口径）----
+	byMonth := make([]map[string]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		byMonth = append(byMonth, map[string]any{"month": i + 1, "count": monthCounts[i]})
+	}
+	var topDay string
+	var topCount int64
+	for d, c := range dayCounts {
+		if c > topCount || (c == topCount && (topDay == "" || d < topDay)) {
+			topDay = d
+			topCount = c
+		}
+	}
+	var firstISO, lastISO any
+	if yearCount > 0 {
+		firstISO = firstUpload.UTC().Format(time.RFC3339)
+		lastISO = lastUpload.UTC().Format(time.RFC3339)
+	}
+	yFavorite := 0
+	if len(favoriteIDs) > 0 && len(yearIDs) > 0 {
+		favSet := make(map[string]struct{}, len(favoriteIDs))
+		for _, id := range favoriteIDs {
+			favSet[id] = struct{}{}
+		}
+		for id := range yearIDs {
+			if _, ok := favSet[id]; ok {
+				yFavorite++
+			}
+		}
+	}
+	yearly := map[string]any{
+		"year": year,
+		"summary": map[string]any{
+			"total_count": yearCount,
+			"total_bytes": yearBytes,
+		},
+		"by_month":     byMonth,
+		"by_type":      map[string]any{"image": yearImg, "video": yearVid, "live": yearLive},
+		"first_upload": firstISO,
+		"last_upload":  lastISO,
+		"top_day":      map[string]any{"date": topDay, "count": topCount},
+		"favorites":    yFavorite,
+	}
+
+	// ---- top_tags: TagStats 前 5（best-effort，失败置空数组）----
+	topTags := []map[string]any{}
+	if stats, terr := s.store.TagStats(r.Context(), uid); terr == nil {
+		limit := 5
+		if len(stats) < limit {
+			limit = len(stats)
+		}
+		for i := 0; i < limit; i++ {
+			topTags = append(topTags, stats[i])
+		}
+	} else {
+		slog.Warn("summary-report: tag stats failed", "error", terr)
+	}
+
+	// ---- storage_health（同 storage-health 口径；孤立文件需磁盘扫描默认跳过计 0）----
+	duplicateCount := 0
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateCount += c - 1
+		}
+	}
+	duplicateRate := 0.0
+	quotaUsage := 0.0
+	ageScore := 1.0
+	if totalMedia > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+		ageScore = 1.0 - float64(coldCount)/float64(totalMedia)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(totalBytes) / float64(defaultQuotaBytes)
+	}
+	dupPenalty := min01(duplicateRate) * 30
+	quotaPenalty := min01(quotaUsage) * 30
+	agePenalty := (1.0 - min01(ageScore)) * 20
+	healthScore := 100.0 - (dupPenalty + quotaPenalty + agePenalty) // orphanRate=0 → orphanPenalty=0
+	if healthScore < 0 {
+		healthScore = 0
+	}
+	if healthScore > 100 {
+		healthScore = 100
+	}
+	healthGrade := "D"
+	switch {
+	case healthScore >= 85:
+		healthGrade = "A"
+	case healthScore >= 70:
+		healthGrade = "B"
+	case healthScore >= 50:
+		healthGrade = "C"
+	}
+	health := map[string]any{
+		"score":           int(healthScore),
+		"grade":           healthGrade,
+		"duplicate_rate":  round2(duplicateRate),
+		"quota_usage":     round2(quotaUsage),
+		"age_score":       round2(ageScore),
+		"total_count":     totalMedia,
+		"duplicate_count": duplicateCount,
+		"cold_count":      coldCount,
+		"used_bytes":      totalBytes,
+		"quota_bytes":     defaultQuotaBytes,
+	}
+
+	// ---- activity_score（同 user-activity-score 口径）----
+	activityScore := 0
+	activityLevel := "新手"
+	activityBreakdown := []map[string]any{}
+	totalActions := 0
+	if stats, aerr := s.store.AuditLogStats(r.Context(), uid); aerr == nil {
+		actionCount := make(map[string]int)
+		for _, st := range stats {
+			action, _ := st["action"].(string)
+			cnt, _ := st["count"].(int)
+			if action == "" {
+				continue
+			}
+			actionCount[action] += cnt
+		}
+		shareAct := actionCount["share"] + actionCount["share_toggle"]
+		weights := map[string]int{"upload": 3, "favorite": 2, "share": 4, "tag": 1, "rename": 1, "rotate": 1}
+		counts := map[string]int{
+			"upload":   totalMedia, // upload 未埋点，以存量代表上传活跃度（同 user-activity-score）
+			"favorite": favoriteCount,
+			"share":    shareAct,
+			"tag":      actionCount["tag"],
+			"rename":   actionCount["rename"],
+			"rotate":   actionCount["rotate"],
+		}
+		order := []string{"upload", "favorite", "share", "tag", "rename", "rotate"}
+		activityBreakdown = make([]map[string]any, 0, len(order))
+		for _, act := range order {
+			c := counts[act]
+			w := weights[act]
+			points := c * w
+			activityScore += points
+			totalActions += c
+			activityBreakdown = append(activityBreakdown, map[string]any{
+				"action": act,
+				"count":  c,
+				"weight": w,
+				"points": points,
+			})
+		}
+		switch {
+		case activityScore >= 101:
+			activityLevel = "专家"
+		case activityScore >= 51:
+			activityLevel = "达人"
+		case activityScore >= 11:
+			activityLevel = "活跃"
+		}
+	} else {
+		slog.Warn("summary-report: audit log stats failed", "error", aerr)
+	}
+	activity := map[string]any{
+		"score":         activityScore,
+		"level":         activityLevel,
+		"breakdown":     activityBreakdown,
+		"total_actions": totalActions,
+	}
+
+	// ---- diversity_score（同 media-content-diversity 口径：type/mime/hour/tag 归一化熵均值）----
+	normEntropy := func(counts map[string]int) float64 {
+		if len(counts) <= 1 {
+			return 0
+		}
+		n := 0
+		for _, c := range counts {
+			n += c
+		}
+		if n == 0 {
+			return 0
+		}
+		var h float64
+		for _, c := range counts {
+			if c <= 0 {
+				continue
+			}
+			p := float64(c) / float64(n)
+			h -= p * math.Log(p)
+		}
+		return h / math.Log(float64(len(counts)))
+	}
+	// tag 分布用 TagStats（best-effort：失败置空，diversity 仍可由 type/mime/hour 计算）。
+	tagCounts := make(map[string]int)
+	if totalMedia > 0 {
+		if stats, serr := s.store.TagStats(r.Context(), uid); serr == nil {
+			for _, st := range stats {
+				name, _ := st["tag"].(string)
+				cnt, _ := st["count"].(int)
+				tagCounts[name] = cnt
+			}
+		}
+	}
+	typeEnt := normEntropy(typeCounts)
+	mimeEnt := normEntropy(mimeCounts)
+	hourEnt := normEntropy(hourCounts)
+	tagEnt := normEntropy(tagCounts)
+	diversityScore := round2((typeEnt + mimeEnt + hourEnt + tagEnt) / 4)
+	diversityGrade := "D"
+	switch {
+	case diversityScore >= 0.8:
+		diversityGrade = "A"
+	case diversityScore >= 0.6:
+		diversityGrade = "B"
+	case diversityScore >= 0.4:
+		diversityGrade = "C"
+	}
+	if totalMedia == 0 {
+		diversityGrade = "D"
+	}
+	diversity := map[string]any{
+		"diversity_score": diversityScore,
+		"grade":           diversityGrade,
+		"total":           totalMedia,
+		"breakdown": map[string]any{
+			"type": map[string]any{"entropy": round2(typeEnt), "categories": len(typeCounts)},
+			"mime": map[string]any{"entropy": round2(mimeEnt), "categories": len(mimeCounts)},
+			"hour": map[string]any{"entropy": round2(hourEnt), "categories": len(hourCounts)},
+			"tag":  map[string]any{"entropy": round2(tagEnt), "categories": len(tagCounts)},
+		},
+	}
+
+	// ---- monthly_highlights: 指定年份 top 3 月（count 倒序、并列取月份升序）----
+	type monthAgg struct {
+		Month   int
+		Count   int64
+		First   *hlRef
+		Largest *hlRef
+		Last    *hlRef
+	}
+	monthAggs := make([]monthAgg, 0, 12)
+	for i := 0; i < 12; i++ {
+		if monthCounts[i] == 0 {
+			continue // 无媒体的月不进亮点榜
+		}
+		monthAggs = append(monthAggs, monthAgg{Month: i + 1, Count: monthCounts[i], First: monthHLFirst[i], Largest: monthHLLargest[i], Last: monthHLLast[i]})
+	}
+	sort.SliceStable(monthAggs, func(i, j int) bool {
+		if monthAggs[i].Count != monthAggs[j].Count {
+			return monthAggs[i].Count > monthAggs[j].Count
+		}
+		return monthAggs[i].Month < monthAggs[j].Month
+	})
+	hlLimit := 3
+	if len(monthAggs) < hlLimit {
+		hlLimit = len(monthAggs)
+	}
+	highlights := make([]map[string]any, 0, hlLimit)
+	for i := 0; i < hlLimit; i++ {
+		a := monthAggs[i]
+		var first, largest, last any
+		if a.First != nil {
+			first = map[string]any{"id": a.First.ID, "filename": a.First.Filename}
+		}
+		if a.Largest != nil {
+			largest = map[string]any{"id": a.Largest.ID, "filename": a.Largest.Filename, "size": a.Largest.Size}
+		}
+		if a.Last != nil {
+			last = map[string]any{"id": a.Last.ID, "filename": a.Last.Filename}
+		}
+		highlights = append(highlights, map[string]any{
+			"month":   a.Month,
+			"count":   a.Count,
+			"first":   first,
+			"largest": largest,
+			"last":    last,
+		})
+	}
+
+	// ---- upload_ranking: 指定年份按日 top 3（count 倒序、并列取日期升序，同 upload-ranking 口径）----
+	allDays := make([]rankDay, 0, len(rankByDay))
+	for _, d := range rankByDay {
+		allDays = append(allDays, *d)
+	}
+	sort.SliceStable(allDays, func(i, j int) bool {
+		if allDays[i].Count != allDays[j].Count {
+			return allDays[i].Count > allDays[j].Count
+		}
+		return allDays[i].Date < allDays[j].Date
+	})
+	rankLimit := 3
+	if len(allDays) < rankLimit {
+		rankLimit = len(allDays)
+	}
+	ranking := make([]map[string]any, 0, rankLimit)
+	for i := 0; i < rankLimit; i++ {
+		ranking = append(ranking, map[string]any{
+			"rank":  i + 1,
+			"date":  allDays[i].Date,
+			"count": allDays[i].Count,
+			"bytes": allDays[i].Bytes,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"year":       year,
+		"stats":      quickStats,
+		"yearly":     yearly,
+		"tags":       topTags,
+		"health":     health,
+		"activity":   activity,
+		"diversity":  diversity,
+		"highlights": highlights,
+		"ranking":    ranking,
+		"user_id":    uid,
 	})
 }
 
