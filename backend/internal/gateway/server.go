@@ -694,6 +694,10 @@ func (s *Server) registerRoutes() {
 	// 含审计评分 0-100 与 A/B/C/D 等级 + 详细清单 + 建议）。一次 ListMediaByUser 拉全量 +
 	// 单次磁盘扫描同时完成四类检查，避免四个端点各自重扫磁盘的 IO 放大。
 	s.mux.HandleFunc("/api/media/media-storage-audit", s.handleMediaStorageAudit)
+	// 重命名历史：从 audit_log 中过滤 action="rename" 的记录，解析 detail 提取旧名→新名映射，
+	// 返回 [{media_id, old_name, new_name, renamed_at}]。单条重命名 detail 格式为 "oldName => newName"，
+	// 批量重命名（media_id 为空、detail 为汇总）按整条计入但 old/new_name 置空。
+	s.mux.HandleFunc("/api/media/media-rename-history", s.handleMediaRenameHistory)
 	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
 	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
@@ -5474,13 +5478,15 @@ func (s *Server) handleMediaRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更新 filename
+	// 更新 filename（先记下旧名用于审计历史）
+	oldName := media.Filename
 	media.Filename = req.Filename
 	if err := s.store.UpdateMedia(r.Context(), media); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	_ = s.store.AddAuditLog(r.Context(), uid, "rename", req.MediaID, req.Filename)
+	// 记录 "oldName => newName" 便于重命名历史端点解析旧名→新名映射（best-effort）。
+	_ = s.store.AddAuditLog(r.Context(), uid, "rename", req.MediaID, fmt.Sprintf("%s => %s", oldName, req.Filename))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"media_id": req.MediaID,
@@ -5727,6 +5733,102 @@ func (s *Server) handleMediaBatchRename(w http.ResponseWriter, r *http.Request) 
 		"renamed":       succeeded,
 		"failed":        failed,
 		"errors":        failed,
+	})
+}
+
+// handleMediaRenameHistory：GET /api/media/media-rename-history
+// 返回当前用户的所有重命名操作记录，含旧名→新名映射。
+//
+// 数据来源：s.store.ListAuditLogs 取最近 N 条（默认 500，上限 2000）audit log，
+// 在内存中过滤 action="rename" 的记录（与 search-history 等端点口径一致——
+// ListAuditLogs 无法按 action 过滤，需拉取后内存筛选）。
+//
+// detail 解析规则（与写入端 handleMediaRename 的格式 "oldName => newName" 对齐）：
+//   - 含 " => " 分隔：old_name / new_name 取分隔两侧。
+//   - 不含分隔（旧版单条记录仅存新名）：old_name 置空，new_name = detail。
+//   - 批量重命名记录（media_id 为空、detail 形如 "batch rename N media"）：
+//     整条计入但 old_name/new_name 均置空（无可映射的单文件名）。
+//
+// 查询参数 ?limit=50（上限 200，<=0 回退默认 50）控制返回的重命名记录条数。
+// 注意：ListAuditLogs 的 limit 是"全量 audit log 条数上限"，重命名记录数可能少于该值；
+// 为保证能取够 limit 条重命名记录，内部按 ceil(limit*5) 拉取 audit log 再过滤，上限 2000。
+//
+// 响应: {"history":[{media_id, old_name, new_name, renamed_at}], "total"}
+// 未登录 401；store 不可用 503。
+func (s *Server) handleMediaRenameHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	limit := 50
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	// 重命名记录在全部 audit log 中占比未知，为尽量取够 limit 条重命名记录，
+	// 内部拉取放大 5 倍（上限 2000），再在内存过滤 action="rename"。
+	fetchLimit := limit * 5
+	if fetchLimit > 2000 {
+		fetchLimit = 2000
+	}
+	if fetchLimit < 50 {
+		fetchLimit = 50
+	}
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, fetchLimit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type renameEntry struct {
+		MediaID   string `json:"media_id"`
+		OldName   string `json:"old_name"`
+		NewName   string `json:"new_name"`
+		RenamedAt string `json:"renamed_at"`
+	}
+
+	out := make([]renameEntry, 0, limit)
+	for _, a := range logs {
+		if a.Action != "rename" {
+			continue
+		}
+		if len(out) >= limit {
+			break
+		}
+		entry := renameEntry{
+			MediaID:   a.MediaID,
+			RenamedAt: a.CreatedAt.Format(time.RFC3339),
+		}
+		// 解析 detail 提取旧名→新名。
+		if idx := strings.Index(a.Detail, " => "); idx >= 0 {
+			entry.OldName = a.Detail[:idx]
+			entry.NewName = a.Detail[idx+len(" => "):]
+		} else if a.MediaID != "" && a.Detail != "" {
+			// 旧版单条记录（仅存新名，无分隔符）：old_name 置空，new_name = detail。
+			entry.NewName = a.Detail
+		}
+		// 批量重命名记录（media_id 为空）：old/new_name 均保持空，仅记时间与汇总在 detail（不返回）。
+		out = append(out, entry)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"history": out,
+		"total":   len(out),
 	})
 }
 
