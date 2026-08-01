@@ -9109,13 +9109,14 @@ object MediaService {
      *
      * 后端返回
      * `{total_favorites, total_media, favorite_rate, by_type, by_hour, avg_age_days}`，
-     * 其中 `by_type` 为媒体类型→数量的 JSON 对象（如 `{"image":N,"video":N}`），
-     * `favorite_rate` 为 0~1 浮点，`avg_age_days` 为平均间隔天数。`by_hour` 字段本卡片不使用。
+     * 其中 `by_type` 为媒体类型→数量的 JSON 对象（键名**大写** `IMAGE`/`VIDEO`/`LIVE`/`OTHER`，
+     * 后端用 `strings.ToUpper(m.Type)` 分桶），`favorite_rate` 为 **0~100 百分比**（`round2`，
+     * 非 0~1），`avg_age_days` 为平均间隔天数（**`ageCount==0` 时为 JSON `null`**，需
+     * `takeIf { it !is JsonNull }` 守卫）。`by_hour` 字段本卡片不使用。
      *
      * 解析沿用运行时 JSON 操作（与 [getMediaAlbumCoverage] 同款）。**不附加 per-call
      * 鉴权头**——Bearer token 由 [jsonClient] 的 `defaultRequest` 统一注入。各字段宽容回退
-     *（`?: 0` / `?: 0.0`）；`by_type` 若缺失返回空 Map。后端端点即将上线，解析层已逐字段
-     * 宽容，待后端就绪即可联调。
+     *（`?: 0` / `?: 0.0`）；`by_type` 若缺失返回空 Map。
      *
      * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
      *
