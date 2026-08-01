@@ -49,6 +49,15 @@ import androidx.compose.ui.unit.sp
 import com.wgt.platform.logger.logger
 import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.FlowRow
@@ -1862,6 +1871,16 @@ fun SettingsScreen(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // V26：归档建议V2卡片 —— 调 /api/media/media-archive-recommend-v2 显示多维度评分
+            // 的归档推荐（评分 + 命中原因 + 潜在节省空间）。独立 @Composable，自取数据并解析
+            // 后端返回的 JSON 字符串（MediaService.getMediaArchiveRecommendV2 返回原始字符串）。
+            // 放在 V22 归档建议之后、V25 照片组织建议之前。最多展示 top 5 评分条目。
+            ArchiveRecommendV2Card()
+
             Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
@@ -4898,5 +4917,154 @@ private fun ShareHistoryCard() {
     Spacer(modifier = Modifier.height(8.dp))
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Spacer(modifier = Modifier.height(8.dp))
+}
+
+/**
+ * V26：归档建议V2卡片 —— 调 GET /api/media/media-archive-recommend-v2 展示多维度评分归档推荐。
+ *
+ * 后端按 5 维度（年龄>180天 / 无标签 / 不在相册 / 大小>10MB / 非收藏）累加 archive_score，
+ * 分数越高越建议归档。本卡片取 top 5，每条显示 filename (score 分) + 命中原因列表，
+ * 底部汇总潜在可释放空间（MB）。
+ *
+ * 数据获取走 [MediaService.getMediaArchiveRecommendV2]（返回原始 JSON 字符串），此处用
+ * kotlinx.serialization 运行时 JSON API 解析——与 feature-media 层无 serialization 编译器
+ * 插件口径一致。失败/空列表静默降级为提示文本，不阻塞设置页其余卡片。
+ *
+ * 独立 @Composable，自管 loading / error / 空态，与 [StoragePredictionCard] 同模式。
+ */
+@Composable
+private fun ArchiveRecommendV2Card() {
+    // rawJson: null=加载中或失败；非 null=已获取后端原始 JSON 字符串
+    // （getMediaArchiveRecommendV2 失败返回 null，成功返回字符串）
+    var rawJson by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val result = MediaService.getMediaArchiveRecommendV2(limit = 20)
+        if (result == null) {
+            failed = true
+        } else {
+            rawJson = result
+        }
+        loading = false
+    }
+
+    SectionTitle("🏷️ 归档建议V2", iconRes = Res.drawable.ic_info)
+
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+    if (failed) {
+        Text(
+            "无法获取归档建议V2",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    // 解析后端原始 JSON：{recommendations:[{media_id,filename,score,size,age_days,type,reasons:[...]}],
+    // total, potential_savings_bytes, potential_savings_mb, scored_count, ...}
+    val parsed: JsonObject = try {
+        Json.parseToJsonElement(rawJson!!).jsonObject
+    } catch (e: Exception) {
+        logger.error(TAG, "ArchiveRecommendV2Card parse FAILED: ${e::class.simpleName} ${e.message}")
+        Text(
+            "归档建议V2数据解析失败",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    val recs: JsonArray = parsed["recommendations"]?.jsonArray ?: JsonArray(emptyList())
+    val totalCnt = parsed["total"]?.jsonPrimitive?.intOrNull ?: recs.size
+    val savingsBytes = parsed["potential_savings_bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+    val savingsMb = parsed["potential_savings_mb"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+        ?: (savingsBytes / (1024.0 * 1024.0))
+    val scoredCount = parsed["scored_count"]?.jsonPrimitive?.intOrNull ?: totalCnt
+
+    if (recs.isEmpty()) {
+        Text(
+            "暂无归档建议（未发现冷数据/低价值媒体）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        // 汇总行：共 N 项进入评分，展示 top 5，可释放 X MB
+        Text(
+            "🏷️ 共 $scoredCount 项进入评分（展示 top ${minOf(5, recs.size)}，可释放 ${formatDouble2(savingsMb)} MB）",
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // top 5 推荐条目：filename (score 分) + 原因列表
+        recs.take(5).forEach { el ->
+            val item = el.jsonObject
+            val filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: ""
+            val mediaId = item["media_id"]?.jsonPrimitive?.contentOrNull ?: ""
+            val score = item["score"]?.jsonPrimitive?.intOrNull ?: 0
+            val reasons: List<String> = item["reasons"]?.jsonArray?.mapNotNull { r ->
+                r.jsonPrimitive.contentOrNull
+            } ?: emptyList()
+
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "• ${filename.ifEmpty { mediaId }}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "$score 分",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                // 原因列表（后端已给出人类可读文本，逐条展示）
+                if (reasons.isNotEmpty()) {
+                    reasons.forEach { reason ->
+                        Text(
+                            "  · $reason",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(start = 12.dp, top = 1.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 潜在节省汇总（底部强调）
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "💾 潜在节省空间：${formatDouble2(savingsMb)} MB",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+    }
 }
 

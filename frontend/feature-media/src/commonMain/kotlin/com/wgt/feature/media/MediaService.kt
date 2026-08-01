@@ -5299,6 +5299,43 @@ object MediaService {
     )
 
     /**
+     * V26：GET /api/media/media-archive-recommend-v2 — 归档建议V2（多维度评分）。
+     *
+     * 后端对全量未软删 media 按 5 个维度累加 archive_score（分数越高越建议归档）：
+     * 年龄>180天(+30) / 无标签(+20) / 不在相册(+20) / 大小>10MB(+15) / 非收藏(+15)。
+     * 按 score 倒序、并列按 size 倒序返回。
+     *
+     * 响应：`{recommendations:[{media_id,filename,score,size,age_days,type,reasons:[...]}],
+     * total, potential_savings_bytes, potential_savings_mb, scored_count, limit,
+     * dimensions:{...}, user_id}`。
+     *
+     * 本方法返回**原始 JSON 字符串**（简化：不在此层解析为 data class，由调用方
+     * [com.wgt.media.SettingsScreen] 的 [ArchiveRecommendV2Card] 自行运行时解析展示），
+     * 与其他返回强类型 data class 的端点风格略异，但符合任务要求的简化口径。
+     * HTTP 非 200 / 网络异常返回 null，调用方静默跳过卡片渲染（非阻塞设置项）。
+     *
+     * @param limit 返回上限（默认 20，后端钳制 [1,200]）
+     * @return 后端原始 JSON 字符串；失败返回 null
+     */
+    suspend fun getMediaArchiveRecommendV2(limit: Int = 20): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-archive-recommend-v2") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                response.body<String>()
+            } else {
+                logger.info("MediaService", "getMediaArchiveRecommendV2 status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaArchiveRecommendV2 FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V25：照片组织建议单条（GET /api/media/photo-organize-suggest 返回）。
      *
      * 后端从 月份(by_month)/类型(by_type)/未标签(untagged) 三个维度对全量媒体做
