@@ -6223,6 +6223,88 @@ object MediaService {
     }
 
     /**
+     * V25：标签网络节点（[tag] = 标签名，[mediaCount] = 关联媒体数）。
+     *
+     * 与 V9 [TagNode] 的区别：后者节点 id/count 来自 `/api/media/tag-network`（纯交集
+     * 整数语义）；本类字段名为 [tag]/[mediaCount]，对齐新端点
+     * `/api/media/media-tag-network` 的 JSON（`{tag, media_count}`）。
+     */
+    data class MediaTagNode(val tag: String, val mediaCount: Int)
+
+    /**
+     * V25：标签网络边。[weight] 为 Jaccard 相似度（0~1，归一化），后端 float64 序列化；
+     * 非 V9 [TagEdge]（整数共现次数）。
+     */
+    data class MediaTagEdge(val source: String, val target: String, val weight: Double)
+
+    /**
+     * V25：标签网络图数据（GET /api/media/media-tag-network）。节点按 media_count DESC 截
+     * top [limit] 标签，边为节点对 Jaccard 相似度（weight>0 才入）。
+     */
+    data class MediaTagNetwork(
+        val nodes: List<MediaTagNode>,
+        val edges: List<MediaTagEdge>,
+        val totalNodes: Int,
+        val totalEdges: Int
+    )
+
+    /**
+     * GET /api/media/media-tag-network?limit=N — 标签网络图（节点+边）。
+     *
+     * 后端取该用户全部标签按 media_count DESC 截 top [limit]（默认 20，上限 200）作为
+     * 节点；对节点对 (i<j) 计算 Jaccard 相似度 = |A∩B| / |A∪B| 作为边权重（0~1，归一化），
+     * 仅保留 weight>0 的边。响应:
+     * `{nodes: [{tag, media_count}], edges: [{source, target, weight}], total_nodes, total_edges}`。
+     *
+     * 与旧端点 [getTagNetwork]（`/api/media/tag-network`）的区别：后者用集合大小作 count、
+     * 纯交集大小作 weight（整数共现数）、无 limit；本端点 weight 为 Jaccard 系数（Double，
+     * 0~1），支持 [limit] 截断使网络规模可控、边权重可跨标签对横向比较。
+     *
+     * 解析沿用 [getMediaTagCorrelation] 的运行时 JSON 操作（无 serialization 编译器插件依赖）。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param limit 取前 N 个标签构建网络图（透传 query param）；默认 20，前端取 top 5 渲染。
+     * @return 标签网络（节点+边+汇总数）；HTTP 非 200 或网络异常返回 null（调用方 null-skip）。
+     */
+    suspend fun getMediaTagNetwork(limit: Int = 20): MediaTagNetwork? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-tag-network") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val nodes = o["nodes"]?.jsonArray?.mapNotNull { item ->
+                    val n = item.jsonObject
+                    MediaTagNode(
+                        tag = n["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        mediaCount = n["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                val edges = o["edges"]?.jsonArray?.mapNotNull { item ->
+                    val e = item.jsonObject
+                    MediaTagEdge(
+                        source = e["source"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        target = e["target"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        weight = e["weight"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                MediaTagNetwork(
+                    nodes = nodes,
+                    edges = edges,
+                    totalNodes = o["total_nodes"]?.jsonPrimitive?.intOrNull ?: nodes.size,
+                    totalEdges = o["total_edges"]?.jsonPrimitive?.intOrNull ?: edges.size
+                )
+            } else {
+                logger.info("MediaService", "getMediaTagNetwork status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagNetwork FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 标签层级子节点（[tag] = 子标签名，[count] = 该子标签自身关联媒体数）。
      * 后端 count 仅含子标签自身，不含父标签，避免重复统计口径混乱。
      */

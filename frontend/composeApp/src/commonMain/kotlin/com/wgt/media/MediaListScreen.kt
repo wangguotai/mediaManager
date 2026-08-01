@@ -5727,6 +5727,11 @@ private fun MyTabContent(
                             // null（请求失败）或空则静默跳过，不影响既有区域。
                             var tagSmartGroup by remember { mutableStateOf<List<MediaService.TagSmartGroup>?>(null) }
                             LaunchedEffect(Unit) { tagSmartGroup = MediaService.getMediaTagSmartGroup() }
+                            // V25：标签网络（调 GET /api/media/media-tag-network?limit=20），用于"标签网络"区。
+                            // 后端截 top20 标签为节点、Jaccard 相似度为边权重（Double 0~1）；
+                            // null（请求失败）或空则静默跳过，不影响既有区域。
+                            var tagNetwork by remember { mutableStateOf<MediaService.MediaTagNetwork?>(null) }
+                            LaunchedEffect(Unit) { tagNetwork = MediaService.getMediaTagNetwork(limit = 20) }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -6048,6 +6053,81 @@ private fun MyTabContent(
                                                                 fontSize = 12.sp,
                                                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                                             )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // V25：标签网络区——调 getMediaTagNetwork(limit=20)，文字版渲染
+                                            // 节点 top5 与边 top5。节点每行 "#tag (N 媒体)"，按 mediaCount 倒序；
+                                            // 边每行 "source ↔ target (weight)"，按 weight 倒序。最多各 5 行。
+                                            // null（请求失败）或空（无节点/无边）则静默跳过，不影响既有区域。
+                                            tagNetwork?.let { net ->
+                                                val topNodes = net.nodes.sortedByDescending { it.mediaCount }.take(5)
+                                                val topEdges = net.edges.sortedByDescending { it.weight }.take(5)
+                                                if (topNodes.isNotEmpty() || topEdges.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text(
+                                                        "标签网络",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        "共 ${net.totalNodes} 节点 · ${net.totalEdges} 边",
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                    )
+                                                    if (topNodes.isNotEmpty()) {
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        topNodes.forEach { n ->
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(vertical = 2.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text(
+                                                                    "#${n.tag} (${n.mediaCount} 媒体)",
+                                                                    fontSize = 13.sp,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                    modifier = Modifier.weight(1f),
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    if (topEdges.isNotEmpty()) {
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        topEdges.forEach { e ->
+                                                            // weight 取两位小数（commonMain 无 String.format，沿用 take 截断约定）。
+                                                            val rawW = e.weight.toString()
+                                                            val wStr = if (rawW.indexOf('.') >= 0) {
+                                                                rawW.take(rawW.indexOf('.') + 3)
+                                                            } else rawW
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(vertical = 2.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text(
+                                                                    "#${e.source} ↔ #${e.target}",
+                                                                    fontSize = 13.sp,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                    modifier = Modifier.weight(1f),
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                                Text(
+                                                                    "$wStr",
+                                                                    fontSize = 12.sp,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 }
