@@ -1791,6 +1791,116 @@ object MediaService {
     }
 
     /**
+     * 相册关系分析条目中单个相册的概要信息——GET /api/media/album-relationship-analysis
+     * 返回的配对里 album_a / album_b 各自携带的相册概要。
+     *
+     * 与后端 [handleAlbumRelationshipAnalysis] 的 albumBrief 字段对齐：
+     * id / name / media_count。
+     *
+     * 注：不复用 [AlbumSummaryItem]（其字段为 albumId/count/coverMediaId，与本端点的
+     * id/name/media_count 结构不同），也不复用 [CoverQualityItem]（语义不符），
+     * 故为本端点新建专用概要类型 [AlbumPairBrief]。
+     */
+    data class AlbumPairBrief(
+        val id: String = "",
+        val name: String = "",
+        val mediaCount: Int = 0
+    )
+
+    /**
+     * 相册关系分析条目——GET /api/media/album-relationship-analysis 返回的单个相册配对。
+     *
+     * 与后端 [handleAlbumRelationshipAnalysis] 的 relationshipPair 字段对齐：
+     * album_a / album_b（各为 [AlbumPairBrief]）/ shared_count / similarity /
+     * recommend_merge。后端还返回 union_count，前端目前不展示并集数，故不建模
+     * （运行时解析时忽略该字段——[Json] 已配 `ignoreUnknownKeys`，宽容）。
+     *
+     * @param albumA 相册 A 概要
+     * @param albumB 相册 B 概要
+     * @param sharedCount 两相册共享的媒体数（去重后）
+     * @param similarity Jaccard 相似度 0~1（shared / union；union 为 0 时为 0）
+     * @param recommendMerge 后端建议合并（shared_count≥2 且 similarity≥0.3）
+     */
+    data class AlbumPair(
+        val albumA: AlbumPairBrief = AlbumPairBrief(),
+        val albumB: AlbumPairBrief = AlbumPairBrief(),
+        val sharedCount: Int = 0,
+        val similarity: Double = 0.0,
+        val recommendMerge: Boolean = false
+    )
+
+    /**
+     * 相册关系分析汇总——GET /api/media/album-relationship-analysis 返回的聚合数据。
+     *
+     * 后端遍历当前用户所有相册两两配对（C(n,2)），按 Jaccard 相似度排序，
+     * 标记建议合并的相册对，返回：
+     * `{pairs:[{album_a,album_b,shared_count,union_count,similarity,recommend_merge}],
+     *   total_pairs, high_similarity_count}`。
+     *
+     * - [pairs]：所有配对，按 shared_count 降序、再按 similarity 降序（高重叠对在前）。
+     *   前端通常只展示 [highSimilarityCount] 个建议合并对。
+     * - [totalPairs]：参与分析的相册对总数。
+     * - [highSimilarityCount]：recommend_merge 为 true 的相册对数（即"高相似度"对数）。
+     *
+     * 相册数 < 2 时后端返回空 pairs 与 0 计数；网络/HTTP 失败时本方法返回 null
+     * （与 [getAlbumSharingSummary] 同语义——区分"成功但空"与"网络失败"）。
+     */
+    data class AlbumRelationship(
+        val pairs: List<AlbumPair> = emptyList(),
+        val totalPairs: Int = 0,
+        val highSimilarityCount: Int = 0
+    )
+
+    /**
+     * GET /api/media/album-relationship-analysis — 获取相册关系分析（相似相册配对）。
+     *
+     * 后端遍历当前用户所有相册两两配对，计算共享媒体数与 Jaccard 相似度，
+     * 标记建议合并的相册对（shared_count≥2 且 similarity≥0.3）。返回：
+     * `{pairs:[{album_a:{id,name,media_count},album_b:{...},shared_count,
+     *   union_count,similarity,recommend_merge}], total_pairs, high_similarity_count}`。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getAlbumSharingSummary]/[getAlbumCoverQuality] 同款）。HTTP 非 200 或网络异常返回
+     * null，调用方按 null 态静默跳过渲染（与 [getAlbumSharingSummary] 同语义）。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @return 相册关系分析汇总，或 null（失败）
+     */
+    suspend fun getAlbumRelationshipAnalysis(): AlbumRelationship? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-relationship-analysis")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                fun parseBrief(o: JsonObject): AlbumPairBrief = AlbumPairBrief(
+                    id = o["id"]?.jsonPrimitive?.contentOrNull ?: "",
+                    name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                    mediaCount = o["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+                val pairs = obj["pairs"]?.jsonArray?.map { el ->
+                    val p = el.jsonObject
+                    AlbumPair(
+                        albumA = p["album_a"]?.jsonObject?.let(::parseBrief) ?: AlbumPairBrief(),
+                        albumB = p["album_b"]?.jsonObject?.let(::parseBrief) ?: AlbumPairBrief(),
+                        sharedCount = p["shared_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        similarity = p["similarity"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        recommendMerge = p["recommend_merge"]?.jsonPrimitive?.booleanOrNull ?: false
+                    )
+                } ?: emptyList()
+                AlbumRelationship(
+                    pairs = pairs,
+                    totalPairs = obj["total_pairs"]?.jsonPrimitive?.intOrNull ?: pairs.size,
+                    highSimilarityCount = obj["high_similarity_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumRelationshipAnalysis FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 相册内媒体分布分析——GET /api/media/album-media-distribution?album_id=xxx。
      *
      * 后端返回 `{by_type, by_month, by_size, total}`：

@@ -1,6 +1,7 @@
 package com.wgt.media
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -373,6 +374,55 @@ private fun AlbumListPage(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.error
                                 )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 相册关系分析统计行——显示高相似度（建议合并）相册对数。
+            // 仅在 highSimilarityCount > 0 时显示（无相似对时隐藏，避免空噪音）。
+            // 点击 banner 展开显示配对详情（相册名 + 共享数 + 相似度百分比）。
+            var albumRelationship by remember { mutableStateOf<MediaService.AlbumRelationship?>(null) }
+            LaunchedEffect(albums) {
+                if (albums.isNotEmpty()) {
+                    albumRelationship = MediaService.getAlbumRelationshipAnalysis()
+                } else {
+                    albumRelationship = null
+                }
+            }
+            albumRelationship?.let { rel ->
+                if (rel.highSimilarityCount > 0) {
+                    var expanded by remember { mutableStateOf(false) }
+                    // 仅展示建议合并的配对（recommend_merge=true），按后端排序已是 shared 降序。
+                    val mergePairs = rel.pairs.filter { it.recommendMerge }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        onClick = { expanded = !expanded },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .animateContentSize(animationSpec = tween(200))
+                        ) {
+                            Text(
+                                "🔗 发现 ${rel.highSimilarityCount} 对相似相册，建议合并" +
+                                    if (expanded) "  ▲" else "  ▼",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (expanded) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                mergePairs.forEach { pair ->
+                                    val simPct = (pair.similarity * 100).toInt()
+                                    Text(
+                                        "• ${pair.albumA.name} ⇄ ${pair.albumB.name}（共享 ${pair.sharedCount}，相似度 $simPct%）",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
