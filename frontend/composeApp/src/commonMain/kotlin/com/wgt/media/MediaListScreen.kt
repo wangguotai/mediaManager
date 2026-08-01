@@ -2378,6 +2378,102 @@ private fun MyTabContent(
             }
         }
 
+        // 拍摄地点估算卡片（调 media-gps-estimate，按文件名模式+拍摄时间推断室内/户外/办公/未知分布）。
+        // 后端对未软删媒体启发式推断（Media 无 GPS 字段，故为估算非精确坐标）：
+        //   截屏/微信相机 → indoor；IMG_ 周末 → outdoor；IMG_ 工作日 9-18h → office；
+        //   IMG_ 工作日非核心时段 → indoor；其他文件名 → unknown。
+        // 时间口径：优先 taken_at，缺失回退 created_at，统一 UTC。
+        // 返回 locations{indoor,outdoor,office,unknown}/total/dominant（total=0 时 dominant 为 null）。
+        // 请求失败或 total=0 静默跳过，与色温分布等卡片同语义。
+        var gpsEstimate by remember { mutableStateOf<MediaService.GpsEstimate?>(null) }
+        LaunchedEffect(Unit) { gpsEstimate = MediaService.getMediaGpsEstimate() }
+        gpsEstimate?.let { g ->
+            if (g.total > 0) {
+                // 四档固定顺序 indoor→outdoor→office→unknown；emoji 与标签随任务要求逐字映射。
+                val rows = listOf(
+                    "indoor" to "🏠 室内",
+                    "outdoor" to "🌳 户外",
+                    "office" to "💼 办公",
+                    "unknown" to "❓ 未知"
+                )
+                // 比例条按各档计数相对最大档归一化（coerceAtLeast(1) 避免除零）。
+                val maxCount = g.locations.values.max().coerceAtLeast(1)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("拍摄地点", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        rows.forEach { (key, label) ->
+                            val count = g.locations[key] ?: 0
+                            // 主调（dominant）高亮 primary + bold，其余 onSurfaceVariant。
+                            val isDominant = g.dominant != null && key == g.dominant
+                            val rowColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            val barColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            val ratio = (count.toFloat() / maxCount).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(label, fontSize = 12.sp,
+                                    fontWeight = if (isDominant) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor)
+                                Text("$count 个 · ${formatPercent(count.toDouble() / g.total * 100.0)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                            // 比例条：主调档着色更深（与色温分布/大小百分位卡片同款 Box 比例条）。
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(ratio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(barColor)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：主调高亮 + 总数。
+                        val dominantLabel = g.dominant?.let { d ->
+                            rows.firstOrNull { it.first == d }?.second ?: d
+                        }
+                        if (dominantLabel != null) {
+                            Text(
+                                "🏆 主调 $dominantLabel · 共 ${g.total} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        } else {
+                            Text(
+                                "共 ${g.total} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                        Text(
+                            "按文件名模式 + 拍摄时间（taken_at / created_at UTC）启发式估算",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /

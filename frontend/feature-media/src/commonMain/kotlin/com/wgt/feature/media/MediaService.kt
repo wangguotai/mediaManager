@@ -4423,6 +4423,67 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-gps-estimate — 拍摄地点估算。
+     *
+     * 后端对当前用户全部未软删媒体按文件名模式 + 拍摄时间做启发式地点类型推断
+     *（Media model 无 GPS 字段，故为估算而非精确坐标），分四类：
+     *   - indoor   （室内）  → 截屏 / 微信相机 / IMG_ 工作日非核心时段
+     *   - outdoor  （户外）  → IMG_ 周末拍摄
+     *   - office   （办公）  → IMG_ 工作日 9-18h 核心时段
+     *   - unknown  （未知）  → 无法识别的文件名模式
+     *
+     * 时间口径：优先 taken_at（毫秒时间戳），缺失(=0)回退 created_at，统一 UTC。
+     *
+     * 响应结构（与 [handleMediaGpsEstimate] 对齐）：
+     *   `{locations:{indoor, outdoor, office, unknown}, total, dominant}`
+     * - [locations] 四类地点的计数（Int）。
+     * - [total] 参与推断的未软删媒体总数。
+     * - [dominant] count 最大的类别（"indoor"/"outdoor"/"office"/"unknown"）；
+     *   total=0 时后端返回 JSON null，前端 [dominant] 为 null。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaColorTemperature] / [getMediaSizePercentile] 同语义。
+     */
+    suspend fun getMediaGpsEstimate(): GpsEstimate? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-gps-estimate")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // locations 嵌套对象 → 四个计数；缺失或字段非数时回退 0。
+                val loc = obj["locations"]?.jsonObject
+                val indoor = loc?.get("indoor")?.jsonPrimitive?.intOrNull ?: 0
+                val outdoor = loc?.get("outdoor")?.jsonPrimitive?.intOrNull ?: 0
+                val office = loc?.get("office")?.jsonPrimitive?.intOrNull ?: 0
+                val unknown = loc?.get("unknown")?.jsonPrimitive?.intOrNull ?: 0
+                // dominant 为字符串或 JSON null（total=0 时）；takeIf 排除 JsonNull。
+                val dominant = obj["dominant"]?.takeIf { it !is JsonNull }?.let { el ->
+                    el.jsonPrimitive.contentOrNull
+                }
+                GpsEstimate(
+                    locations = mapOf(
+                        "indoor" to indoor,
+                        "outdoor" to outdoor,
+                        "office" to office,
+                        "unknown" to unknown
+                    ),
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    dominant = dominant
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaGpsEstimate FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 拍摄地点估算（室内/户外/办公/未知四类计数 + 总数 + 主导地点）。 */
+    data class GpsEstimate(
+        val locations: Map<String, Int>,
+        val total: Int,
+        val dominant: String?
+    )
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：
