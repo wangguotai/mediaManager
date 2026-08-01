@@ -698,6 +698,8 @@ func (s *Server) registerRoutes() {
 	// 返回 [{media_id, old_name, new_name, renamed_at}]。单条重命名 detail 格式为 "oldName => newName"，
 	// 批量重命名（media_id 为空、detail 为汇总）按整条计入但 old/new_name 置空。
 	s.mux.HandleFunc("/api/media/media-rename-history", s.handleMediaRenameHistory)
+	// V8：分享历史
+	s.mux.HandleFunc("/api/media/media-share-history", s.handleMediaShareHistory)
 	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
 	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
@@ -22545,3 +22547,47 @@ func (s *Server) handleStorageBreakdownV3(w http.ResponseWriter, r *http.Request
 	})
 }
 
+
+// handleMediaShareHistory V8：GET /api/media/media-share-history — 分享历史。
+func (s *Server) handleMediaShareHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 500 {
+			limit = v
+		}
+	}
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	type shareItem struct {
+		MediaID  string `json:"media_id"`
+		Detail   string `json:"detail"`
+		SharedAt string `json:"shared_at"`
+	}
+	out := make([]shareItem, 0)
+	for _, log := range logs {
+		if log.Action != "share" {
+			continue
+		}
+		out = append(out, shareItem{
+			MediaID:  log.MediaID,
+			Detail:   log.Detail,
+			SharedAt: log.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"history": out,
+		"total":   len(out),
+	})
+}
