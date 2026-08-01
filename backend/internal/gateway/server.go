@@ -222,6 +222,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-camera-stats", s.handleMediaCameraStats)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
+	s.mux.HandleFunc("/api/media/media-growth-milestone", s.handleMediaGrowthMilestone)
 	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
 	s.mux.HandleFunc("/api/media/weekly-summary", s.handleWeeklySummary)
 	// V8：媒体生命周期分析
@@ -7778,6 +7779,141 @@ func (s *Server) handleMediaVolumeReport(w http.ResponseWriter, r *http.Request)
 		"avg_daily_uploads":  avgDaily,
 		"projected_year_end": projectedYearEnd,
 	})
+}
+
+// handleMediaGrowthMilestone GET /api/media/media-growth-milestone — 媒体增长里程碑。
+//
+// 追踪媒体库规模达成关键里程碑 (100/500/1000/5000/10000) 的日期，并基于
+// 历史增长速率预测下一个里程碑的达成日期。
+//
+// 算法：
+//   - ListMediaByUser 获取全部未软删媒体（created_at DESC），在 Go 侧按 created_at
+//     正序（最早在前）排列。
+//   - 顺序累计计数：当累计数首次 >= 某个 milestone 时，记录该里程碑的达成日期为
+//     当前 medias[i].CreatedAt；media_count 记录达成时点累计数。
+//   - 仅记录 media_count >= milestone 的已达成里程碑；未达成的里程碑不包含在
+//     achieved 列表中。
+//   - next_milestone：未达成里程碑中数值最小的一个（大于当前 total）；
+//     若全部已达成则返回 null。
+//   - projected_date：基于全程日均增长速率外推剩余缺口所需天数：
+//     projected = lastAchievedAt + (nextMilestone - total) / avgDaily。
+//     日均速率 = total / 自首条上传以来的天数（不足 1 天按 1 天计）；
+//     无上传历史或无未达成里程碑时返回 null。
+//
+// 响应结构：
+//
+//	{
+//	  "total": N,
+//	  "achieved": [
+//	    {"milestone":100,"date":"2025-01-15T...Z","media_count":102}, ...
+//	  ],
+//	  "next_milestone": 500 或 null,
+//	  "projected_date": "2026-02-28T...Z" 或 null
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaGrowthMilestone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	milestones := []int64{100, 500, 1000, 5000, 10000}
+	total := int64(len(mediaList))
+
+	// 按 created_at 正序（最早在前）排列。ListMediaByUser 返回 DESC，需逆序。
+	ordered := make([]*storage.Media, 0, total)
+	ordered = append(ordered, mediaList...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
+	})
+
+	// 顺序累计计数，找出每个里程碑首次达成的日期。
+	type achievedMilestone struct {
+		Milestone  int64     `json:"milestone"`
+		Date       time.Time `json:"date"`
+		MediaCount int64     `json:"media_count"`
+	}
+	achieved := make([]achievedMilestone, 0, len(milestones))
+	mi := 0
+	var count int64
+	var lastAchievedAt time.Time
+	for _, m := range ordered {
+		count++
+		for mi < len(milestones) && count >= milestones[mi] {
+			achieved = append(achieved, achievedMilestone{
+				Milestone:  milestones[mi],
+				Date:       m.CreatedAt.UTC(),
+				MediaCount: count,
+			})
+			lastAchievedAt = m.CreatedAt.UTC()
+			mi++
+		}
+		if mi >= len(milestones) {
+			break
+		}
+	}
+
+	// 确定下一个未达成里程碑。
+	var nextMilestone *int64
+	for _, ms := range milestones {
+		if ms > total {
+			nextMilestone = &ms
+			break
+		}
+	}
+	// 预测下一个里程碑达成日期：基于全程日均增长速率外推剩余缺口所需天数。
+	// 日均 = total / 自首条上传以来天数（不足 1 天按 1 天计）；
+	// gap = nextMilestone - total；daysToGo = gap / 日均；
+	// projected = base + daysToGo 天。base 取最近达成日（若有），否则取当前时刻。
+	var projectedDate *time.Time
+	if nextMilestone != nil && total > 0 && len(ordered) > 0 {
+		now := time.Now().UTC()
+		firstUpload := ordered[0].CreatedAt.UTC()
+		daysSinceFirst := now.Sub(firstUpload).Hours() / 24
+		if daysSinceFirst < 1 {
+			daysSinceFirst = 1
+		}
+		avgDaily := float64(total) / daysSinceFirst
+		if avgDaily > 0 {
+			gap := float64(*nextMilestone - total)
+			daysToGo := gap / avgDaily
+			base := now
+			if !lastAchievedAt.IsZero() {
+				base = lastAchievedAt
+			}
+			pd := base.Add(time.Duration(daysToGo*24) * time.Hour)
+			projectedDate = &pd
+		}
+	}
+
+	resp := map[string]any{
+		"total":          total,
+		"achieved":       achieved,
+		"next_milestone": nextMilestone,
+	}
+	if projectedDate != nil {
+		resp["projected_date"] = projectedDate.UTC()
+	} else {
+		resp["projected_date"] = nil
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleWeeklySummary GET /api/media/weekly-summary — 周报摘要。
