@@ -6377,6 +6377,64 @@ object MediaService {
     data class MediaTagNode(val tag: String, val mediaCount: Int)
 
     /**
+     * V2：标签层级根节点项（[getMediaTagHierarchyV2] 返回）。
+     *  [parent] = 根标签名（或合成路径片段），[children] = 其直系子标签全名列表
+     *  （含路径前缀，按名字升序），[totalMedia] = 该子树（parent 自身 + 所有后代）
+     *  关联的去重 media 数。
+     */
+    data class TagHierarchyV2Item(
+        val parent: String,
+        val children: List<String>,
+        val totalMedia: Int
+    )
+
+    /**
+     * V2：GET /api/media/media-tag-hierarchy-v2 — 标签层级V2（多层嵌套树状结构）。
+     *
+     * 相比 V1（[getTagHierarchy]，仅按 - / : 单层切分），V2 支持多层嵌套并融合两种
+     * 发现策略：① 按 "/" 分隔符切分标签名还原完整路径层级（如 "旅行/日本/东京" →
+     * 旅行 → 日本 → 东京 三级）；② 对不含 "/" 的标签做语义后缀匹配（如 "日本旅行"
+     * 以 "旅行" 结尾 → 视为 "旅行" 的子标签，长度差 >1 才生效避免噪声）。
+     *
+     * 响应: `{hierarchy: [{parent, children: [...], total_media}], total_roots, total_depth}`。
+     *  - hierarchy：每个根标签一条记录；children 为其**直系子标签**全名列表（含路径
+     *    前缀，按名字升序），不是全量后代——前端如需深层可据 children 再查。
+     *  - total_roots：根标签数（= hierarchy 数组长度）。
+     *  - total_depth：最大嵌套深度（根=1）。
+     *
+     * 鉴权头由 defaultRequest 统一注入。解析沿用 [getMediaTagNetwork] 的运行时 JSON
+     * 操作（无 serialization 编译器插件依赖）；children 缺失落空列表非致命，
+     * total_media 缺失落 0。
+     *
+     * @return 根节点项列表（仅 [hierarchy] 数组，不含 total_roots/total_depth——
+     * 前端如需可在调用侧另行取用）；HTTP 非 200 或网络异常返回 null（调用方 null-skip）。
+     */
+    suspend fun getMediaTagHierarchyV2(): List<TagHierarchyV2Item>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-tag-hierarchy-v2")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["hierarchy"]?.jsonArray?.mapNotNull { item ->
+                    val n = item.jsonObject
+                    TagHierarchyV2Item(
+                        parent = n["parent"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        children = n["children"]?.jsonArray?.map { c ->
+                            c.jsonPrimitive.contentOrNull ?: ""
+                        } ?: emptyList(),
+                        totalMedia = n["total_media"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaTagHierarchyV2 status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagHierarchyV2 FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V25：标签网络边。[weight] 为 Jaccard 相似度（0~1，归一化），后端 float64 序列化；
      * 非 V9 [TagEdge]（整数共现次数）。
      */

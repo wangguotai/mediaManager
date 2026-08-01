@@ -5910,6 +5910,11 @@ private fun MyTabContent(
                             // null（请求失败）或空则静默跳过，不影响既有区域。
                             var tagNetwork by remember { mutableStateOf<MediaService.MediaTagNetwork?>(null) }
                             LaunchedEffect(Unit) { tagNetwork = MediaService.getMediaTagNetwork(limit = 20) }
+                            // V2：标签层级（调 GET /api/media/media-tag-hierarchy-v2），用于"标签层级"区。
+                            // 后端按 "/" 分隔符 + 语义后缀匹配推断多层父子关系；每条记录含 parent、
+                            // 直系 children 全名列表、子树 total_media。null（请求失败）或空则静默跳过。
+                            var tagHierarchyV2 by remember { mutableStateOf<List<MediaService.TagHierarchyV2Item>?>(null) }
+                            LaunchedEffect(Unit) { tagHierarchyV2 = MediaService.getMediaTagHierarchyV2() }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -6306,6 +6311,61 @@ private fun MyTabContent(
                                                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                                                 )
                                                             }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // V2：标签层级区——调 getMediaTagHierarchyV2()，树状文字渲染。
+                                            // 后端按 "/" 分隔符 + 语义后缀匹配推断多层父子关系；每条记录含 parent（根标签
+                                            // 或合成路径片段）、直系 children 全名列表、子树 total_media（去重 media 数）。
+                                            // 渲染：每行 "📂 parent (N 媒体)"，下一行 "└─ child1, child2, ..."；
+                                            // 最多 5 个根标签。null（请求失败）或空则静默跳过，不影响既有区域。
+                                            tagHierarchyV2?.let { items ->
+                                                val topRoots = items.take(5)
+                                                if (topRoots.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text(
+                                                        "标签层级",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        "共 ${items.size} 根标签",
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                    )
+                                                    topRoots.forEach { item ->
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                "📂 ${item.parent} (${item.totalMedia} 媒体)",
+                                                                fontSize = 13.sp,
+                                                                fontWeight = FontWeight.Medium,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                        }
+                                                        if (item.children.isNotEmpty()) {
+                                                            Text(
+                                                                "└─ ${item.children.joinToString(", ")}",
+                                                                fontSize = 12.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(start = 20.dp, top = 1.dp),
+                                                                maxLines = 2,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
                                                         }
                                                     }
                                                 }
