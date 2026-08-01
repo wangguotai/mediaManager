@@ -1251,6 +1251,73 @@ private fun MyTabContent(
             }
         }
 
+        // 标签使用频率卡片 —— 调 media-tag-usage-frequency 展示每个标签的月均使用次数 + 趋势。
+        // 置于三维存储（交互汇总）卡片之后、用户信息卡片之前。
+        // 后端端点即将上线，frontend-first 宽容解析；null 或空列表时静默跳过（不占位）。
+        // 每行格式：#tag (X.X 次/月 · 共 N 次) ↑/↓/→；最多 5 行。
+        var tagUsageFreq by remember { mutableStateOf<List<MediaService.TagUsageFreq>?>(null) }
+        LaunchedEffect(Unit) { tagUsageFreq = MediaService.getMediaTagUsageFrequency() }
+        tagUsageFreq?.let { tags ->
+            if (tags.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "标签使用频率",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 月均次数截 1 位小数（commonMain 无 String.format）。
+                        // 整数无小数点时 indexOf('.') 返回 -1，+2 后 take 安全取整串。
+                        tags.take(5).forEach { t ->
+                            // 趋势映射：up→↑ 绿 / down→↓ 红 / stable/其它→→ 灰。
+                            val (trendSym, trendColor) = when (t.trend) {
+                                "up" -> "↑" to Color(0xFF4CAF50)
+                                "down" -> "↓" to Color(0xFFE53935)
+                                else -> "→" to MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            }
+                            val avgStr = t.monthlyAvg.toString().let { s ->
+                                s.take(s.indexOf('.').coerceAtLeast(0) + 2)
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "#${t.tagName}",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "$avgStr 次/月 · 共 ${t.totalUses} 次",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    trendSym,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = trendColor
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(

@@ -9194,6 +9194,83 @@ object MediaService {
     }
 
     /**
+     * 标签使用频率单项（[getMediaTagUsageFrequency] 返回）。
+     *
+     * @param tagName   标签名
+     * @param totalUses 统计窗口内总使用次数
+     * @param monthlyAvg 月均使用次数（Double，后端 round）
+     * @param lastUsed  最近一次使用时间（RFC3339 字符串，前端直接展示前 10 位日期）
+     * @param trend     使用趋势字符串：后端约定 `up`（上升）/`down`（下降）/`stable`（平稳）；
+     *                  缺失回退 `stable`。卡片层映射为 ↑/↓/→。
+     */
+    data class TagUsageFreq(
+        val tagName: String,
+        val totalUses: Int,
+        val monthlyAvg: Double,
+        val lastUsed: String,
+        val trend: String
+    )
+
+    /**
+     * GET /api/media/media-tag-usage-frequency?months=N — 标签使用频率（月均+趋势）。
+     *
+     * 后端基于 audit_log 的 `tag` 操作，按 detail（标签标识）在最近 N 个月窗口内聚合，返回
+     * `{ tags: [ {tag_name, total_uses, monthly_avg, last_used, trend} ], total_tags }`：
+     * - `tag_name`：标签名（detail 为空时后端回退 `"(default)"`）
+     * - `total_uses`：窗口内总使用次数（Int）
+     * - `monthly_avg`：月均次数——**后端发字符串**（`strconv.FormatFloat 'f' 2`，如 `"1.50"`），
+     *   非 JSON 数字；解析处先尝 `doubleOrNull`（兼容数字字面量）再 `contentOrNull.toDoubleOrNull`。
+     * - `last_used`：窗口内最近使用时间（RFC3339 字符串；零值时后端发空串 `""`）
+     * - `trend`：`up`/`down`/`stable`（末月 vs 首月计数比较）；恒为非空字符串
+     * - `total_tags`：返回的标签总数
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件）。
+     * 鉴权头由 [jsonClient] 的 `defaultRequest` 中心化注入，此处不带 per-call auth lambda
+     *（与 [getMediaInteractionSummary] 同款 clean form）。
+     *
+     * 列表按后端给定顺序（total_uses desc，并列按 tag_name asc）取用，调用方最多展示 5 行。
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @param months 统计窗口月数（默认 6，透传 query param）
+     * @return 标签使用频率列表；失败返回 null
+     */
+    suspend fun getMediaTagUsageFrequency(months: Int = 6): List<TagUsageFreq>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-tag-usage-frequency") {
+                parameter("months", months)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val name = o["tag_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    TagUsageFreq(
+                        tagName = name,
+                        totalUses = o["total_uses"]?.jsonPrimitive?.intOrNull ?: 0,
+                        // monthly_avg 后端发字符串（strconv.FormatFloat 'f' 2，如 "1.50"），
+                        // 非 JSON 数字——doubleOrNull 对字符串返回 null。需取 contentOrNull 后
+                        // toDoubleOrNull 兜底，同时兼容万一后端改为数字字面量（先尝 doubleOrNull）。
+                        monthlyAvg = o["monthly_avg"]?.let { el ->
+                            el.jsonPrimitive.doubleOrNull
+                                ?: el.jsonPrimitive.contentOrNull?.toDoubleOrNull()
+                        } ?: 0.0,
+                        lastUsed = o["last_used"]?.takeIf { it !is JsonNull }
+                            ?.let { it.jsonPrimitive.contentOrNull } ?: "",
+                        trend = o["trend"]?.takeIf { it !is JsonNull }
+                            ?.let { it.jsonPrimitive.contentOrNull } ?: "stable"
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaTagUsageFrequency months=$months status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagUsageFrequency FAILED months=$months: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 最近 N 天交互汇总（操作分布 + 趋势）。
      *
      * 对应后端 `GET /api/media/media-interaction-summary?days=30`（基于 audit_log 统计）。
