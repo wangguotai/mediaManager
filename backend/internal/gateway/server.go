@@ -668,6 +668,11 @@ func (s *Server) registerRoutes() {
 	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
 	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
+	// 媒体质量评估：对每个媒体按分辨率/大小/类型综合评分，返回 top/bottom 质量与平均分。
+	// 仅对 IMAGE 评分（VIDEO/LIVE_PHOTO 信息不足），一次 ListMediaByUser 全量拉取后在
+	// Go 侧计算 quality_score = min(精度/4K,1)*50 + min(大小/10MB,1)*30 + 类型奖励*20。
+	// ?limit=10 控制每档返回数量。只读端点，需认证 + store，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-quality-assessment", s.handleMediaQualityAssessment)
 
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
@@ -12721,6 +12726,134 @@ func (s *Server) handleMediaDecadeDistribution(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decades": buckets,
 		"total":   total,
+	})
+}
+
+// handleMediaQualityAssessment GET /api/media/media-quality-assessment —
+// 媒体质量评估（综合分辨率+大小+类型评分，返回 top/bottom）。
+//
+// 对当前用户所有未软删的 IMAGE 类型媒体计算 quality_score（0-100 区间）：
+//
+//	resolution_score = min(width*height / (3840*2160), 1.0) * 50   // 像素总量相对 4K 归一化
+//	size_score       = min(size / 10MB, 1.0)            * 30      // 文件大小相对 10MB 归一化
+//	type_bonus       = IMAGE → 20；其他类型 → 0                     // 类型奖励（本端点仅评分 IMAGE）
+//	quality_score    = resolution_score + size_score + type_bonus
+//
+// 按分数倒序取 top_quality（最高分若干）与 bottom_quality（最低分若干），?limit 控制
+// 每档返回数量（默认 10，范围 [1,100]）。另返回 avg_score（所有参与评分媒体均分）与 total。
+//
+// 需认证（user_id 从 context 取），按 user_id 隔离；store 未注入返回 503。
+// 软删（deleted=1）与非 IMAGE 媒体不参与评分。Width/Height 为 0 的 IMAGE（缺分辨率元数据）
+// 不参与评分（无意义的 0 分会污染 bottom）。
+//
+// 响应结构：
+//
+//	{
+//	  "top":    [{media_id, filename, score, resolution}, ...],   // 分数最高的 limit 条
+//	  "bottom": [{media_id, filename, score, resolution}, ...],   // 分数最低的 limit 条
+//	  "avg_score": N,   // 参与评分媒体的平均分（保留两位小数）
+//	  "total":   N      // 参与评分的 IMAGE 媒体数
+//	}
+func (s *Server) handleMediaQualityAssessment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			limit = n
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 评分常量：4K 像素总量作为分辨率归一化上界，10MB 作为大小归一化上界。
+	const (
+		pix4K          = 3840 * 2160 // 8294400
+		size10MB       = 10 * 1024 * 1024
+		resWeight      = 50.0
+		sizeWeight     = 30.0
+		imageTypeBonus = 20.0
+	)
+
+	type scored struct {
+		MediaID    string  `json:"media_id"`
+		Filename   string  `json:"filename"`
+		Score      float64 `json:"score"`
+		Resolution string  `json:"resolution"`
+	}
+	var items []scored
+	var sumScore float64
+	for _, m := range mediaList {
+		if m.Deleted || m.Type != "IMAGE" {
+			continue
+		}
+		if m.Width <= 0 || m.Height <= 0 {
+			continue // 缺分辨率元数据，跳过以避免无意义的 0 分污染 bottom
+		}
+		pixels := float64(m.Width) * float64(m.Height)
+		resScore := math.Min(pixels/float64(pix4K), 1.0) * resWeight
+		sizeScore := math.Min(float64(m.Size)/float64(size10MB), 1.0) * sizeWeight
+		score := resScore + sizeScore + imageTypeBonus
+		items = append(items, scored{
+			MediaID:    m.ID,
+			Filename:   m.Filename,
+			Score:      math.Round(score*100) / 100,
+			Resolution: fmt.Sprintf("%dx%d", m.Width, m.Height),
+		})
+		sumScore += score
+	}
+
+	total := len(items)
+	if total == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"top":       []scored{},
+			"bottom":    []scored{},
+			"avg_score": 0,
+			"total":     0,
+		})
+		return
+	}
+
+	// 倒序（分数高→低）取 top；升序（分数低→高）取 bottom。同名分数稳定排序即可。
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Score > items[j].Score })
+	topN := limit
+	if topN > total {
+		topN = total
+	}
+	top := make([]scored, topN)
+	copy(top, items[:topN])
+
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Score < items[j].Score })
+	botN := limit
+	if botN > total {
+		botN = total
+	}
+	bottom := make([]scored, botN)
+	copy(bottom, items[:botN])
+
+	avg := math.Round(sumScore/float64(total)*100) / 100
+	writeJSON(w, http.StatusOK, map[string]any{
+		"top":       top,
+		"bottom":    bottom,
+		"avg_score": avg,
+		"total":     total,
 	})
 }
 
