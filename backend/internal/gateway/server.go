@@ -444,6 +444,9 @@ func (s *Server) registerRoutes() {
 	// 时间线大事件（媒体库重要节点：首次上传/最忙日/最长间隔/里程碑）。
 	// 仅基于 created_at 一次 ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点。
 	s.mux.HandleFunc("/api/media/media-timeline-events", s.handleMediaTimelineEvents)
+	// 上传速度分析（最近 N 天每天上传量 → 平均/最大单日/高峰日，识别上传高峰）。
+	// 仅基于 created_at 一次 ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点。
+	s.mux.HandleFunc("/api/media/media-upload-velocity", s.handleMediaUploadVelocity)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
@@ -18076,6 +18079,139 @@ func (s *Server) handleArchiveSuggest(w http.ResponseWriter, r *http.Request) {
 		"potential_savings_mb": round2(float64(totalBytes) / float64(mbBytes)),
 		"recommendation":       recommendation,
 		"user_id":              uid,
+	})
+}
+
+// handleMediaUploadVelocity GET /api/media/media-upload-velocity — 上传速度分析。
+//
+// 返回最近 N 天（默认 7，?days=N 可调，钳制 [1, 365]）的上传速率分析，供前端
+// 渲染上传趋势与识别高峰日：
+//   - daily_counts：窗口内按 UTC 日期分桶的上传量 [{date,count}]，含 0 上传天，
+//     按 date 升序，共 N 项（便于前端画折线/柱状图）。
+//   - avg_per_day：窗口内平均每日上传量（total / days，四舍五入到两位小数）。
+//   - total：窗口内上传总量。
+//   - max_day：窗口内上传最多的一天 {date,count}（并列取最早一天；全 0 则 {date:"",count:0}）。
+//   - peak_days：超过平均值 1.5 倍的日期 [{date,count,ratio}]（按 date 升序，
+//     ratio = count/avg，四舍五入两位）。无超阈值日时为空数组。
+//   - peak_threshold：高峰判定阈值（avg_per_day * 1.5），便于前端标线渲染。
+//
+// 数据源：s.store.ListMediaByUser（仅未软删行，created_at DESC），在 Go 侧按 UTC 日期
+// 分桶聚合。日期口径与 upload-streak / weekly-summary / timeline-events 等统计端点
+// 一致（UTC），避免与本地时区错位。需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaUploadVelocity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 窗口天数：默认 7，钳制 [1, 365]。与 share-activity 等端点的 days 参数解析口径一致。
+	days := 7
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 365 {
+				n = 365
+			}
+			days = n
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 时间窗口：[today-(days-1), today]（含今天，共 days 个槽位，UTC 日期升序）。
+	now := time.Now().UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	windowStart := todayStart.AddDate(0, 0, -(days - 1))
+
+	type dayCount struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	buckets := make([]dayCount, 0, days)
+	idx := make(map[string]int, days) // date → buckets 下标，便于 O(1) 落桶
+	for i := 0; i < days; i++ {
+		ds := windowStart.AddDate(0, 0, i)
+		key := ds.Format("2006-01-02")
+		idx[key] = i
+		buckets = append(buckets, dayCount{Date: key, Count: 0})
+	}
+
+	// 按 UTC 日期分桶，仅计入窗口内、未软删的 media。
+	// ListMediaByUser 已过滤软删行，此处防御式跳过 Deleted。
+	total := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		key := m.CreatedAt.UTC().Format("2006-01-02")
+		if i, ok := idx[key]; ok {
+			buckets[i].Count++
+			total++
+		}
+	}
+
+	// 平均每日上传量：四舍五入到两位小数。days >= 1（已钳制），无除零风险。
+	avgPerDay := float64(total) / float64(days)
+	avgPerDay = round2(avgPerDay)
+
+	// 最大单日上传量：遍历 buckets 取 count 最大者；并列取靠前（即更早）的桶。
+	type maxDayInfo struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	maxDay := maxDayInfo{}
+	for _, b := range buckets {
+		if b.Count > maxDay.Count {
+			maxDay = maxDayInfo{Date: b.Date, Count: b.Count}
+		}
+	}
+
+	// 高峰日：超过平均值 1.5 倍的日子（count > avg*1.5）。按 date 升序（buckets 已升序）。
+	// ratio = count / avg（avg 为 0 时跳过，避免除零；阈值恒为 0 这种情况下无高峰）。
+	peakThreshold := round2(avgPerDay * 1.5)
+	type peakDay struct {
+		Date  string  `json:"date"`
+		Count int     `json:"count"`
+		Ratio float64 `json:"ratio"`
+	}
+	peaks := make([]peakDay, 0)
+	if avgPerDay > 0 {
+		for _, b := range buckets {
+			if float64(b.Count) > avgPerDay*1.5 {
+				peaks = append(peaks, peakDay{
+					Date:  b.Date,
+					Count: b.Count,
+					Ratio: round2(float64(b.Count) / avgPerDay),
+				})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"daily_counts":    buckets,
+		"avg_per_day":     avgPerDay,
+		"total":           total,
+		"days":            days,
+		"window_start":    windowStart.Format("2006-01-02"),
+		"window_end":      todayStart.Format("2006-01-02"),
+		"max_day":         maxDay,
+		"peak_days":       peaks,
+		"peak_threshold":  peakThreshold,
+		"peak_multiplier": 1.5,
 	})
 }
 
