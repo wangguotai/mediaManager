@@ -2899,11 +2899,11 @@ private fun StorageEfficiencyCard() {
         )
         EfficiencyMetricRow(
             label = "媒体密度",
-            value = "%.2f 项/MB".format(eff.mediaPerMb)
+            value = "${kotlin.math.round(eff.mediaPerMb * 100.0) / 100.0} 项/MB"
         )
         EfficiencyMetricRow(
             label = "重复率",
-            value = "%.1f%%".format(eff.duplicateRate * 100)
+            value = "${kotlin.math.round(eff.duplicateRate * 1000.0) / 10.0}%"
         )
         EfficiencyMetricRow(
             label = "总媒体",
