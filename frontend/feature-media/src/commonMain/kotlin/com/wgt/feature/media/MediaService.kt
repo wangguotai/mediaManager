@@ -3836,6 +3836,57 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-decade-distribution — 媒体年代分布。
+     *
+     * 后端按 created_at（上传时间）的 UTC 年份将所有未软删媒体归入 4 个年代分桶：
+     * 2020s（2020-2029）/ 2010s（2010-2019）/ 2000s（2000-2009）/ 更早（<2000）。
+     * 每个年代统计 count（数量）、bytes（累计字节）、percentage（占总量百分比，0~100），
+     * 另返回 total（参与统计的未软删媒体总数）。响应（与后端
+     * [handleMediaDecadeDistribution] 对齐）：
+     *
+     * `{decades: [{decade, count, bytes, percentage}], total}`
+     *
+     * - [decade] 年代标签（"2020s"/"2010s"/"2000s"/"更早"）。
+     * - [count] 该年代下媒体数量。
+     * - [bytes] 该年代下媒体累计字节数。
+     * - [percentage] 占总量百分比（0~100，Double，两位小数）。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaFilenamePattern] / [getMediaCameraStats] 同语义。
+     */
+    suspend fun getMediaDecadeDistribution(): List<DecadeStat>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-decade-distribution") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["decades"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val decade = o["decade"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    DecadeStat(
+                        decade = decade,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaDecadeDistribution FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 媒体年代分布单条统计（年代 + 数量 + 字节数 + 百分比，与后端 decades[] 对齐）。 */
+    data class DecadeStat(
+        val decade: String,
+        val count: Int,
+        val bytes: Long,
+        val percentage: Double
+    )
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与

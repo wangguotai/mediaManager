@@ -1836,6 +1836,37 @@ private fun MyTabContent(
             }
         }
 
+        // V9：年代分布卡片（调 media-decade-distribution，按上传年份按年代分桶统计）。
+        // 后端按 created_at 的 UTC 年份将未软删媒体分为 2020s/2010s/2000s/更早 四档，
+        // 每档返回 count/bytes/percentage，新→旧顺序固定。全部展示（不截断 top-N）。
+        // 请求失败或无数据时 getMediaDecadeDistribution 返回 null，静默跳过。
+        var decadeStats by remember { mutableStateOf<List<MediaService.DecadeStat>?>(null) }
+        LaunchedEffect(Unit) { decadeStats = MediaService.getMediaDecadeDistribution() }
+        decadeStats?.let { decades ->
+            if (decades.isNotEmpty() && decades.sumOf { it.count } > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("年代分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        decades.forEach { stat ->
+                            // 📅 年代 (N 项 · X MB · X%) —— 全部年代显示，按后端固定顺序（新→旧）。
+                            if (stat.count > 0) {
+                                Text(
+                                    "📅 ${stat.decade} (${stat.count} 项 · ${formatBytesToMB(stat.bytes)} · ${formatPercent(stat.percentage)})",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
