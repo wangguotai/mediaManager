@@ -889,6 +889,48 @@ private fun MyTabContent(
             .padding(horizontal = 16.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // 个性化欢迎卡片 —— 调 media-personalized-dashboard 一次拿问候+今日统计+每日提示。
+        // 置于"我的"Tab 最顶部（媒体库总览卡片之前），null 时静默跳过（不占位）。
+        // greeting 为空（后端未就绪/返回空）也跳过，避免空标题占位。
+        var personalizedDashboard by remember { mutableStateOf<MediaService.PersonalizedDashboard?>(null) }
+        LaunchedEffect(Unit) { personalizedDashboard = MediaService.getMediaPersonalizedDashboard() }
+        personalizedDashboard?.let { pd ->
+            if (pd.greeting.isNotBlank()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        // 问候语大标题
+                        Text(
+                            pd.greeting,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 今日统计：📤 N 上传 · 🔧 N 操作（单行紧凑）
+                        Text(
+                            "今日：📤 ${pd.today.uploads} 上传 · 🔧 ${pd.today.actions} 操作",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                        )
+                        // 每日提示（有内容才展示，避免空行）
+                        if (pd.tipOfDay.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "💡 ${pd.tipOfDay}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 媒体库总览卡片 —— 调 library-overview 一次请求拿 12 关键数字，3x4 网格快速摘要。
         // 置于"我的"Tab 最顶部（仪表盘前），null 或 totalMedia==0 时静默跳过（不占位）。
         var libraryOverview by remember { mutableStateOf<MediaService.LibraryOverview?>(null) }

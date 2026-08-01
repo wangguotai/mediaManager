@@ -10925,4 +10925,82 @@ object MediaService {
             null
         }
     }
+
+    // ============ 个性化仪表盘 ============
+
+    /**
+     * 今日简报 —— 个性化仪表盘的当日活动统计。
+     *
+     * @param uploads 今日上传媒体数
+     * @param actions 今日操作次数（含改名/打标/收藏/删除等交互）
+     */
+    data class TodaySummary(
+        val uploads: Int,
+        val actions: Int
+    )
+
+    /**
+     * 个性化仪表盘 —— \"我的\"Tab 顶部欢迎卡片的底层数据。
+     *
+     * 后端 `GET /api/media/media-personalized-dashboard` 返回问候语、今日统计、
+     * 快捷操作、推荐及每日提示。前端欢迎卡片仅消费 [greeting] / [today] / [tipOfDay]
+     * 三个核心字段；[quickActions] / [recommendations] 预留供后续扩展（当前不展示）。
+     *
+     * @param greeting        问候语（如\"早上好，用户\"——后端按时段+用户名生成）
+     * @param today           今日统计摘要（上传数 + 操作数）
+     * @param tipOfDay        每日提示文字（媒体管理小贴士）
+     * @param quickActions    快捷操作列表（预留，欢迎卡片暂不展示）
+     * @param recommendations 推荐媒体列表（预留，欢迎卡片暂不展示）
+     */
+    data class PersonalizedDashboard(
+        val greeting: String,
+        val today: TodaySummary,
+        val tipOfDay: String,
+        val quickActions: List<String>,
+        val recommendations: List<String>
+    )
+
+    /**
+     * GET /api/media/media-personalized-dashboard — 个性化仪表盘。
+     *
+     * 后端聚合问候语（按当前时段 + 用户名）、今日上传/操作统计、快捷操作与推荐、
+     * 每日提示，供\"我的\"Tab 顶部欢迎卡片一次请求渲染。响应 JSON：
+     * `{greeting, today:{uploads,actions}, quick_actions:[...], recommendations:[...], tip_of_day}`。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaLibraryOverview] 同款）。**不附加 per-call
+     * 鉴权头**——Bearer token 由 [jsonClient] 的 `defaultRequest` 统一注入（与
+     * [getRelatedMedia] / [getMediaList] 同款）。各字段逐字段宽容回退（缺失→0/空），保证
+     * 后端字段未就绪时不崩。HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @return 个性化仪表盘对象；失败返回 null
+     */
+    suspend fun getMediaPersonalizedDashboard(): PersonalizedDashboard? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-personalized-dashboard")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val todayObj = o["today"]?.jsonObject
+                PersonalizedDashboard(
+                    greeting = o["greeting"]?.jsonPrimitive?.contentOrNull ?: "",
+                    today = TodaySummary(
+                        uploads = todayObj?.get("uploads")?.jsonPrimitive?.intOrNull ?: 0,
+                        actions = todayObj?.get("actions")?.jsonPrimitive?.intOrNull ?: 0
+                    ),
+                    tipOfDay = o["tip_of_day"]?.jsonPrimitive?.contentOrNull ?: "",
+                    quickActions = o["quick_actions"]?.jsonArray?.mapNotNull { el ->
+                        el.jsonPrimitive.contentOrNull
+                    } ?: emptyList(),
+                    recommendations = o["recommendations"]?.jsonArray?.mapNotNull { el ->
+                        el.jsonPrimitive.contentOrNull
+                    } ?: emptyList()
+                )
+            } else {
+                logger.info("MediaService", "getMediaPersonalizedDashboard status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaPersonalizedDashboard FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 }
