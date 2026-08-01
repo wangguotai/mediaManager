@@ -3834,6 +3834,100 @@ private fun MyTabContent(
             }
         }
 
+        // V9：分享活动趋势卡片（调 /api/media/media-share-activity?days=30 展示
+        // 趋势方向 + 总/活跃/过期 + 最近 7 天柱状图）。与上方分享分析/即将过期两卡
+        // 同属分享主题分组，故紧随其后。None-skip on fetch failure（getMediaShareActivity
+        // 返回 null 时不渲染卡片，不崩溃"我的"Tab）；total_shares==0 也跳过（零分享用户
+        // 不需要空趋势图）。注：仅取 activity 序列末尾 7 个槽位作为"最近 7 天"柱状图，
+        // 因为后端 activity 已是按日期升序、含零创建日的完整窗口序列。
+        var shareActivity by remember { mutableStateOf<MediaService.ShareActivity?>(null) }
+        LaunchedEffect(Unit) { shareActivity = MediaService.getMediaShareActivity() }
+        shareActivity?.let { act ->
+            if (act.totalShares > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        // 标题行：分享活动趋势 + 趋势箭头（up↑ onPrimary / down↓ error / stable→ neutral）
+                        val (trendArrow, trendColor, trendLabel) = when (act.trend) {
+                            "up" -> Triple("↑", MaterialTheme.colorScheme.primary, "上升")
+                            "down" -> Triple("↓", MaterialTheme.colorScheme.error, "下降")
+                            else -> Triple("→", MaterialTheme.colorScheme.onSurfaceVariant, "平稳")
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "分享活动趋势",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "$trendArrow $trendLabel",
+                                fontSize = 12.sp,
+                                color = trendColor
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 汇总行：总分享 N · 活跃 N · 过期 N
+                        Text(
+                            "📤 总分享 ${act.totalShares} · ✅ 活跃 ${act.activeShares} · ⏰ 过期 ${act.expiredShares}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        // 最近 7 天柱状图：取 activity 末尾 7 个槽位（升序含零日）。
+                        val last7 = act.activity.takeLast(7)
+                        if (last7.isNotEmpty()) {
+                            val maxCount = last7.maxOf { it.count }.coerceAtLeast(1)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.Bottom
+                            ) {
+                                last7.forEach { day ->
+                                    val barHeight = (6 + (day.count.toFloat() / maxCount) * 50).toInt().dp
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text(
+                                            if (day.count > 0) day.count.toString() else "",
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .width(18.dp)
+                                                .height(barHeight)
+                                                .clip(RoundedCornerShape(3.dp))
+                                                .background(
+                                                    if (day.count > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                                )
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        // 日期取 MM-DD 末五字符（YYYY-MM-DD → MM-DD）
+                                        Text(
+                                            day.date.takeLast(5),
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：最近上传卡片
         var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
         LaunchedEffect(Unit) { recentUploads = MediaService.getRecentUploads() }

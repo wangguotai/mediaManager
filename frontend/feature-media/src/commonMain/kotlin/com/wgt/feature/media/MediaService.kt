@@ -4550,6 +4550,72 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-share-activity?days=N — 分享活动时序统计。
+     *
+     * 与 [getShareAnalytics]（仅返聚合计数）互补：本端点返回最近 N 天（默认 30，
+     * 钳制 [1, 365]）每日新建分享数的时间序列及整体趋势方向，供"我的"Tab
+     * "分享活动趋势"卡片渲染趋势箭头 + 7 天柱状图。
+     *
+     * 后端返回 `{activity:[{date, count}], total_shares, active_shares,
+     * expired_shares, trend, days}`：
+     *   - activity     : 升序的 N 个 `{date:"YYYY-MM-DD", count:Int}`，含 count=0
+     *                    的零创建日（窗口按 UTC 日期分桶）；落在窗口之外的较早
+     *                    分享仍计入 total_shares 等汇总但不进入此序列；
+     *   - total_shares : 分享链接总数；
+     *   - active_shares: 未过期分享数（含永不过期 + 过期晚于 now）；
+     *   - expired_shares: 已过期分享数（永不过期不计入）；
+     *   - trend        : "up" | "down" | "stable"（后半窗口日均 vs 前半窗口日均）；
+     *   - days         : 实际窗口天数（前端不解析，仅用于核对）。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过卡片，不崩溃"我的"Tab。
+     */
+    suspend fun getMediaShareActivity(days: Int = 30): ShareActivity? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-share-activity") {
+                parameter("days", days)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val activity = o["activity"]?.jsonArray?.mapNotNull { el ->
+                    val d = el.jsonObject
+                    ShareActivityDay(
+                        date = d["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        count = d["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                ShareActivity(
+                    activity = activity,
+                    totalShares = o["total_shares"]?.jsonPrimitive?.intOrNull ?: 0,
+                    activeShares = o["active_shares"]?.jsonPrimitive?.intOrNull ?: 0,
+                    expiredShares = o["expired_shares"]?.jsonPrimitive?.intOrNull ?: 0,
+                    trend = o["trend"]?.jsonPrimitive?.contentOrNull ?: "stable"
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaShareActivity FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 分享活动单日（[getMediaShareActivity] 返回的 activity 序列元素）。 */
+    data class ShareActivityDay(
+        val date: String,
+        val count: Int
+    )
+
+    /** 分享活动统计（[getMediaShareActivity] 返回）。trend 取值 "up"|"down"|"stable"。 */
+    data class ShareActivity(
+        val activity: List<ShareActivityDay>,
+        val totalShares: Int,
+        val activeShares: Int,
+        val expiredShares: Int,
+        val trend: String
+    )
+
+    /**
      * GET /api/media/share-expiring — 即将过期（7 天内）分享链接明细列表。
      *
      * 与 [getShareAnalytics]（仅返聚合的 `expiring_soon` 计数）互补：本端点返回
