@@ -582,6 +582,11 @@ func (s *Server) registerRoutes() {
 	// 统计平均操作数/平均时长/最常见首操作/最长会话，分析用户使用习惯。
 	// 数据来源：s.store.ListAuditLogs 取最近 500 条（created_at DESC），内存中翻转后按时间正序切分。
 	s.mux.HandleFunc("/api/media/media-session-stats", s.handleMediaSessionStats)
+	// 交互汇总：基于 audit_log 统计最近 N 天（默认 30）的操作总量、各操作类型分布、
+	// 最频繁操作、日均操作数、以及最近 7 天 vs 之前 7 天的操作趋势方向。
+	// 数据来源：s.store.ListAuditLogs 取较大 limit（5000）在内存按时间窗口过滤，
+	// 与 weekly-summary / media-lifecycle 等端点口径一致（ListAuditLogs 无法按时间范围查询）。
+	s.mux.HandleFunc("/api/media/media-interaction-summary", s.handleMediaInteractionSummary)
 	// V8：合并两个相册
 	s.mux.HandleFunc("/api/media/album/merge", s.handleAlbumMerge)
 	// V18：批量合并多个相册到第一个（album_ids[0] 为目标，其余为源）
@@ -15352,6 +15357,152 @@ func (s *Server) handleMediaSessionStats(w http.ResponseWriter, r *http.Request)
 // 避免 JSON 里出现 2.3333333333333335 这类长尾浮点。负数（本场景不会出现）同样按此处理。
 func roundTo2(f float64) float64 {
 	return math.Round(f*100) / 100
+}
+
+// handleMediaInteractionSummary GET /api/media/media-interaction-summary?days=30
+// 基于审计日志（audit_log）汇总当前用户最近 N 天（默认 30，范围 [1,365]）的交互情况：
+//   - total_actions        窗口内操作总数
+//   - by_action            各操作类型分布 {action: count}，按 count 降序
+//   - most_frequent        最频繁的操作类型（平局取字典序最小，确定性输出）；无数据时为 ""
+//   - daily_avg            日均操作数（total_actions / 实际覆盖天数，保留 2 位小数）
+//   - trend_direction      最近 7 天 vs 之前 7 天的操作数变化方向："up"/"down"/"flat"/"insufficient"
+//                          （前 7 天为 0 且近 7 天也为 0 → flat；前 7 天为 0 且近 7 天 >0 → up；
+//                           前 7 天 >0 且近 7 天为 0 → down；其余按变化率 >= +5% 视 up、<= -5% 视 down、中间 flat）
+//   - recent_7d            最近 7 天操作数（便于前端直接渲染趋势）
+//   - previous_7d          之前 7 天操作数
+//   - total_days           实际统计天数（= 请求 days 钳制后的值）
+//
+// 数据来源：s.store.ListAuditLogs(ctx, uid, 5000) 返回 created_at DESC（最近在前），
+// 在内存按 UTC 时间窗口过滤（ListAuditLogs 无法按时间范围查询，取较大 limit 拉足够记录，
+// 与 weekly-summary / media-session-stats 等端点口径一致）。
+// 无审计记录或窗口内无记录时返回零值结构（total_actions=0、by_action={}、
+// most_frequent=""、daily_avg=0、trend_direction="insufficient"）。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaInteractionSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// days 参数：默认 30，范围 [1, 365]。
+	days := 30
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 365 {
+				n = 365
+			}
+			days = n
+		}
+	}
+
+	now := time.Now().UTC()
+	windowStart := now.AddDate(0, 0, -days)
+
+	// 取较大 limit 拉足够记录在内存过滤。查询失败不致命，按空集处理。
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 UTC 时间窗口 [windowStart, now) 过滤，同时收集趋势所需的两段 7 天窗口计数。
+	byAction := map[string]int{}
+	totalActions := 0
+	recent7 := 0
+	prev7 := 0
+	recent7Start := now.AddDate(0, 0, -7)
+	prev7Start := now.AddDate(0, 0, -14)
+	for _, a := range logs {
+		ca := a.CreatedAt.UTC()
+		if ca.Before(windowStart) || !ca.Before(now) {
+			continue
+		}
+		totalActions++
+		byAction[a.Action]++
+		// 趋势：近 7 天 [recent7Start, now)，前 7 天 [prev7Start, recent7Start)。
+		if !ca.Before(recent7Start) {
+			recent7++
+		} else if !ca.Before(prev7Start) {
+			prev7++
+		}
+	}
+
+	// 最频繁操作：按 count 降序，平局取字典序最小（确定性输出）。
+	mostFrequent := ""
+	bestCount := -1
+	for act, cnt := range byAction {
+		if cnt > bestCount || (cnt == bestCount && (mostFrequent == "" || act < mostFrequent)) {
+			mostFrequent = act
+			bestCount = cnt
+		}
+	}
+
+	// by_action 转为有序列表 [{action,count}]，按 count 降序、action 升序，便于前端稳定渲染。
+	type actionCount struct {
+		Action string `json:"action"`
+		Count  int    `json:"count"`
+	}
+	byActionList := make([]actionCount, 0, len(byAction))
+	for act, cnt := range byAction {
+		byActionList = append(byActionList, actionCount{Action: act, Count: cnt})
+	}
+	sort.Slice(byActionList, func(i, j int) bool {
+		if byActionList[i].Count != byActionList[j].Count {
+			return byActionList[i].Count > byActionList[j].Count
+		}
+		return byActionList[i].Action < byActionList[j].Action
+	})
+
+	// 日均操作数：以请求天数为分母（与窗口口径一致，保留 2 位小数）。
+	dailyAvg := roundTo2(float64(totalActions) / float64(days))
+
+	// 趋势方向判定。
+	trend := "insufficient"
+	switch {
+	case prev7 == 0 && recent7 == 0:
+		trend = "flat"
+	case prev7 == 0 && recent7 > 0:
+		trend = "up"
+	case prev7 > 0 && recent7 == 0:
+		trend = "down"
+	default:
+		delta := float64(recent7-prev7) / float64(prev7)
+		switch {
+		case delta >= 0.05:
+			trend = "up"
+		case delta <= -0.05:
+			trend = "down"
+		default:
+			trend = "flat"
+		}
+	}
+
+	// 无数据时把 most_frequent 显式置空串（map 零值已是 ""，此处仅兜底）。
+	if totalActions == 0 {
+		mostFrequent = ""
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_actions":    totalActions,
+		"by_action":        byActionList,
+		"most_frequent":    mostFrequent,
+		"daily_avg":        dailyAvg,
+		"trend_direction":  trend,
+		"recent_7d":        recent7,
+		"previous_7d":      prev7,
+		"total_days":       days,
+	})
 }
 
 // handleMediaActivityFeed GET /api/media/activity-feed?limit=20
