@@ -8782,6 +8782,89 @@ object MediaService {
     )
 
     /**
+     * 媒体库总览 —— 12 关键数字一次请求聚合。
+     *
+     * 后端 `GET /api/media/media-library-overview` 返回扁平 30+ 维度，前端仅取最常用的
+     * 12 个核心指标做"我的"Tab 顶部快速摘要卡片。字段均 best-effort：后端某子统计失败
+     * 时对应字段回退零值，UI 拿到一个非 null 的 [LibraryOverview] 自行渲染。healthScore /
+     * diversityScore / activityScore 为 0~100 百分制；tagCoverage 为 0~1（已打标签媒体占比）。
+     *
+     * @param totalMedia       媒体总数（未软删）
+     * @param totalBytes       媒体总占用字节
+     * @param favorites        收藏数
+     * @param albums           相册数
+     * @param shares           分享链接数
+     * @param healthScore      存储健康度评分 0~100
+     * @param diversityScore   内容多样性评分 0~100
+     * @param activityScore    活跃度评分 0~100
+     * @param streak           连续上传天数
+     * @param totalTags        标签总数（去重）
+     * @param tagCoverage      标签覆盖率 0~1（已打标签媒体占比）
+     * @param totalDuplicates  重复文件组数
+     */
+    data class LibraryOverview(
+        val totalMedia: Int,
+        val totalBytes: Long,
+        val favorites: Int,
+        val albums: Int,
+        val shares: Int,
+        val healthScore: Int,
+        val diversityScore: Int,
+        val activityScore: Int,
+        val streak: Int,
+        val totalTags: Int,
+        val tagCoverage: Double,
+        val totalDuplicates: Int
+    ) {
+        /** 总占用 MB（一位小数截断由调用方做，此处提供原始 MB）。 */
+        val totalMB: Double get() = totalBytes.toDouble() / (1024.0 * 1024.0)
+    }
+
+    /**
+     * GET /api/media/media-library-overview — 媒体库总览（12 关键数字一次请求）。
+     *
+     * 后端把分散在 stat-summary / storage-stats / health / activity / diversity / tags /
+     * duplicates 等端点的最常用指标合并为扁平响应，避免"我的"Tab 顶部摘要卡片逐卡片多次调用。
+     * 前端仅消费 12 个核心字段（见 [LibraryOverview]），其余 30+ 维度暂不解析。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getStatSummary] / [getStorageStats] 同款）。**不附加 per-call 鉴权头**——Bearer token
+     * 由 [jsonClient] 的 `defaultRequest` 统一注入（与 [getRelatedMedia] / [getMediaList] 同款）。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示总览卡片）。
+     *
+     * @return 总览对象；失败返回 null
+     */
+    suspend fun getMediaLibraryOverview(): LibraryOverview? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-library-overview")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                LibraryOverview(
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    favorites = o["favorites"]?.jsonPrimitive?.intOrNull ?: 0,
+                    albums = o["albums"]?.jsonPrimitive?.intOrNull ?: 0,
+                    shares = o["shares"]?.jsonPrimitive?.intOrNull ?: 0,
+                    healthScore = o["health_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    diversityScore = o["diversity_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    activityScore = o["activity_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    streak = o["streak"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalTags = o["total_tags"]?.jsonPrimitive?.intOrNull ?: 0,
+                    tagCoverage = o["tag_coverage"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    totalDuplicates = o["total_duplicates"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaLibraryOverview status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaLibraryOverview FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；

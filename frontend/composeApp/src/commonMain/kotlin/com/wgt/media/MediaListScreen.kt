@@ -854,6 +854,83 @@ private fun MyTabContent(
             .padding(horizontal = 16.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // 媒体库总览卡片 —— 调 library-overview 一次请求拿 12 关键数字，3x4 网格快速摘要。
+        // 置于"我的"Tab 最顶部（仪表盘前），null 或 totalMedia==0 时静默跳过（不占位）。
+        var libraryOverview by remember { mutableStateOf<MediaService.LibraryOverview?>(null) }
+        LaunchedEffect(Unit) { libraryOverview = MediaService.getMediaLibraryOverview() }
+        libraryOverview?.let { ov ->
+            if (ov.totalMedia > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "媒体库总览",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 3x4 网格（3 列 × 4 行），每格 label + value + emoji
+                        val rows = listOf(
+                            Triple("📁 媒体总数", "${ov.totalMedia}", "项"),
+                            Triple("💾 总占用", ov.totalMB.toString().let { it.take(it.indexOf('.') + 2) }, "MB"),
+                            Triple("⭐ 收藏", "${ov.favorites}", "项"),
+                            Triple("📚 相册", "${ov.albums}", "个"),
+                            Triple("🔗 分享", "${ov.shares}", "个"),
+                            Triple("💊 健康度", "${ov.healthScore}", "/100"),
+                            Triple("🌈 多样性", "${ov.diversityScore}", "/100"),
+                            Triple("🔥 活跃度", "${ov.activityScore}", "/100"),
+                            Triple("⚡ 连续天数", "${ov.streak}", "天"),
+                            Triple("🏷 标签数", "${ov.totalTags}", "个"),
+                            Triple("📊 覆盖率", "${(ov.tagCoverage * 100).toInt()}", "%"),
+                            Triple("🔄 重复组", "${ov.totalDuplicates}", "组")
+                        )
+                        rows.chunked(3).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                rowItems.forEach { (label, value, unit) ->
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(vertical = 6.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text(
+                                            label,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                            maxLines = 1
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            value,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            unit,
+                                            fontSize = 9.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                                // 最后不足 3 格时补空 Spacer 占位，保持列宽对齐
+                                repeat(3 - rowItems.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(
