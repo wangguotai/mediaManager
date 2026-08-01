@@ -3887,6 +3887,81 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-weekday-analysis — 媒体星期分布。
+     *
+     * 后端对当前用户全部未软删媒体按 created_at（上传时间）的 UTC 星期几分组
+     * （Go time.Weekday: 0=周日, 1=周一 ... 6=周六），统计每个 weekday 的上传量与
+     * 占比，并找出最活跃的 weekday。响应结构（与后端
+     * [handleMediaWeekdayAnalysis] 对齐）：
+     *
+     * `{weekdays: [{weekday, count, percentage}], most_active: {weekday, count}|null, total}`
+     *
+     * - [weekdays] 固定 7 项，按后端"周日→周一→...→周六"顺序返回；前端可自行重排展示。
+     * - [weekday] 星期标签（"周日"/"周一"/.../"周六"）。
+     * - [count] 该星期上传的媒体数量。
+     * - [percentage] 占总量百分比（0~100，Double，两位小数）。
+     * - [mostActive] 上传量最大的星期；total=0 时后端返回 null，前端 [mostActive] 为 null。
+     * - [total] 参与分桶的未软删媒体总数。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaDecadeDistribution] / [getMediaFilenamePattern] 同语义。
+     */
+    suspend fun getMediaWeekdayAnalysis(): WeekdayAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-weekday-analysis") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val weekdays = obj["weekdays"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val weekday = o["weekday"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    WeekdayItem(
+                        weekday = weekday,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                val mostActive = obj["most_active"]?.takeIf { it !is JsonNull }?.let { el ->
+                    val mo = el.jsonObject
+                    MostActive(
+                        weekday = mo["weekday"]?.jsonPrimitive?.contentOrNull ?: "",
+                        count = mo["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+                WeekdayAnalysis(
+                    weekdays = weekdays,
+                    mostActive = mostActive,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaWeekdayAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 媒体星期分布分析结果（7 天分布 + 最活跃日 + 总数，与后端 weekday-analysis 对齐）。 */
+    data class WeekdayAnalysis(
+        val weekdays: List<WeekdayItem>,
+        val mostActive: MostActive?,
+        val total: Int
+    )
+
+    /** 星期分布单条统计（星期标签 + 数量 + 百分比，与后端 weekdays[] 对齐）。 */
+    data class WeekdayItem(
+        val weekday: String,
+        val count: Int,
+        val percentage: Double
+    )
+
+    /** 最活跃星期（星期标签 + 数量，与后端 most_active 对齐；total=0 时为 null）。 */
+    data class MostActive(
+        val weekday: String,
+        val count: Int
+    )
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与

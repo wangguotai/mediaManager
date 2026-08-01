@@ -1867,6 +1867,92 @@ private fun MyTabContent(
             }
         }
 
+        // V9：星期分布卡片（调 media-weekday-analysis，按上传时间星期几分布统计）。
+        // 后端按 created_at 的 UTC 星期几分 7 档（周日→周六顺序返回），每档 count/percentage，
+        // 另返回 most_active {weekday,count}（total=0 时为 null）与 total。
+        // 前端重排为"周一→周日"展示，最活跃日高亮 primary 色加粗。
+        // total=0 或请求失败时 getMediaWeekdayAnalysis 返回 null，静默跳过。
+        var weekdayAnalysis by remember { mutableStateOf<MediaService.WeekdayAnalysis?>(null) }
+        LaunchedEffect(Unit) { weekdayAnalysis = MediaService.getMediaWeekdayAnalysis() }
+        weekdayAnalysis?.let { wa ->
+            if (wa.total > 0) {
+                // 后端按"周日→周六"返回，前端重排为"周一→周日"（周一=索引1..周六=6, 周日=0 放末尾）。
+                val mondayFirst = wa.weekdays.sortedBy { wd ->
+                    when (wd.weekday) {
+                        "周一" -> 1; "周二" -> 2; "周三" -> 3; "周四" -> 4
+                        "周五" -> 5; "周六" -> 6; "周日" -> 7
+                        else -> 99
+                    }
+                }
+                val maxCount = mondayFirst.maxOf { it.count }.coerceAtLeast(1)
+                val mostActiveWeekday = wa.mostActive?.weekday
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("星期分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 最活跃日摘要
+                        wa.mostActive?.let { ma ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("🔥 最活跃", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${ma.weekday}（${ma.count} 项）",
+                                    fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        // 7 行：周一/.../周日 各 N 项 · X%，最活跃日高亮
+                        mondayFirst.forEach { wd ->
+                            val isMostActive = wd.weekday == mostActiveWeekday && wd.count > 0
+                            val barColor = if (isMostActive) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            val ratio = (wd.count.toFloat() / maxCount).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    wd.weekday,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isMostActive) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isMostActive) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(36.dp)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { ratio },
+                                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                    color = barColor,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text(
+                                    "${wd.count} 项 · ${formatPercent(wd.percentage)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.width(80.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "基于 ${wa.total} 项记录（按上传时间）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
