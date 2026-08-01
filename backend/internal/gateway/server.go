@@ -461,6 +461,9 @@ func (s *Server) registerRoutes() {
 	// 上传速度分析（最近 N 天每天上传量 → 平均/最大单日/高峰日，识别上传高峰）。
 	// 仅基于 created_at 一次 ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点。
 	s.mux.HandleFunc("/api/media/media-upload-velocity", s.handleMediaUploadVelocity)
+	// 上传日排行（最活跃的上传日期 top N）：按 created_at 的 UTC 日期分组，每天
+	// count+bytes，按 count 倒序取 top N（默认 10），附 total_days 与 top_day。
+	s.mux.HandleFunc("/api/media/media-upload-ranking", s.handleMediaUploadRanking)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
@@ -18921,6 +18924,127 @@ func (s *Server) handleMediaUploadVelocity(w http.ResponseWriter, r *http.Reques
 		"peak_days":       peaks,
 		"peak_threshold":  peakThreshold,
 		"peak_multiplier": 1.5,
+	})
+}
+
+// handleMediaUploadRanking GET /api/media/media-upload-ranking — 上传日排行 top N。
+//
+// 返回最活跃的上传日期排行（按单日上传量倒序取 top N，默认 10，?limit=N 可调，钳制
+// [1, 100]），供前端渲染"最忙上传日"排行榜。与 media-upload-velocity（固定窗口每日
+// counts 折线）及 media-calendar-year（整年每天热力）的区别：本端点不限时间范围，
+// 对用户全部媒体的 created_at 按日期分组后按 count 倒序取 top N，聚焦"排行"而非
+// "趋势/热力"。
+//
+// 分组依据：media.created_at（上传时间）的 UTC 日期（YYYY-MM-DD）。仅统计未软删
+// （deleted=0，ListMediaByUser 已过滤）的媒体。
+//
+// 响应结构：
+//
+//	{
+//	  "ranking":    [{rank:1, date:"2026-07-15", count:N, bytes:M}, ...], // 按 count 倒序，rank 从 1 起
+//	  "total_days": N,   // 有上传记录的总天数（即参与排行的全部日期数）
+//	  "top_day":    {date, count}  // 上传量最多的那天；无数据时 {date:"",count:0}
+//	}
+//
+// 并列排名规则：count 相同者按 date 升序（更早的排前），rank 按 1-based 序号给出
+// （并列不跳号，sort.SliceStable 保证稳定排序后顺序确定）。需认证，按 user_id
+// 隔离；store 未注入返回 503。
+func (s *Server) handleMediaUploadRanking(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// limit 默认 10，钳制 [1, 100]。
+	limit := 10
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 100 {
+				n = 100
+			}
+			limit = n
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按 created_at 的 UTC 日期分组，累加 count 与 bytes。
+	type dayStat struct {
+		Date  string
+		Count int
+		Bytes int64
+	}
+	byDay := make(map[string]*dayStat)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		day := m.CreatedAt.UTC().Format("2006-01-02")
+		if _, ok := byDay[day]; !ok {
+			byDay[day] = &dayStat{Date: day}
+		}
+		byDay[day].Count++
+		byDay[day].Bytes += m.Size
+	}
+
+	// 展开为切片，按 count 倒序、count 相同按 date 升序（更早的排前）。
+	all := make([]dayStat, 0, len(byDay))
+	for _, d := range byDay {
+		all = append(all, *d)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].Count != all[j].Count {
+			return all[i].Count > all[j].Count
+		}
+		return all[i].Date < all[j].Date
+	})
+
+	// 取 top N，带 rank（1-based）。
+	type rankItem struct {
+		Rank  int    `json:"rank"`
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+		Bytes int64  `json:"bytes"`
+	}
+	ranking := make([]rankItem, 0, limit)
+	for i := 0; i < limit && i < len(all); i++ {
+		ranking = append(ranking, rankItem{
+			Rank:  i + 1,
+			Date:  all[i].Date,
+			Count: all[i].Count,
+			Bytes: all[i].Bytes,
+		})
+	}
+
+	// top_day：上传量最多的那天。all 已按 count 倒序，第一项即冠军；无数据时 {date:"",count:0}。
+	type topDayInfo struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	topDay := topDayInfo{}
+	if len(all) > 0 {
+		topDay = topDayInfo{Date: all[0].Date, Count: all[0].Count}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ranking":    ranking,
+		"total_days": len(byDay),
+		"top_day":    topDay,
 	})
 }
 
