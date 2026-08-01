@@ -3962,6 +3962,70 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-duration-analysis — 视频时长分布分析。
+     *
+     * 后端对当前用户 VIDEO 类型媒体逐条 ffprobe 取时长（秒），归入 5 个时长分段：
+     * <30s / 30s-2min / 2-5min / 5-15min / >15min。每段返回 count 与 percentage
+     * （相对视频总数，空集时为 0），另返回 total_videos / avg_duration / max_duration
+     * （单位均为秒，Double）。ffprobe 失败或时长为 0 的条目计入 <30s 段。响应结构
+     * （与后端 [handleMediaDurationAnalysis] 对齐）：
+     *
+     * `{tiers: [{tier, count, percentage}], total_videos, avg_duration, max_duration}`
+     *
+     * - [tiers] 固定 5 项，顺序固定（短→长）。
+     * - [tier] 时长档位标签（"<30s"/"30s-2min"/"2-5min"/"5-15min"/">15min"）。
+     * - [count] / [percentage] 该档视频数量 / 占视频总数百分比（0~100，Double）。
+     * - [totalVideos] 实际取到时长的视频数。
+     * - [avgDuration] / [maxDuration] 平均/最长时长（**秒**，Double），前端按需换算展示。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaWeekdayAnalysis] / [getMediaDecadeDistribution] 同语义。
+     */
+    suspend fun getMediaDurationAnalysis(): DurationAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-duration-analysis") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val tiers = obj["tiers"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val tier = o["tier"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    DurationTier(
+                        tier = tier,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                DurationAnalysis(
+                    tiers = tiers,
+                    totalVideos = obj["total_videos"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgDuration = obj["avg_duration"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    maxDuration = obj["max_duration"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaDurationAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 视频时长分布分析结果（5 档分布 + 总数 + 平均/最长时长，与后端 media-duration-analysis 对齐）。 */
+    data class DurationAnalysis(
+        val tiers: List<DurationTier>,
+        val totalVideos: Int,
+        val avgDuration: Double,
+        val maxDuration: Double
+    )
+
+    /** 视频时长单档统计（档位标签 + 数量 + 百分比，与后端 tiers[] 对齐）。 */
+    data class DurationTier(
+        val tier: String,
+        val count: Int,
+        val percentage: Double
+    )
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与

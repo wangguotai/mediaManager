@@ -1953,6 +1953,90 @@ private fun MyTabContent(
             }
         }
 
+        // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
+        // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
+        // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
+        // avg_duration / max_duration（秒）。无视频或请求失败时返回 null，静默跳过。
+        var durationAnalysis by remember { mutableStateOf<MediaService.DurationAnalysis?>(null) }
+        LaunchedEffect(Unit) { durationAnalysis = MediaService.getMediaDurationAnalysis() }
+        durationAnalysis?.let { da ->
+            if (da.totalVideos > 0) {
+                // 时长档位最大计数，用于进度条归一化（coerceAtLeast(1) 避免除零）。
+                val maxTierCount = da.tiers.maxOf { it.count }.coerceAtLeast(1)
+                // 秒→可读单位：<60s 秒、<3600s 分钟、否则小时。commonMain 无 String.format，
+                // 沿用 toString().take 截断一位小数（与上传延迟卡片同款）。
+                fun fmtDur(sec: Double): String = when {
+                    sec < 60.0 -> "${sec.toInt()} 秒"
+                    sec < 3600.0 -> {
+                        val s = (sec / 60.0).toString()
+                        "${s.take(s.indexOf('.') + 2)} 分钟"
+                    }
+                    else -> {
+                        val s = (sec / 3600.0).toString()
+                        "${s.take(s.indexOf('.') + 2)} 小时"
+                    }
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("视频时长", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 5 行：每档 N 个 · X%，进度条按相对最大档归一化。
+                        da.tiers.forEach { t ->
+                            val ratio = (t.count.toFloat() / maxTierCount).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    t.tier,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(72.dp)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { ratio },
+                                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text(
+                                    "${t.count} 个 · ${formatPercent(t.percentage)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.width(80.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：平均时长 · 最长时长。
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("⏱ 平均 ${fmtDur(da.avgDuration)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                            Text("📏 最长 ${fmtDur(da.maxDuration)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                        }
+                        Text(
+                            "基于 ${da.totalVideos} 个视频（按 ffprobe 时长）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
