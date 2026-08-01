@@ -3962,6 +3962,74 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-season-analysis — 媒体季节分布。
+     *
+     * 后端对当前用户全部未软删媒体按 created_at（上传时间）的 UTC 月份分到四季：
+     * 春(3-5月)/夏(6-8月)/秋(9-11月)/冬(12-2月)，每季返回 count/bytes/percentage，
+     * 并给出 most_active_season（按 count 取最大）。响应结构（与后端
+     * [handleMediaSeasonAnalysis] 对齐）：
+     *
+     * `{seasons: [{season, count, bytes, percentage}], total, most_active_season}`
+     *
+     * - [seasons] 固定 4 项，顺序固定（春→夏→秋→冬）。
+     * - [season] 季节标签（"春"/"夏"/"秋"/"冬"）。
+     * - [count] 该季节上传的媒体数量。
+     * - [bytes] 该季节上传媒体的累计字节数（Long）。
+     * - [percentage] 占总量百分比（0~100，Double，两位小数）。
+     * - [mostActiveSeason] 上传量最大的季节；total=0 时后端返回 null，前端 [mostActiveSeason] 为 null。
+     * - [total] 参与分桶的未软删媒体总数。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaWeekdayAnalysis] / [getMediaDecadeDistribution] 同语义。
+     */
+    suspend fun getMediaSeasonAnalysis(): SeasonAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-season-analysis") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val seasons = obj["seasons"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val season = o["season"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    SeasonItem(
+                        season = season,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                val mostActiveSeason = obj["most_active_season"]?.takeIf { it !is JsonNull }?.let { el ->
+                    el.jsonPrimitive.contentOrNull
+                }
+                SeasonAnalysis(
+                    seasons = seasons,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    mostActiveSeason = mostActiveSeason
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSeasonAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 媒体季节分布分析结果（四季分布 + 最活跃季 + 总数，与后端 season-analysis 对齐）。 */
+    data class SeasonAnalysis(
+        val seasons: List<SeasonItem>,
+        val total: Int,
+        val mostActiveSeason: String?
+    )
+
+    /** 季节分布单条统计（季节标签 + 数量 + 字节数 + 百分比，与后端 seasons[] 对齐）。 */
+    data class SeasonItem(
+        val season: String,
+        val count: Int,
+        val bytes: Long,
+        val percentage: Double
+    )
+
+    /**
      * GET /api/media/media-duration-analysis — 视频时长分布分析。
      *
      * 后端对当前用户 VIDEO 类型媒体逐条 ffprobe 取时长（秒），归入 5 个时长分段：

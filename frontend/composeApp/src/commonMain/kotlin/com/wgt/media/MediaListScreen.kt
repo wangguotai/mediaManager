@@ -1953,6 +1953,90 @@ private fun MyTabContent(
             }
         }
 
+        // V9：季节分布卡片（调 media-season-analysis，按上传时间月份分四季统计）。
+        // 后端按 created_at 的 UTC 月份分到春(3-5)/夏(6-8)/秋(9-11)/冬(12-2)，
+        // 每季 count/bytes/percentage，另返回 most_active_season（total=0 时为 null）与 total。
+        // 前端按固定春→夏→秋→冬顺序展示，最活跃季高亮 primary 色加粗。
+        // total=0 或请求失败时 getMediaSeasonAnalysis 返回 null，静默跳过。
+        var seasonAnalysis by remember { mutableStateOf<MediaService.SeasonAnalysis?>(null) }
+        LaunchedEffect(Unit) { seasonAnalysis = MediaService.getMediaSeasonAnalysis() }
+        seasonAnalysis?.let { sa ->
+            if (sa.total > 0) {
+                // 后端已按春→夏→秋→冬固定顺序返回，无需重排；防御性兜底。
+                val ordered = sa.seasons.sortedBy { s ->
+                    when (s.season) { "春" -> 0; "夏" -> 1; "秋" -> 2; "冬" -> 3; else -> 99 }
+                }
+                val maxCount = ordered.maxOf { it.count }.coerceAtLeast(1)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("季节分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 最活跃季摘要
+                        sa.mostActiveSeason?.let { mas ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("🔥 最活跃", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("$mas（${ordered.find { it.season == mas }?.count ?: 0} 项）",
+                                    fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        // 4 行：🌸春/☀️夏/🍂秋/❄️冬 各 N 项 · X%，最活跃季高亮
+                        ordered.forEach { s ->
+                            val isMostActive = s.season == sa.mostActiveSeason && s.count > 0
+                            val barColor = if (isMostActive) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            val ratio = (s.count.toFloat() / maxCount).coerceIn(0f, 1f)
+                            val emoji = when (s.season) {
+                                "春" -> "🌸"; "夏" -> "☀️"; "秋" -> "🍂"; "冬" -> "❄️"; else -> "📅"
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    "$emoji${s.season}",
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isMostActive) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isMostActive) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(48.dp)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { ratio },
+                                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                    color = barColor,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text(
+                                    "${s.count} 项 · ${formatPercent(s.percentage)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.width(80.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "基于 ${sa.total} 项记录（按上传时间）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
