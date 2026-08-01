@@ -252,6 +252,9 @@ func (s *Server) registerRoutes() {
 	// 整年日历热力数据：按 created_at 日期分组，返回指定年份 12 个月的每日媒体数量与
 	// 字节数（仅含数据天，供前端渲染整年热力图）。默认当年（UTC），?year=2026 指定。
 	s.mux.HandleFunc("/api/media/media-calendar-year", s.handleMediaCalendarYear)
+	// 上传热力图（日期×时段二维）：按 created_at 的 UTC 日期(YYYY-MM-DD) × 时段
+	// (0-5/6-11/12-17/18-23) 二维分桶，最近 ?days=90 天，每格 count，适合日历可视化。
+	s.mux.HandleFunc("/api/media/media-upload-heatmap", s.handleMediaUploadHeatmap)
 	// 按 24 小时分布统计上传习惯（created_at 的 UTC 小时，0-23 全槽位返回）。
 	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
 	// 按星期几分析上传习惯（created_at 的 UTC Weekday，周日→周六 7 槽位 + count/percentage + 最活跃日）。
@@ -9646,6 +9649,133 @@ func (s *Server) handleMediaCalendarYear(w http.ResponseWriter, r *http.Request)
 		"days":        stats,
 		"total_count": totalCount,
 		"total_bytes": totalBytes,
+	})
+}
+
+// handleMediaUploadHeatmap GET /api/media/media-upload-heatmap — 上传热力图（日期×时段二维）。
+//
+// 按 created_at（上传时间）的 UTC 日期(YYYY-MM-DD) × 时段二维分桶，返回最近 ?days=90
+// 天内每格的上传数量，供前端渲染日历热力图（每个日期一行、4 个时段一列）。
+//
+// 时段定义（6 小时一格，slot 为 0-3 的整数索引）：
+//
+//	0 → 0-5  (深夜)   1 → 6-11  (上午)
+//	2 → 12-17 (下午)  3 → 18-23 (晚上)
+//
+// 分组依据：media.created_at 的 UTC 日期与小时。仅统计未软删（ListMediaByUser 已
+// 过滤 deleted=0）且落在时间窗口 [now-days, now] 内的媒体。只返回有数据的格（count>0），
+// 按 date 升序、slot 升序排列；空格前端按需补 0。
+//
+// 响应结构：
+//
+//	{
+//	  "heatmap":      [{"date":"2026-08-01","slot":2,"count":N}, ...], // 升序
+//	  "total_slots":  M,    // 非空格数（= heatmap 长度）
+//	  "max_count":    K,    // 单格最大上传数
+//	  "days_covered": D     // 至少有一条上传的独立日期数
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaUploadHeatmap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// days 默认 90，?days=N 指定；非法/越界回退到 90。范围 [1, 365]。
+	days := 90
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 365 {
+				n = 365
+			}
+			days = n
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 时间窗口 [windowStart, now]，按 UTC 日期归桶。
+	now := time.Now().UTC()
+	windowStart := now.AddDate(0, 0, -days)
+
+	// slotOf 把 UTC 小时映射到 4 个 6 小时时段索引：0(0-5)/1(6-11)/2(12-17)/3(18-23)。
+	slotOf := func(hour int) int {
+		switch {
+		case hour < 6:
+			return 0
+		case hour < 12:
+			return 1
+		case hour < 18:
+			return 2
+		default:
+			return 3
+		}
+	}
+
+	// 二维桶：key = date + "|" + slot → count。
+	type cell struct {
+		Date  string `json:"date"`
+		Slot  int    `json:"slot"`
+		Count int    `json:"count"`
+	}
+	buckets := make(map[string]*cell)
+	seenDays := make(map[string]struct{})
+	var maxCount int
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		ca := m.CreatedAt.UTC()
+		if ca.Before(windowStart) {
+			continue
+		}
+		date := ca.Format("2006-01-02")
+		slot := slotOf(ca.Hour())
+		key := date + "|" + strconv.Itoa(slot)
+		c, ok := buckets[key]
+		if !ok {
+			c = &cell{Date: date, Slot: slot}
+			buckets[key] = c
+			seenDays[date] = struct{}{}
+		}
+		c.Count++
+		if c.Count > maxCount {
+			maxCount = c.Count
+		}
+	}
+
+	// 按 date 升序、再按 slot 升序输出（稳定顺序，便于前端顺序渲染）。
+	cells := make([]cell, 0, len(buckets))
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		cells = append(cells, *buckets[k])
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"heatmap":      cells,
+		"total_slots":  len(cells),
+		"max_count":    maxCount,
+		"days_covered": len(seenDays),
 	})
 }
 
