@@ -1032,6 +1032,7 @@ func (s *Store) ListShareTokensByUser(ctx context.Context, userID string) ([]*Sh
 			return nil, fmt.Errorf("scan share token: %w", err)
 		}
 		st.ExpiresAt = timeFromVal(expiresAt)
+		st.CreatedAt = timeFromVal(createdAt)
 		st.HasPassword = st.PasswordHash != ""
 		result = append(result, &st)
 	}
