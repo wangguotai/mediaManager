@@ -225,6 +225,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-growth-milestone", s.handleMediaGrowthMilestone)
 	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
 	s.mux.HandleFunc("/api/media/weekly-summary", s.handleWeeklySummary)
+	// 相册覆盖率分析：统计在/不在相册中的媒体数量，给出待整理建议。
+	s.mux.HandleFunc("/api/media/media-album-coverage", s.handleMediaAlbumCoverage)
 	// V8：媒体生命周期分析
 	s.mux.HandleFunc("/api/media/media-lifecycle", s.handleMediaLifecycle)
 	// V13：年度回顾报告（某年媒体统计摘要：总览/月分布/类型分布/收藏数/上传最忙日）。
@@ -7914,6 +7916,114 @@ func (s *Server) handleMediaGrowthMilestone(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleMediaAlbumCoverage GET /api/media/media-album-coverage — 相册覆盖率分析。
+//
+// 统计当前用户媒体库的相册覆盖情况：多少媒体被收纳进至少一个相册、多少游离在外，
+// 并据此给出"待整理"建议。供前端展示媒体库整理度 / 相册健康卡片。
+//
+// 计算口径：
+//   - total_media：用户全部未软删媒体数（store.ListMediaByUser，已过滤 deleted=1）。
+//   - in_album：出现在至少一个相册 MediaIDs 中的媒体数（按 media_id 去重）。
+//   - not_in_album：total - in_album。
+//   - coverage_percent：in_album / total * 100，保留两位小数；total=0 时为 0。
+//   - album_count：用户相册总数（albumStoreProvider.ListAlbums）。
+//   - avg_per_album：所有相册 MediaIDs 合计长度 / album_count，保留一位小数；
+//     album_count=0 时为 0（避免除零）。注意这是"每相册平均成员数"，含跨相册重复。
+//   - suggestion：若 not_in_album > 10，提示"有 N 个媒体未分类"；否则为""。
+//
+// 数据来源与 weekly-summary 同族：media 用 s.store.ListMediaByUser，相册用 mediaSvc 的
+// albumStoreProvider.ListAlbums。需认证，按 user_id 隔离；store 未注入返回 503；
+// mediaSvc 不支持相册时按 album_count=0 / in_album=0 计算（仅返回媒体总量与覆盖率 0）。
+//
+// 响应结构：
+//
+//	{
+//	  "total_media": N,
+//	  "in_album": N,
+//	  "not_in_album": N,
+//	  "coverage_percent": 12.34,
+//	  "album_count": N,
+//	  "avg_per_album": 3.2,
+//	  "suggestion": "有 N 个媒体未分类" 或 ""
+//	}
+func (s *Server) handleMediaAlbumCoverage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	totalMedia := len(mediaList)
+	if totalMedia == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"total_media":       0,
+			"in_album":          0,
+			"not_in_album":      0,
+			"coverage_percent":  0.0,
+			"album_count":       0,
+			"avg_per_album":     0.0,
+			"suggestion":        "",
+		})
+		return
+	}
+
+	// 收集所有相册成员 media_id（去重），统计相册数与总成员数。
+	albumCount := 0
+	totalMembership := 0 // ∑|album.MediaIDs|，含跨相册重复
+	inAlbumSet := make(map[string]struct{}, totalMedia)
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		for _, a := range provider.ListAlbums(uid) {
+			albumCount++
+			totalMembership += len(a.MediaIDs)
+			for _, mid := range a.MediaIDs {
+				inAlbumSet[mid] = struct{}{}
+			}
+		}
+	}
+
+	inAlbum := len(inAlbumSet)
+	notInAlbum := totalMedia - inAlbum
+	if notInAlbum < 0 {
+		notInAlbum = 0 // 防御：相册里可能出现已删除/不存在的 id，不计入已在库内覆盖率
+	}
+	coveragePercent := 0.0
+	if totalMedia > 0 {
+		coveragePercent = float64(inAlbum) / float64(totalMedia) * 100
+	}
+	avgPerAlbum := 0.0
+	if albumCount > 0 {
+		avgPerAlbum = float64(totalMembership) / float64(albumCount)
+	}
+
+	suggestion := ""
+	if notInAlbum > 10 {
+		suggestion = fmt.Sprintf("有 %d 个媒体未分类", notInAlbum)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_media":       totalMedia,
+		"in_album":          inAlbum,
+		"not_in_album":      notInAlbum,
+		"coverage_percent":  coveragePercent,
+		"album_count":       albumCount,
+		"avg_per_album":     avgPerAlbum,
+		"suggestion":        suggestion,
+	})
 }
 
 // handleWeeklySummary GET /api/media/weekly-summary — 周报摘要。
