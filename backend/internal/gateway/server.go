@@ -199,6 +199,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/time-distribution", s.handleMediaTimeDistribution)
 	// V9：按月统计媒体数量（所有媒体 created_at 的 YYYY-MM 分布，不限时间范围）。
 	s.mux.HandleFunc("/api/media/media-count-by-month", s.handleMediaCountByMonth)
+	// 月度亮点（最近 N 个月，每月首上传/最大文件/末上传）。仅基于 created_at 一次
+	// ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点。?months=6 默认 6，范围 [1,120]。
+	s.mux.HandleFunc("/api/media/media-monthly-highlights", s.handleMediaMonthlyHighlights)
 	// 按年份统计媒体（每年的 count + bytes + 按月分布 + 按类型分布）。默认当年（UTC），?year=2026 指定。
 	s.mux.HandleFunc("/api/media/media-year-stats", s.handleMediaYearStats)
 	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
@@ -6358,6 +6361,143 @@ func (s *Server) handleMediaCountByMonth(w http.ResponseWriter, r *http.Request)
 		"months":       months,
 		"total_months": len(months),
 		"total_media":  totalMedia,
+	})
+}
+
+// handleMediaMonthlyHighlights GET /api/media/media-monthly-highlights — 月度亮点。
+//
+// 返回最近 N 个月（?months=6 默认 6，范围 [1,120]）每月的亮点媒体：
+//   - first_upload : 该月第一个（最早）上传的 media {id, filename}
+//   - largest_file : 该月最大的 media {id, filename, size}（多个并列取 size 最大者；
+//     size 再并列取最早上传者，保证稳定输出）
+//   - last_upload  : 该月最后一个（最晚）上传的 media {id, filename}
+//
+// 仅基于 created_at（上传时间）一次 ListMediaByUser 全量拉取后在 Go 侧按 UTC 月分桶
+// 聚合，只读端点。月份按 YYYY-MM 降序返回（最近月在最前）；最近 N 个月固定包含当前 UTC
+// 月，即使该月无上传也返回（对应亮点字段为 null）。需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "months": [
+//	    {"month":"2026-08","first":{...}|null,"largest":{...}|null,"last":{...}|null},
+//	    ...
+//	  ],                              // 降序，最近月在最前
+//	  "total_months": N               // 实际返回的月数（= 请求的 months，含空月）
+//	}
+func (s *Server) handleMediaMonthlyHighlights(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// ?months= 默认 6，范围 [1,120]。
+	monthsParam := 6
+	if v := r.URL.Query().Get("months"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			monthsParam = n
+			if monthsParam > 120 {
+				monthsParam = 120
+			}
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 1) 构造最近 monthsParam 个月的目标月份键（YYYY-MM），降序（最近月在最前）。
+	//    以当前 UTC 月为终点往前推。
+	now := time.Now().UTC()
+	monthKeys := make([]string, 0, monthsParam)
+	for i := 0; i < monthsParam; i++ {
+		// AddDate(0, -i, 0) 第 i 步回到月初；Format("2006-01") 取 YYYY-MM。
+		y, m := now.AddDate(0, -i, 0).Year(), now.AddDate(0, -i, 0).Month()
+		monthKeys = append(monthKeys, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC).Format("2006-01"))
+	}
+	// 月份集合（快速查表）：命中即纳入聚合。
+	monthSet := make(map[string]int, len(monthKeys)) // key → 在 monthKeys 中的下标
+	for i, k := range monthKeys {
+		monthSet[k] = i
+	}
+
+	// 2) 每月的亮点候选。empty/nil 表示该月暂无命中。
+	type mediaRef struct {
+		ID         string
+		Filename   string
+		Size       int64
+		OccurredAt time.Time
+	}
+	type monthHL struct {
+		First   *mediaRef // 最早上传（OccurredAt 最小）
+		Largest *mediaRef // 最大文件（Size 最大；并列取最早上传）
+		Last    *mediaRef // 最晚上传（OccurredAt 最大）
+	}
+	months := make([]monthHL, len(monthKeys)) // index 与 monthKeys 对齐
+
+	for _, m := range mediaList {
+		key := m.CreatedAt.UTC().Format("2006-01") // .UTC() FIRST — 代码库约定
+		idx, ok := monthSet[key]
+		if !ok {
+			continue // 非目标月，跳过
+		}
+		ref := &mediaRef{ID: m.ID, Filename: m.Filename, Size: m.Size, OccurredAt: m.CreatedAt.UTC()}
+
+		cur := &months[idx]
+		// first：最早上传。空或更早即更新。
+		if cur.First == nil || ref.OccurredAt.Before(cur.First.OccurredAt) {
+			cur.First = ref
+		}
+		// last：最晚上传。空或更晚即更新。
+		if cur.Last == nil || ref.OccurredAt.After(cur.Last.OccurredAt) {
+			cur.Last = ref
+		}
+		// largest：最大文件。空 / 更大 / (并列 size 且更早) 即更新。
+		if cur.Largest == nil {
+			cur.Largest = ref
+		} else if ref.Size > cur.Largest.Size {
+			cur.Largest = ref
+		} else if ref.Size == cur.Largest.Size && ref.OccurredAt.Before(cur.Largest.OccurredAt) {
+			cur.Largest = ref
+		}
+	}
+
+	// 3) 组装响应。月按降序（monthKeys 已是降序），空月亮点为 null。
+	out := make([]map[string]any, 0, len(monthKeys))
+	for i, k := range monthKeys {
+		hl := months[i]
+		var first, largest, last any
+		if hl.First != nil {
+			first = map[string]any{"id": hl.First.ID, "filename": hl.First.Filename}
+		}
+		if hl.Largest != nil {
+			largest = map[string]any{"id": hl.Largest.ID, "filename": hl.Largest.Filename, "size": hl.Largest.Size}
+		}
+		if hl.Last != nil {
+			last = map[string]any{"id": hl.Last.ID, "filename": hl.Last.Filename}
+		}
+		out = append(out, map[string]any{
+			"month":   k,
+			"first":   first,
+			"largest": largest,
+			"last":    last,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"months":       out,
+		"total_months": len(out),
 	})
 }
 
