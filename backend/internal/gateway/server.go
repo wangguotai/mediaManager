@@ -437,6 +437,12 @@ func (s *Server) registerRoutes() {
 	// 与 tag-co-occurrence 的区别：后者只返 co>=2 的稀疏标签对（列表视角），
 	// 本端点返完整 N×N 矩阵，适合热力图 / 弦图等矩阵可视化。
 	s.mux.HandleFunc("/api/media/media-tag-correlation", s.handleMediaTagCorrelation)
+	// 标签网络图（节点+边+共现权重）：取 top N 标签（?limit=20，按关联媒体数 DESC）
+	// 作为节点（tag+media_count），标签对共现（Jaccard 相似度）作为边（source+target+weight）。
+	// 区别于 tag-network（用集合大小作 count、纯交集大小作 weight、无 limit）：本端点用
+	// Jaccard 系数（交集/并集）作 weight（0-1，归一化相似度），并支持 limit 截断 top 标签，
+	// 返回 {nodes:[{tag,media_count}], edges:[{source,target,weight}], total_nodes, total_edges}。
+	s.mux.HandleFunc("/api/media/media-tag-network", s.handleMediaTagNetwork)
 	// 标签层级分析：自动分析标签名中的分隔符（- / : 等）推断父子关系，
 	// 如 "旅行-国内"、"旅行-国外" 的父节点为 "旅行"。无分隔符的标签作为顶层。
 	// 返回 {hierarchy: [{tag, count, children: [...]}], total_roots}，供前端树形展示。
@@ -10657,6 +10663,130 @@ func (s *Server) handleTagNetwork(w http.ResponseWriter, r *http.Request) {
 			if weight >= 1 {
 				edges = append(edges, netEdge{Source: a, Target: b, Weight: weight})
 			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes":       nodes,
+		"edges":       edges,
+		"total_nodes": len(nodes),
+		"total_edges": len(edges),
+	})
+}
+
+// handleMediaTagNetwork GET /api/media/media-tag-network — 标签网络图（节点+边+共现权重）。
+// 取该用户全部标签（ListAllTags），对每个标签调 SearchMediaByTag 取关联 media_id 集合，
+// 按 media_count DESC 排序后截 top ?limit（默认 20，上限 200）作为节点；对节点对 (i<j)
+// 计算 Jaccard 相似度 = |A∩B| / |A∪B| 作为边权重（0-1，归一化），仅保留 weight>0 的边。
+//
+// 响应:
+//
+//	{
+//	  "nodes": [{tag, media_count}],          // top N 标签节点
+//	  "edges": [{source, target, weight}],    // 共现边（Jaccard，0-1）
+//	  "total_nodes",                          // 入选节点数（=len(nodes)）
+//	  "total_edges"                           // 入选边数（=len(edges)）
+//	}
+//
+// 与 tag-network 的区别：后者用集合大小作 count、纯交集大小作 weight（整数共现数）、无 limit；
+// 本端点用 Jaccard 系数（0-1 归一化相似度）作 weight，并支持 limit 截断 top 标签，使网络图
+// 在标签数较大时仍能控制规模且边权重可跨标签对横向比较。
+func (s *Server) handleMediaTagNetwork(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	// limit：默认 20，范围 [1,200]。
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 200 {
+				n = 200
+			}
+			limit = n
+		}
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 为每个标签构造 media_id 集合；集合大小即 media_count。
+	type netNode struct {
+		Tag       string `json:"tag"`
+		MediaCount int   `json:"media_count"`
+	}
+	type netEdge struct {
+		Source string  `json:"source"`
+		Target string  `json:"target"`
+		Weight float64 `json:"weight"`
+	}
+	tagMedia := make(map[string]map[string]struct{}, len(tags))
+	preNodes := make([]netNode, 0, len(tags))
+	for _, t := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		tagMedia[t] = set
+		preNodes = append(preNodes, netNode{Tag: t, MediaCount: len(set)})
+	}
+	// 按 media_count DESC 排序后截 top limit 作为图中节点。
+	sort.Slice(preNodes, func(i, j int) bool {
+		return preNodes[i].MediaCount > preNodes[j].MediaCount
+	})
+	if limit > len(preNodes) {
+		limit = len(preNodes)
+	}
+	nodes := preNodes[:limit]
+	// 仅保留入选节点的 media_id 集合，按 tag 索引，便于求交/并。
+	selected := make(map[string]map[string]struct{}, limit)
+	for _, n := range nodes {
+		selected[n.Tag] = tagMedia[n.Tag]
+	}
+	// 对节点对 (i<j) 计算 Jaccard = |A∩B| / |A∪B|，weight>0 时纳入边集。
+	edges := make([]netEdge, 0)
+	for i := 0; i < len(nodes); i++ {
+		a := nodes[i].Tag
+		setA := selected[a]
+		for j := i + 1; j < len(nodes); j++ {
+			b := nodes[j].Tag
+			setB := selected[b]
+			inter := 0
+			// 求交集：遍历较小集合查较大集合。
+			small, large := setA, setB
+			if len(small) > len(large) {
+				small, large = large, small
+			}
+			for id := range small {
+				if _, ok := large[id]; ok {
+					inter++
+				}
+			}
+			if inter == 0 {
+				continue // 无共现，不发边
+			}
+			union := len(setA) + len(setB) - inter
+			weight := 0.0
+			if union > 0 {
+				weight = float64(inter) / float64(union)
+			}
+			edges = append(edges, netEdge{Source: a, Target: b, Weight: weight})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
