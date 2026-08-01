@@ -450,6 +450,11 @@ func (s *Server) registerRoutes() {
 	// 如 "旅行-国内"、"旅行-国外" 的父节点为 "旅行"。无分隔符的标签作为顶层。
 	// 返回 {hierarchy: [{tag, count, children: [...]}], total_roots}，供前端树形展示。
 	s.mux.HandleFunc("/api/media/tag-hierarchy", s.handleTagHierarchy)
+	// 标签层级V2：按标签名中的 "/" 分隔符自动发现多层父子关系（如 "旅行/日本/东京"
+	// → 旅行 > 日本 > 东京），并辅以语义后缀匹配（如 "旅行" 是 "日本旅行" 的父标签，
+	// 因子标签以父标签词结尾）推断隐式层级。返回 {hierarchy: [{parent, children:[...],
+	// total_media}], total_roots, total_depth}，供前端树形 / 旭日图展示。
+	s.mux.HandleFunc("/api/media/media-tag-hierarchy-v2", s.handleMediaTagHierarchyV2)
 	// V8：标签云数据（标签 + count + 关联的最近缩略图 URL）
 	s.mux.HandleFunc("/api/media/tag/cloud-data", s.handleMediaTagCloudData)
 	// V8：重命名标签
@@ -11202,6 +11207,250 @@ func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
 		"hierarchy":   hierarchy,
 		"total_roots": len(hierarchy),
 		"total_tags":  len(tags),
+	})
+}
+
+// handleMediaTagHierarchyV2 GET /api/media/media-tag-hierarchy-v2 — 标签层级V2。
+// 相比 V1（仅按 - / : 单层分隔符推断），V2 支持多层嵌套并融合两种发现策略：
+//
+//  1. 分隔符层级（主导）：按 "/" 分隔符切分标签名还原完整路径层级。如 "旅行/日本/东京"
+//     推断为 旅行 → 日本 → 东京 三级；"旅行/美食/大阪" 中 "旅行/美食" 视为独立路径片段。
+//     分隔符限定为 "/"（V1 的 - 与 : 易与普通标签名噪声冲突，V2 收窄为路径风格分隔符）。
+//     任意一级的"父路径片段"只有在用户存在以该片段结尾的标签（即分隔符切出的前缀恰好
+//     等于某现存完整标签名），才被认可为显式父节点；否则仅按切分路径隐式建层
+//     （父节点为合成路径片段，不强行绑定 count，但仍计入层级与 depth）。
+//  2. 语义后缀匹配（补充）：对不含 "/" 的标签，若某标签完整以另一独立标签结尾
+//     （如 "日本旅行" 以 "旅行" 结尾），则视前者为后者的子标签。仅处理无 "/" 的标签，
+//     避免与分隔符层级规则冲突；长度差过小（≤1 字符）不视为有效父子（噪声）。
+//
+// 输出: {hierarchy: [{parent, children: [...], total_media}], total_roots, total_depth}
+//   - hierarchy：每个根标签一条记录；parent=根标签名，children=其直系子标签全名列表
+//     （含路径前缀，如 "旅行/日本"），按名字升序；total_media=该子树（parent 自身 +
+//     所有后代）关联的去重 media 数。
+//   - total_roots：根标签数（即 hierarchy 数组长度）。
+//   - total_depth：最大嵌套深度（根=1）。
+//
+// 数据口径：ListAllTags 取全量标签名（升序）；TagStats 取每个标签计数（仅参考）；
+// SearchMediaByTag 取每个标签关联 media_id 集合，子树级求并集去重得 total_media。
+func (s *Server) handleMediaTagHierarchyV2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// 每个标签关联的 media_id 集合，用于子树求并集得 total_media。
+	mediaOf := make(map[string]map[string]struct{}, len(tags))
+	for _, t := range tags {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		mediaOf[t] = set
+	}
+
+	// tagSet 用于 O(1) 判断标签是否独立存在。
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		tagSet[t] = struct{}{}
+	}
+
+	// ---- 构建父子关系（parent → child 完整标签名）----
+	// parents:   child 全名 → parent 全名（或合成路径片段）
+	// isSyntheticRoot: 合成路径片段（非用户独立标签）作为隐式父节点
+	parentOf := make(map[string]string, len(tags))
+	syntheticRoot := make(map[string]struct{})
+
+	// 1) 分隔符层级：按 "/" 切分，逐段推断父节点。
+	for _, t := range tags {
+		if !strings.Contains(t, "/") {
+			continue
+		}
+		parts := strings.Split(t, "/")
+		// 父路径 = 去掉最后一段的前缀。
+		parentPath := strings.Join(parts[:len(parts)-1], "/")
+		if parentPath == "" {
+			continue
+		}
+		if _, exists := tagSet[parentPath]; exists {
+			// 父路径恰好是用户独立标签 → 显式父节点。
+			parentOf[t] = parentPath
+		} else {
+			// 父路径非独立标签 → 合成隐式父节点（仍参与层级，但不在 tagSet 中）。
+			parentOf[t] = parentPath
+			syntheticRoot[parentPath] = struct{}{}
+		}
+	}
+
+	// 2) 语义后缀匹配：对不含 "/" 的标签，若某标签完整以另一独立标签结尾，
+	//    视前者为后者的子标签。仅对尚未有分隔符父节点的标签生效，避免覆盖分隔符规则。
+	//    长度差需 >1 字符（避免 "旅行" / "旅行2" 这类噪声）。
+	hasSepParent := func(t string) bool {
+		_, ok := parentOf[t]
+		return ok
+	}
+	for _, child := range tags {
+		if strings.Contains(child, "/") || hasSepParent(child) {
+			continue
+		}
+		// 找最短后缀父候选（最具体的语义父者优先；若多个父长度相等取字典序最小，稳定）。
+		var bestParent string
+		for _, cand := range tags {
+			if cand == child {
+				continue
+			}
+			if strings.Contains(cand, "/") {
+				continue
+			}
+			if hasSepParent(cand) {
+				continue
+			}
+			// child 必须以 cand 结尾且 cand 是 child 的真后缀。
+			if !strings.HasSuffix(child, cand) {
+				continue
+			}
+			if len(child)-len(cand) <= 1 {
+				continue
+			}
+			// 排除"中间对齐但被半字截断"误判：要求 cand 出现位置是完整词尾。
+			if bestParent == "" || len(cand) < len(bestParent) ||
+				(len(cand) == len(bestParent) && cand < bestParent) {
+				bestParent = cand
+			}
+		}
+		if bestParent != "" {
+			parentOf[child] = bestParent
+		}
+	}
+
+	// ---- childrenOf: parent → []child（升序，ListAllTags 已升序故保持顺序）----
+	childrenOf := make(map[string][]string)
+	for _, t := range tags {
+		if p, ok := parentOf[t]; ok {
+			childrenOf[p] = append(childrenOf[p], t)
+		}
+	}
+	// 合成隐式父节点也需登记到 childrenOf（其子标签已通过 parentOf 指向它）。
+
+	// ---- isRoot: 一个标签是根 ⟺ 它不是任何节点（含合成节点）的子节点 ----
+	// 根候选 = 全部独立标签 ∪ 全部合成路径片段，排除掉作为他人子节点的。
+	childMarker := make(map[string]struct{}, len(parentOf))
+	for _, p := range parentOf {
+		_ = p
+	}
+	for c := range parentOf {
+		childMarker[c] = struct{}{}
+	}
+	rootCandidates := make([]string, 0, len(tags)+len(syntheticRoot))
+	for _, t := range tags {
+		if _, isChild := childMarker[t]; !isChild {
+			rootCandidates = append(rootCandidates, t)
+		}
+	}
+	// 合成隐式根：合成路径片段本身没有 parentOf 条目指向它（合成节点不是任何 tag 的
+	// 独立标签），所以只要它没有出现在 parentOf 的 key 中就是根。
+	for p := range syntheticRoot {
+		if _, isChild := parentOf[p]; !isChild {
+			rootCandidates = append(rootCandidates, p)
+		}
+	}
+	// 升序去重。
+	sort.Strings(rootCandidates)
+	{
+		seen := make(map[string]struct{}, len(rootCandidates))
+		uniq := rootCandidates[:0]
+		for _, r := range rootCandidates {
+			if _, ok := seen[r]; ok {
+				continue
+			}
+			seen[r] = struct{}{}
+			uniq = append(uniq, r)
+		}
+		rootCandidates = uniq
+	}
+
+	// ---- 子树 total_media（去重并集）与 depth ----
+	// subtreeMedia(root): 返回 root 子树（含 root 自身，若 root 为独立标签）合并 media_id 集合。
+	var subtreeMedia func(root string, visited map[string]struct{}) map[string]struct{}
+	subtreeMedia = func(root string, visited map[string]struct{}) map[string]struct{} {
+		if _, cycling := visited[root]; cycling {
+			return map[string]struct{}{}
+		}
+		visited[root] = struct{}{}
+		out := make(map[string]struct{})
+		if ids, ok := mediaOf[root]; ok {
+			for id := range ids {
+				out[id] = struct{}{}
+			}
+		}
+		for _, c := range childrenOf[root] {
+			for id := range subtreeMedia(c, visited) {
+				out[id] = struct{}{}
+			}
+		}
+		return out
+	}
+	var depthOf func(root string, visited map[string]struct{}) int
+	depthOf = func(root string, visited map[string]struct{}) int {
+		if _, cycling := visited[root]; cycling {
+			return 0
+		}
+		visited[root] = struct{}{}
+		maxChild := 0
+		for _, c := range childrenOf[root] {
+			if d := depthOf(c, visited); d > maxChild {
+				maxChild = d
+			}
+		}
+		return 1 + maxChild
+	}
+
+	type node struct {
+		Parent     string   `json:"parent"`
+		Children   []string `json:"children"`
+		TotalMedia int      `json:"total_media"`
+	}
+	hierarchy := make([]node, 0, len(rootCandidates))
+	totalDepth := 0
+	for _, root := range rootCandidates {
+		kids := childrenOf[root]
+		if kids == nil {
+			kids = []string{}
+		}
+		// 拷贝避免 childrenOf 切片被多次引用（输出数组安全）。
+		outKids := append([]string(nil), kids...)
+		d := depthOf(root, map[string]struct{}{})
+		if d > totalDepth {
+			totalDepth = d
+		}
+		hierarchy = append(hierarchy, node{
+			Parent:     root,
+			Children:   outKids,
+			TotalMedia: len(subtreeMedia(root, map[string]struct{}{})),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hierarchy":   hierarchy,
+		"total_roots": len(hierarchy),
+		"total_depth": totalDepth,
 	})
 }
 
