@@ -1232,6 +1232,17 @@ private fun MyTabContent(
             }
         }
 
+        // 交互汇总卡片 —— 调 media-interaction-summary 展示操作总量+日均、最频繁操作、
+        // 趋势方向、各操作分布 top 5。置于收藏分析卡片之后、用户信息卡片之前。
+        // null 或 totalActions==0 时静默跳过（不占位），与总览/收藏分析卡片同等空态处理。
+        var interactionSummary by remember { mutableStateOf<MediaService.InteractionSummary?>(null) }
+        LaunchedEffect(Unit) { interactionSummary = MediaService.getMediaInteractionSummary() }
+        interactionSummary?.let { is_ ->
+            if (is_.totalActions > 0) {
+                InteractionSummaryCard(is_)
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(
@@ -6665,6 +6676,189 @@ private fun CameraStatsCard(cameras: List<MediaService.CameraStat>) {
             }
         }
     }
+}
+
+/**
+ * 交互汇总卡片 —— 「我的」Tab 中展示最近 N 天操作分布 + 趋势。
+ *
+ * 后端 `GET /api/media/media-interaction-summary?days=30` 基于 audit_log 统计：
+ * 操作总次数、各操作类型分布、最频繁操作、日均操作数、最近 7 天 vs 之前 7 天趋势方向。
+ *
+ * 卡片结构：总操作 N 次 · 日均 X 次 → 最频繁: action → 趋势: ↑/↓/→ → 各操作分布 top 5。
+ * `byAction` 为后端操作名→次数（count-only，无 percentage 字段），故用 [Box] 比例条
+ *（与色温/拍摄地点卡片同款），宽度按 maxCount 归一；最频繁行高亮 primary。
+ *
+ * 调用方负责 null/空态过滤，本函数假定 [is_] 的 totalActions > 0。
+ *
+ * @param is_ 交互汇总对象（总量、分布、最频繁、日均、趋势、窗口天数）
+ */
+@Composable
+private fun InteractionSummaryCard(is_: MediaService.InteractionSummary) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("交互汇总", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(12.dp))
+            // 总操作 N 次 · 日均 X 次（dailyAvg 截断一位小数，commonMain 无 String.format）。
+            val avgStr = is_.dailyAvg.toString().let { s ->
+                if (s.indexOf('.') >= 0) s.take(s.indexOf('.') + 2) else s
+            }
+            Text(
+                "总操作 ${is_.totalActions} 次 · 日均 $avgStr 次",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            // 最频繁操作（action emoji + 中文名）。
+            if (is_.mostFrequent.isNotEmpty()) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "最频繁: ${actionEmoji(is_.mostFrequent)} ${actionName(is_.mostFrequent)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    // 趋势方向：up→↑ / down→↓ / flat→→ / 空→—。
+                    val (trendArrow, trendColor) = when (is_.trendDirection) {
+                        "up" -> "↑" to Color(0xFF2E7D32)
+                        "down" -> "↓" to Color(0xFFC62828)
+                        "flat" -> "→" to MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> "—" to MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    }
+                    Text(
+                        "趋势: $trendArrow",
+                        fontSize = 12.sp,
+                        color = trendColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else {
+                // 无 most_frequent（空数据）时单独展示趋势行。
+                val (trendArrow, trendColor) = when (is_.trendDirection) {
+                    "up" -> "↑" to Color(0xFF2E7D32)
+                    "down" -> "↓" to Color(0xFFC62828)
+                    "flat" -> "→" to MaterialTheme.colorScheme.onSurfaceVariant
+                    else -> "—" to MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "趋势: $trendArrow",
+                        fontSize = 12.sp,
+                        color = trendColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            // 各操作分布 top 5：byAction 为 count-only map（无 percentage），用 Box 比例条。
+            // 倒序取前 5、过滤 0，maxCount 归一化条宽；most_frequent 行高亮 primary。
+            if (is_.byAction.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "操作分布",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                val top = is_.byAction.entries
+                    .sortedByDescending { it.value }
+                    .take(5)
+                    .filter { it.value > 0 }
+                val maxCount = top.maxOf { it.value }.coerceAtLeast(1)
+                top.forEach { (action, count) ->
+                    val isDominant = action == is_.mostFrequent
+                    val barColor = if (isDominant) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "${actionEmoji(action)} ${actionName(action)}",
+                            fontSize = 12.sp,
+                            color = if (isDominant) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (isDominant) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        // Box 比例条：宽度按 count/maxCount 归一，4.dp 高。
+                        Box(
+                            modifier = Modifier
+                                .width(72.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.surface)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(
+                                        (count.toFloat() / maxCount).coerceIn(0f, 1f)
+                                    )
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(barColor)
+                            )
+                        }
+                        Text(
+                            "$count 次",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.width(48.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                            fontWeight = if (isDominant) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+            // 窗口天数脚注。
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "基于 ${is_.totalDays} 天数据",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+            )
+        }
+    }
+}
+
+/**
+ * 交互操作 action → emoji。与设置页活跃度评分卡的 emoji 映射一致。
+ */
+private fun actionEmoji(action: String): String = when (action) {
+    "upload" -> "📤"
+    "favorite" -> "⭐"
+    "share" -> "🔗"
+    "tag" -> "🏷️"
+    "rename" -> "✏️"
+    "rotate" -> "🔄"
+    "delete" -> "🗑️"
+    "download" -> "⬇️"
+    "view" -> "👁️"
+    else -> "•"
+}
+
+/**
+ * 交互操作 action → 中文名。与设置页活跃度评分卡的中文映射一致。
+ */
+private fun actionName(action: String): String = when (action) {
+    "upload" -> "上传"
+    "favorite" -> "收藏"
+    "share" -> "分享"
+    "tag" -> "打标签"
+    "rename" -> "重命名"
+    "rotate" -> "旋转"
+    "delete" -> "删除"
+    "download" -> "下载"
+    "view" -> "查看"
+    else -> action
 }
 
 /**

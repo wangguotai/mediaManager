@@ -9154,6 +9154,82 @@ object MediaService {
     }
 
     /**
+     * 最近 N 天交互汇总（操作分布 + 趋势）。
+     *
+     * 对应后端 `GET /api/media/media-interaction-summary?days=30`（基于 audit_log 统计）。
+     * 响应字段（snake_case）：
+     * - `total_actions`：窗口内操作总次数
+     * - `by_action`：各操作类型→次数（`upload`/`favorite`/`share`/`tag`/`rename`/`rotate`…）
+     * - `most_frequent`：最频繁操作类型字符串；无数据时后端为 JSON null
+     * - `daily_avg`：日均操作次数（Double）
+     * - `trend_direction`：最近 7 天 vs 之前 7 天的操作趋势 `"up"`/`"down"`/`"flat"`；无数据时为 JSON null
+     * - `total_days`：统计窗口天数
+     *
+     * [byAction] 保留后端操作名键 + 次数；[mostFrequent] / [trendDirection] 缺失回退空串。
+     * getter 非 200 或异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @param totalActions 窗口内操作总次数
+     * @param byAction     各操作类型→次数（后端键名小写 action 名）
+     * @param mostFrequent 最频繁操作类型；无数据为空串
+     * @param dailyAvg     日均操作次数
+     * @param trendDirection `"up"`/`"down"`/`"flat"`；无数据为空串
+     * @param totalDays    统计窗口天数
+     */
+    data class InteractionSummary(
+        val totalActions: Int,
+        val byAction: Map<String, Int>,
+        val mostFrequent: String,
+        val dailyAvg: Double,
+        val trendDirection: String,
+        val totalDays: Int
+    )
+
+    /**
+     * GET /api/media/media-interaction-summary?days=N — 最近 N 天交互汇总。
+     *
+     * 后端基于 audit_log 统计操作总量、各操作类型分布、最频繁操作、日均、以及最近 7 天 vs
+     * 之前 7 天趋势方向（`up`/`down`/`flat`）。`most_frequent` 与 `trend_direction` 在窗口无
+     * 数据时后端返回 JSON null，需 `takeIf { it !is JsonNull }` 守卫。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaFavoriteAnalysis] 同款），不附加 per-call 鉴权头
+     *（Bearer 由 [jsonClient] 的 `defaultRequest` 统一注入）。`by_action` 缺失返回空 Map。
+     *
+     * @param days 统计窗口天数（默认 30，后端 clamp [1,365]）
+     * @return 交互汇总对象；失败返回 null
+     */
+    suspend fun getMediaInteractionSummary(days: Int = 30): InteractionSummary? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-interaction-summary") {
+                parameter("days", days)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // by_action 是嵌套对象，逐键宽容读取（缺失键→0，整对象缺失→空 Map）。
+                val byAction = mutableMapOf<String, Int>()
+                o["by_action"]?.jsonObject?.forEach { (k, v) ->
+                    byAction[k] = v.jsonPrimitive?.intOrNull ?: 0
+                }
+                InteractionSummary(
+                    totalActions = o["total_actions"]?.jsonPrimitive?.intOrNull ?: 0,
+                    byAction = byAction,
+                    mostFrequent = o["most_frequent"]?.takeIf { it !is JsonNull }
+                        ?.let { it.jsonPrimitive.contentOrNull } ?: "",
+                    dailyAvg = o["daily_avg"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    trendDirection = o["trend_direction"]?.takeIf { it !is JsonNull }
+                        ?.let { it.jsonPrimitive.contentOrNull } ?: "",
+                    totalDays = o["total_days"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaInteractionSummary days=$days status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaInteractionSummary FAILED days=$days: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；
