@@ -673,6 +673,15 @@ func (s *Server) registerRoutes() {
 	// 重复文件组摘要（比 duplicate-report 更轻量，只返回组数+总可回收+最大组信息，
 	// 不展开每组明细，适合前端卡片 / 仪表盘首屏快速展示）
 	s.mux.HandleFunc("/api/media/duplicate-groups-summary", s.handleDuplicateGroupsSummary)
+	// 重复文件深度分析（一次 ListMediaByUser 全量拉取后在 Go 侧聚合，三类重复一并返回）：
+	//   a) exact_groups：相同 SHA256 的完全重复（每件相同内容各占一份空间，可回收 (count-1)*size）。
+	//   b) near_pairs  ：SHA256 不同但同类型 + 同分辨率(总像素) + 文件大小 ±5% 的近似重复
+	//                    （可能是同一照片的不同格式/质量版本，与 media-duplicates-similar 同口径）。
+	//   c) burst_groups：同一小时内按拍摄时间(taken_at, 缺失回退 created_at) 连续拍摄的同类型媒体，
+	//                    典型如连拍/截图，组内冗余占用的存储量给出 reclaimable_bytes(=sum(1)*0.5 估算)。
+	// 同时返回 total_reclaimable_bytes / total_redundant_count 汇总。?limit=50 限制每类返回条数。
+	// 只读端点，需认证 + store，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-duplicate-deep", s.handleMediaDuplicateDeep)
 	// 智能洞察报告——自动分析用户媒体库并给出可操作建议（重复/存储分布/上传习惯/
 	// 未标签/最大相册/存储健康度），一次请求合并多个分析维度，供前端"洞察"卡片展示。
 	s.mux.HandleFunc("/api/media/insights", s.handleMediaInsights)
@@ -8106,13 +8115,13 @@ func (s *Server) handleMediaAlbumCoverage(w http.ResponseWriter, r *http.Request
 	totalMedia := len(mediaList)
 	if totalMedia == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"total_media":       0,
-			"in_album":          0,
-			"not_in_album":      0,
-			"coverage_percent":  0.0,
-			"album_count":       0,
-			"avg_per_album":     0.0,
-			"suggestion":        "",
+			"total_media":      0,
+			"in_album":         0,
+			"not_in_album":     0,
+			"coverage_percent": 0.0,
+			"album_count":      0,
+			"avg_per_album":    0.0,
+			"suggestion":       "",
 		})
 		return
 	}
@@ -8151,13 +8160,13 @@ func (s *Server) handleMediaAlbumCoverage(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_media":       totalMedia,
-		"in_album":          inAlbum,
-		"not_in_album":      notInAlbum,
-		"coverage_percent":  coveragePercent,
-		"album_count":       albumCount,
-		"avg_per_album":     avgPerAlbum,
-		"suggestion":        suggestion,
+		"total_media":      totalMedia,
+		"in_album":         inAlbum,
+		"not_in_album":     notInAlbum,
+		"coverage_percent": coveragePercent,
+		"album_count":      albumCount,
+		"avg_per_album":    avgPerAlbum,
+		"suggestion":       suggestion,
 	})
 }
 
@@ -9073,20 +9082,20 @@ func (s *Server) handleMediaSummaryReport(w http.ResponseWriter, r *http.Request
 		vidCount   int
 		totalBytes int64
 		// yearly（指定年份）
-		yearCount                                          int64
-		yearBytes                                          int64
-		yearImg, yearVid, yearLive                         int64
-		monthCounts                                        = make([]int64, 12)
-		dayCounts                                          = make(map[string]int64)
-		firstUpload, lastUpload                            time.Time
-		yearIDs                                            = make(map[string]struct{})
+		yearCount                  int64
+		yearBytes                  int64
+		yearImg, yearVid, yearLive int64
+		monthCounts                = make([]int64, 12)
+		dayCounts                  = make(map[string]int64)
+		firstUpload, lastUpload    time.Time
+		yearIDs                    = make(map[string]struct{})
 		// storage_health
-		coldCount                                          int
-		shaCounts                                          = make(map[string]int)
+		coldCount int
+		shaCounts = make(map[string]int)
 		// diversity（全库未删口径）
-		typeCounts                                         = make(map[string]int)
-		mimeCounts                                         = make(map[string]int)
-		hourCounts                                         = make(map[string]int, 24)
+		typeCounts = make(map[string]int)
+		mimeCounts = make(map[string]int)
+		hourCounts = make(map[string]int, 24)
 		// monthly_highlights（指定年份）：按月聚合 first/largest/last
 		monthHLFirst   [12]*hlRef
 		monthHLLast    [12]*hlRef
@@ -10853,8 +10862,8 @@ func (s *Server) handleMediaTagNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	// 为每个标签构造 media_id 集合；集合大小即 media_count。
 	type netNode struct {
-		Tag       string `json:"tag"`
-		MediaCount int   `json:"media_count"`
+		Tag        string `json:"tag"`
+		MediaCount int    `json:"media_count"`
 	}
 	type netEdge struct {
 		Source string  `json:"source"`
@@ -11198,11 +11207,11 @@ func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
 // total_media（去重媒体）。未命中任何预设组的标签归入"其他组"。
 //
 // 返回 {groups: [{group_name, tags: [...], count, total_media}], total_groups, ungrouped_count}。
-// - groups：按预设顺序（旅行/美食/人物/风景/其他）输出，仅包含命中的组（其他组若
-//   有未归类标签才出现）；count 为该组内标签数，total_media 为该组所有标签关联的
-//   去重未软删 media 数。
-// - total_groups：实际有标签的组数（含其他组，若非空）。
-// - ungrouped_count：未归入任何预设语义组的标签数（即"其他组"内的标签数）。
+//   - groups：按预设顺序（旅行/美食/人物/风景/其他）输出，仅包含命中的组（其他组若
+//     有未归类标签才出现）；count 为该组内标签数，total_media 为该组所有标签关联的
+//     去重未软删 media 数。
+//   - total_groups：实际有标签的组数（含其他组，若非空）。
+//   - ungrouped_count：未归入任何预设语义组的标签数（即"其他组"内的标签数）。
 //
 // 实现存储口径与 handleMediaTagStatDetailed 一致：TagStats 取标签计数，
 // SearchMediaByTag 取每个标签关联 media_id，按组求并集去重得 total_media。
@@ -13381,14 +13390,14 @@ func (s *Server) handleMediaDecadeDistribution(w http.ResponseWriter, r *http.Re
 // 涵盖维度（口径与各源端点保持一致，best-effort 容错）：
 //
 //   - 计数        : total_media / total_bytes / image_count / video_count / live_count
-//                   / favorites / albums / shares / trash（全库口径，trash=回收站软删数）
+//     / favorites / albums / shares / trash（全库口径，trash=回收站软删数）
 //   - 健康评分    : health_score（存→重复/配额/冷数据加权，同 storage-health）
-//                   / efficiency_score（重复率+平均大小惩罚，同 media-storage-efficiency）
-//                   / diversity_score（type/mime/hour/tag 归一化熵均值，同 media-content-diversity）
-//                   / activity_score（upload/favorite/share/tag/rename/rotate 加权归一化，同 collection-health）
-//                   / avg_quality（四项评分均值，0-100）
+//     / efficiency_score（重复率+平均大小惩罚，同 media-storage-efficiency）
+//     / diversity_score（type/mime/hour/tag 归一化熵均值，同 media-content-diversity）
+//     / activity_score（upload/favorite/share/tag/rename/rotate 加权归一化，同 collection-health）
+//     / avg_quality（四项评分均值，0-100）
 //   - 趋势/活跃   : this_month_count（指定年份当月新增）/ avg_daily（当年日均）
-//                   / streak（当前连续上传天数，UTC 日期口径） / longest_streak / active_days
+//     / streak（当前连续上传天数，UTC 日期口径） / longest_streak / active_days
 //   - 标签        : total_tags / tag_coverage（已打标签媒体百分比，0-100）
 //   - 完整性      : total_duplicates（SHA256 重复份）/ total_errors（zero_size 计数，跳过磁盘扫描避免 IO 放大）
 //   - 存储补充    : duplicate_rate / quota_usage / cold_count / avg_bytes_per_media
@@ -13434,17 +13443,17 @@ func (s *Server) handleMediaLibraryOverview(w http.ResponseWriter, r *http.Reque
 
 	var (
 		// 计数
-		totalMedia              int
+		totalMedia                    int
 		imgCount, vidCount, liveCount int
-		totalBytes              int64
+		totalBytes                    int64
 		// 健康基础量
-		coldCount   int
-		shaCounts   = make(map[string]int)
-		errorCount  int // zero_size（skip 磁盘扫描，口径同 summary-report 的简化完整度）
+		coldCount  int
+		shaCounts  = make(map[string]int)
+		errorCount int // zero_size（skip 磁盘扫描，口径同 summary-report 的简化完整度）
 		// diversity（全库未删口径）
-		typeCounts  = make(map[string]int)
-		mimeCounts  = make(map[string]int)
-		hourCounts  = make(map[string]int, 24)
+		typeCounts = make(map[string]int)
+		mimeCounts = make(map[string]int)
+		hourCounts = make(map[string]int, 24)
 		// streak / 年度
 		daySet      = make(map[string]bool)
 		yearDays    = 0
@@ -13742,41 +13751,41 @@ func (s *Server) handleMediaLibraryOverview(w http.ResponseWriter, r *http.Reque
 	// ===== 扁平合并 30+ 维度（全库口径 + 评分 + 趋势 + 标签 + 完整性）=====
 	overview := map[string]any{
 		// 计数维度
-		"total_media":       totalMedia,
-		"total_bytes":       totalBytes,
-		"image_count":       imgCount,
-		"video_count":       vidCount,
-		"live_count":        liveCount,
-		"favorites":         favoriteCount,
-		"albums":            albumCount,
-		"shares":            shareCount,
-		"trash":             trashCount,
+		"total_media": totalMedia,
+		"total_bytes": totalBytes,
+		"image_count": imgCount,
+		"video_count": vidCount,
+		"live_count":  liveCount,
+		"favorites":   favoriteCount,
+		"albums":      albumCount,
+		"shares":      shareCount,
+		"trash":       trashCount,
 		// 评分维度（0-100）
-		"health_score":      int(healthScore),
-		"efficiency_score":  int(efficiencyScore),
-		"diversity_score":   diversityScore,
-		"activity_score":    int(activityScore),
-		"avg_quality":       round2(avgQuality),
+		"health_score":     int(healthScore),
+		"efficiency_score": int(efficiencyScore),
+		"diversity_score":  diversityScore,
+		"activity_score":   int(activityScore),
+		"avg_quality":      round2(avgQuality),
 		// 趋势/活跃维度
-		"this_month_count":  thisMonthCount,
-		"avg_daily":         round2(avgDaily),
-		"streak":            currentStreak,
-		"longest_streak":    longestStreak,
-		"active_days":       len(daySet),
+		"this_month_count": thisMonthCount,
+		"avg_daily":        round2(avgDaily),
+		"streak":           currentStreak,
+		"longest_streak":   longestStreak,
+		"active_days":      len(daySet),
 		// 标签维度
-		"total_tags":        totalTags,
-		"tag_coverage":      round2(tagCoverage),
+		"total_tags":   totalTags,
+		"tag_coverage": round2(tagCoverage),
 		// 完整性维度
-		"total_duplicates":  duplicateCount,
-		"total_errors":      errorCount,
+		"total_duplicates": duplicateCount,
+		"total_errors":     errorCount,
 		// 存储补充维度
-		"duplicate_rate":    round2(duplicateRate),
-		"quota_usage":       round2(quotaUsage),
-		"used_quota_percent": round2(usedQuotaPercent),
-		"cold_count":        coldCount,
+		"duplicate_rate":      round2(duplicateRate),
+		"quota_usage":         round2(quotaUsage),
+		"used_quota_percent":  round2(usedQuotaPercent),
+		"cold_count":          coldCount,
 		"avg_bytes_per_media": int64(avgBytesPerMedia),
-		"year":              year,
-		"user_id":           uid,
+		"year":                year,
+		"user_id":             uid,
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -15739,8 +15748,8 @@ func roundTo2(f float64) float64 {
 //   - most_frequent        最频繁的操作类型（平局取字典序最小，确定性输出）；无数据时为 ""
 //   - daily_avg            日均操作数（total_actions / 实际覆盖天数，保留 2 位小数）
 //   - trend_direction      最近 7 天 vs 之前 7 天的操作数变化方向："up"/"down"/"flat"/"insufficient"
-//                          （前 7 天为 0 且近 7 天也为 0 → flat；前 7 天为 0 且近 7 天 >0 → up；
-//                           前 7 天 >0 且近 7 天为 0 → down；其余按变化率 >= +5% 视 up、<= -5% 视 down、中间 flat）
+//     （前 7 天为 0 且近 7 天也为 0 → flat；前 7 天为 0 且近 7 天 >0 → up；
+//     前 7 天 >0 且近 7 天为 0 → down；其余按变化率 >= +5% 视 up、<= -5% 视 down、中间 flat）
 //   - recent_7d            最近 7 天操作数（便于前端直接渲染趋势）
 //   - previous_7d          之前 7 天操作数
 //   - total_days           实际统计天数（= 请求 days 钳制后的值）
@@ -15867,14 +15876,14 @@ func (s *Server) handleMediaInteractionSummary(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_actions":    totalActions,
-		"by_action":        byActionList,
-		"most_frequent":    mostFrequent,
-		"daily_avg":        dailyAvg,
-		"trend_direction":  trend,
-		"recent_7d":        recent7,
-		"previous_7d":      prev7,
-		"total_days":       days,
+		"total_actions":   totalActions,
+		"by_action":       byActionList,
+		"most_frequent":   mostFrequent,
+		"daily_avg":       dailyAvg,
+		"trend_direction": trend,
+		"recent_7d":       recent7,
+		"previous_7d":     prev7,
+		"total_days":      days,
 	})
 }
 
@@ -22052,10 +22061,10 @@ func (s *Server) handleMediaCollectionHealth(w http.ResponseWriter, r *http.Requ
 //
 //   - orphans        : DB 有记录但磁盘文件缺失（uploads 目录下 m.ID.* glob 无命中，或命中但 stat 失败）。
 //   - errors         : size<=0（zero_size）或磁盘文件大小与 DB 记录不符（size_mismatch）。
-//                      磁盘缺失归 orphan 范畴，不重复计入 error，error 专注数据损坏。
+//     磁盘缺失归 orphan 范畴，不重复计入 error，error 专注数据损坏。
 //   - duplicates     : 按 SHA256 分组，组内 count>1 的部分全部计入重复；reclaimable = (count-1)*size。
 //   - near_duplicates: SHA256 不同但同类型 + 文件大小差距 <5% + 同分辨率的可疑对
-//                      （与 media-duplicates-similar 口径一致，可能是同一照片的不同格式/质量版本）。
+//     （与 media-duplicates-similar 口径一致，可能是同一照片的不同格式/质量版本）。
 //
 // 评分模型：score = 100 - (orphan_rate*30 + error_rate*30 + dup_rate*20 + near_dup_rate*20)
 //   - orphan_rate     = orphan_count / total_media
@@ -22393,14 +22402,14 @@ func (s *Server) handleMediaStorageAudit(w http.ResponseWriter, r *http.Request)
 		"total_media": totalMedia,
 		"disk_check":  diskCheck,
 		"rates": map[string]any{
-			"orphan":        round2(orphanRate),
-			"error":         round2(errorRate),
-			"duplicate":     round2(dupRate),
+			"orphan":         round2(orphanRate),
+			"error":          round2(errorRate),
+			"duplicate":      round2(dupRate),
 			"near_duplicate": round2(nearDupRate),
 		},
-		"recommendations":   recommendations,
+		"recommendations":       recommendations,
 		"total_recommendations": len(recommendations),
-		"user_id":           uid,
+		"user_id":               uid,
 	})
 }
 
@@ -22544,16 +22553,16 @@ func (s *Server) handleMediaUploadPattern(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"weekday":           weekdayCount,
-		"weekend":           weekendCount,
-		"daytime":           daytimeCount,
-		"nighttime":         nighttimeCount,
-		"batch_days":        batchDays,
-		"single_days":       singleDays,
-		"total_days":        batchDays + singleDays,
+		"weekday":            weekdayCount,
+		"weekend":            weekendCount,
+		"daytime":            daytimeCount,
+		"nighttime":          nighttimeCount,
+		"batch_days":         batchDays,
+		"single_days":        singleDays,
+		"total_days":         batchDays + singleDays,
 		"avg_interval_hours": avgIntervalHours,
-		"total_media":       totalMedia,
-		"dominant_pattern":  pattern,
+		"total_media":        totalMedia,
+		"dominant_pattern":   pattern,
 	})
 }
 
@@ -22807,7 +22816,6 @@ func (s *Server) handleStorageBreakdownV3(w http.ResponseWriter, r *http.Request
 	})
 }
 
-
 // handleMediaShareHistory V8：GET /api/media/media-share-history — 分享历史。
 func (s *Server) handleMediaShareHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -22850,4 +22858,342 @@ func (s *Server) handleMediaShareHistory(w http.ResponseWriter, r *http.Request)
 		"history": out,
 		"total":   len(out),
 	})
+}
+
+// handleMediaDuplicateDeep 处理 GET /api/media/media-duplicate-deep，
+// 一次请求同时返回三类重复文件分析，供前端"深度去重"页面一次加载渲染：
+//
+//	a) exact_groups：相同 SHA256 的完全重复（同内容多份占用）。
+//	b) near_pairs  ：SHA256 不同但同类型 + 同分辨率(总像素) + 文件大小 ±5%
+//	   的近似重复（可能是同一照片的不同格式/质量版本，与 media-duplicates-similar 同口径）。
+//	c) burst_groups：同一小时内按拍摄时间(taken_at, 缺失回退 created_at)
+//	   连续拍摄的同类型媒体（典型如连拍/截图），组内冗余存储量给出 reclaimable_bytes
+//	   （按组内成员件数-1 估算冗余份数×平均大小，连拍场景通常并非每张都可删，
+//	   故取保守系数 0.5：reclaimable = floor((n-1)*0.5) * avgSize）。
+//
+// 同时返回 total_reclaimable_bytes（三类可回收字节之和）与
+// total_redundant_count（三类冗余文件数之和，exact 计 count-1 + near 计 pair 数 +
+// burst 计每组的 floor((n-1)*0.5)）。?limit=50（上限 500）限制每类返回条数，
+// 超量按各维度默认排序截断，但 total_* 为截断前的全量统计。
+//
+// 设计权衡：一次 ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点无副作用，按
+// user_id 隔离。near 比对为 O(n²)，但单用户库规模可接受（与 media-duplicates-similar 同）。
+// burst 用"同一小时"桶聚类（time.Unix(t/3600)*3600），桶内按时间排序，桶内 >=2 件即成组，
+// 同类型过滤避免连拍照片与同时段视频混淆。
+func (s *Server) handleMediaDuplicateDeep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// limit：默认 50，上限 500，下限 0（允许返回空）。
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 预处理：只保留有效记录（已过滤软删——ListMediaByUser 只返回 deleted=0，再防御式跳过），
+	// 并构造统一带索引的结构，三类分析复用同一份候选集。
+	type deepCand struct {
+		id        string
+		filename  string
+		size      int64
+		sha       string
+		typ       string
+		width     int32
+		height    int32
+		createdAt int64 // Unix 秒，排序键（burst 回退用）
+		shootUnix int64 // 拍摄时间 Unix 秒（taken_at 毫秒转秒，0 时回退 createdAt），burst 主键
+	}
+	cands := make([]deepCand, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m == nil || m.Deleted {
+			continue
+		}
+		cands = append(cands, deepCand{
+			id:        m.ID,
+			filename:  m.Filename,
+			size:      m.Size,
+			sha:       m.SHA256,
+			typ:       m.Type,
+			width:     m.Width,
+			height:    m.Height,
+			createdAt: m.CreatedAt.Unix(),
+			shootUnix: shootUnixOf(m.TakenAt, m.CreatedAt),
+		})
+	}
+
+	// ---- a) exact_groups：相同 SHA256 分组 ----
+	type exactItem struct {
+		ID        string `json:"id"`
+		Filename  string `json:"filename"`
+		Size      int64  `json:"size"`
+		CreatedAt int64  `json:"created_at"`
+	}
+	type exactGroup struct {
+		SHA256           string      `json:"sha256"`
+		Count            int         `json:"count"`
+		ReclaimableBytes int64       `json:"reclaimable_bytes"`
+		Media            []exactItem `json:"media"`
+	}
+	exactBuckets := make(map[string][]exactItem)
+	for _, c := range cands {
+		if c.sha == "" {
+			continue
+		}
+		exactBuckets[c.sha] = append(exactBuckets[c.sha], exactItem{
+			ID:        c.id,
+			Filename:  c.filename,
+			Size:      c.size,
+			CreatedAt: c.createdAt,
+		})
+	}
+	exactGroups := make([]exactGroup, 0, len(exactBuckets))
+	var exactReclaimable int64
+	exactRedundant := 0
+	for sha, items := range exactBuckets {
+		if len(items) < 2 {
+			continue
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].CreatedAt > items[j].CreatedAt // 最新在前，与 duplicate-report 一致
+		})
+		bytesPerFile := items[0].Size
+		if bytesPerFile < 0 {
+			bytesPerFile = 0
+		}
+		reclaimable := int64(len(items)-1) * bytesPerFile
+		exactReclaimable += reclaimable
+		exactRedundant += len(items) - 1
+		exactGroups = append(exactGroups, exactGroup{
+			SHA256:           sha,
+			Count:            len(items),
+			ReclaimableBytes: reclaimable,
+			Media:            items,
+		})
+	}
+	// 按 reclaimable_bytes 降序输出（最值得清理的在前），tie 用 SHA256 升序保证稳定。
+	sort.Slice(exactGroups, func(i, j int) bool {
+		if exactGroups[i].ReclaimableBytes != exactGroups[j].ReclaimableBytes {
+			return exactGroups[i].ReclaimableBytes > exactGroups[j].ReclaimableBytes
+		}
+		return exactGroups[i].SHA256 < exactGroups[j].SHA256
+	})
+	exactTotal := len(exactGroups)
+	if len(exactGroups) > limit {
+		exactGroups = exactGroups[:limit]
+	}
+	if exactGroups == nil {
+		exactGroups = []exactGroup{}
+	}
+
+	// ---- b) near_pairs：同类型 + 同分辨率(总像素) + SHA256 不同 + 大小 ±5% ----
+	type nearPair struct {
+		MediaAID   string `json:"media_a_id"`
+		MediaBID   string `json:"media_b_id"`
+		FilenameA  string `json:"filename_a"`
+		FilenameB  string `json:"filename_b"`
+		Size       int64  `json:"size"`       // 较大者 size
+		Resolution string `json:"resolution"` // "WxH"
+		Type       string `json:"type"`
+		SizeDiff   int64  `json:"size_diff"`
+	}
+	nearPairs := make([]nearPair, 0)
+	for i := 0; i < len(cands); i++ {
+		a := cands[i]
+		// 无 SHA256 或无尺寸信息无法判定近似重复（无 SHA 无法排除精确重复；无尺寸无法比对分辨率）。
+		if a.sha == "" || a.width <= 0 || a.height <= 0 {
+			continue
+		}
+		for j := i + 1; j < len(cands); j++ {
+			b := cands[j]
+			if b.sha == "" || b.width <= 0 || b.height <= 0 {
+				continue
+			}
+			if a.typ != b.typ {
+				continue
+			}
+			if a.sha == b.sha {
+				continue // 精确重复归 exact 类，不重复计入
+			}
+			if int64(a.width)*int64(a.height) != int64(b.width)*int64(b.height) {
+				continue
+			}
+			var maxSize, minSize int64
+			if a.size >= b.size {
+				maxSize, minSize = a.size, b.size
+			} else {
+				maxSize, minSize = b.size, a.size
+			}
+			if maxSize <= 0 {
+				continue
+			}
+			if float64(maxSize-minSize)/float64(maxSize) >= 0.05 {
+				continue
+			}
+			nearPairs = append(nearPairs, nearPair{
+				MediaAID:   a.id,
+				MediaBID:   b.id,
+				FilenameA:  a.filename,
+				FilenameB:  b.filename,
+				Size:       maxSize,
+				Resolution: fmt.Sprintf("%dx%d", a.width, a.height),
+				Type:       a.typ,
+				SizeDiff:   maxSize - minSize,
+			})
+		}
+	}
+	sort.Slice(nearPairs, func(i, j int) bool {
+		if nearPairs[i].SizeDiff != nearPairs[j].SizeDiff {
+			return nearPairs[i].SizeDiff < nearPairs[j].SizeDiff // 差距越小越可疑
+		}
+		return nearPairs[i].MediaAID < nearPairs[j].MediaAID
+	})
+	nearTotal := len(nearPairs)
+	if len(nearPairs) > limit {
+		nearPairs = nearPairs[:limit]
+	}
+	if nearPairs == nil {
+		nearPairs = []nearPair{}
+	}
+	// near 可回收字节数与冗余计数：每对取较小者 size 视作可回收（保留较大者/较高质量的那份）。
+	nearReclaimable := int64(0)
+	for _, p := range nearPairs {
+		// pair 的 Size 为较大者，SizeDiff 为差值，较小者 size = Size - SizeDiff。
+		small := p.Size - p.SizeDiff
+		if small > 0 {
+			nearReclaimable += small
+		}
+	}
+	nearRedundant := nearTotal // 每对一份冗余
+
+	// ---- c) burst_groups：同一小时内同类型连续拍摄 ----
+	// 桶键 = floor(shootUnix/3600)*3600，桶内按 shootUnix 升序；桶内同类型 >=2 即成组，
+	// 同一桶内不同类型分别成组（避免照片与同时段视频混在一起）。
+	// reclaimable = floor((n-1)*0.5) * avgSize —— 连拍场景通常用户会保留一部分，保守估一半冗余。
+	type burstItem struct {
+		ID       string `json:"id"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		TakenAt  int64  `json:"taken_at"` // Unix 秒
+	}
+	type burstGroup struct {
+		WindowStart      int64       `json:"window_start"` // Unix 秒，该小时桶起点
+		Type             string      `json:"type"`
+		Count            int         `json:"count"`
+		ReclaimableBytes int64       `json:"reclaimable_bytes"`
+		Media            []burstItem `json:"media"`
+	}
+	type burstKey struct {
+		hour int64
+		typ  string
+	}
+	burstBuckets := make(map[burstKey][]burstItem)
+	for _, c := range cands {
+		if c.shootUnix <= 0 {
+			continue // 无任何时间信息无法归桶
+		}
+		bucket := (c.shootUnix / 3600) * 3600
+		k := burstKey{hour: bucket, typ: c.typ}
+		burstBuckets[k] = append(burstBuckets[k], burstItem{
+			ID:       c.id,
+			Filename: c.filename,
+			Size:     c.size,
+			TakenAt:  c.shootUnix,
+		})
+	}
+	burstGroups := make([]burstGroup, 0, len(burstBuckets))
+	var burstReclaimable int64
+	burstRedundant := 0
+	for k, items := range burstBuckets {
+		if len(items) < 2 {
+			continue
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].TakenAt < items[j].TakenAt
+		})
+		var sum int64
+		for _, it := range items {
+			if it.Size > 0 {
+				sum += it.Size
+			}
+		}
+		avgSize := int64(0)
+		if len(items) > 0 {
+			avgSize = sum / int64(len(items))
+		}
+		// 保守冗余份数：floor((n-1)*0.5)。n=2→0, n=3→1, n=4→1, n=5→2 ...
+		redundant := int(math.Floor(float64(len(items)-1) * 0.5))
+		reclaimable := int64(redundant) * avgSize
+		burstReclaimable += reclaimable
+		burstRedundant += redundant
+		burstGroups = append(burstGroups, burstGroup{
+			WindowStart:      k.hour,
+			Type:             k.typ,
+			Count:            len(items),
+			ReclaimableBytes: reclaimable,
+			Media:            items,
+		})
+	}
+	// 按 count 降序（连拍张数多的在前），tie 用 window_start 升序。
+	sort.Slice(burstGroups, func(i, j int) bool {
+		if burstGroups[i].Count != burstGroups[j].Count {
+			return burstGroups[i].Count > burstGroups[j].Count
+		}
+		return burstGroups[i].WindowStart < burstGroups[j].WindowStart
+	})
+	burstTotal := len(burstGroups)
+	if len(burstGroups) > limit {
+		burstGroups = burstGroups[:limit]
+	}
+	if burstGroups == nil {
+		burstGroups = []burstGroup{}
+	}
+
+	totalReclaimable := exactReclaimable + nearReclaimable + burstReclaimable
+	totalRedundant := exactRedundant + nearRedundant + burstRedundant
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exact_groups":            exactGroups,
+		"near_pairs":              nearPairs,
+		"burst_groups":            burstGroups,
+		"total_reclaimable_bytes": totalReclaimable,
+		"total_redundant_count":   totalRedundant,
+		"exact_groups_total":      exactTotal, // 截断前全量组数
+		"near_pairs_total":        nearTotal,  // 截断前全量对数
+		"burst_groups_total":      burstTotal, // 截断前全量组数
+		"exact_reclaimable_bytes": exactReclaimable,
+		"near_reclaimable_bytes":  nearReclaimable,
+		"burst_reclaimable_bytes": burstReclaimable,
+		"user_id":                 uid,
+	})
+}
+
+// shootUnixOf 将拍摄时间(taken_at 毫秒时间戳) 转 Unix 秒；taken_at<=0 时回退到 created_at。
+func shootUnixOf(takenAtMs int64, createdAt time.Time) int64 {
+	// taken_at 为毫秒时间戳，0 表未知；负数按未知处理。
+	if takenAtMs > 0 {
+		return takenAtMs / 1000
+	}
+	return createdAt.Unix()
 }
