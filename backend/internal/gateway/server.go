@@ -233,6 +233,9 @@ func (s *Server) registerRoutes() {
 	// 媒体时间分析：拍摄时间(exif) vs 上传时间对比，按延迟分桶统计。
 	// 仅基于 taken_at 已知（≠0）的媒体；taken_at 为毫秒时间戳，created_at 为 UTC。
 	s.mux.HandleFunc("/api/media/media-time-analysis", s.handleMediaTimeAnalysis)
+	// 媒体色温推断分析：基于拍摄时段（taken_at，缺失则回退 created_at）的小时数推断色温——
+	// 晚上(18-22h)→暖色调，早上(6-10h)→冷色调，其他→自然光。统计 warm/cool/natural 分布与主导色温。
+	s.mux.HandleFunc("/api/media/media-color-temperature", s.handleMediaColorTemperature)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
@@ -6546,6 +6549,97 @@ func (s *Server) handleMediaTimeAnalysis(w http.ResponseWriter, r *http.Request)
 		},
 		"same_day_count": sameDay,
 		"same_day_ratio": sameRatio,
+	})
+}
+
+// handleMediaColorTemperature GET /api/media/media-color-temperature — 色温推断分析。
+//
+// 对当前用户全部未软删媒体，按拍摄时段（taken_at 毫秒时间戳；缺失=0 时回退到
+// created_at 上传时间）的 UTC 小时数推断色温基调，统计三类分布：
+//
+//	warm    （暖色调）  → 晚上 18-22h 拍摄，低色温光源（室内灯/日落）主导
+//	cool    （冷色调）  → 早上 6-10h 拍摄，高色温日光主导
+//	natural （自然光）  → 其他时段（10-18h、22-6h），日光/混合光难以判定
+//
+// 响应结构：
+//
+//	{
+//	  "distribution": {           // 三类色温的计数
+//	    "warm":    N,
+//	    "cool":    N,
+//	    "natural": N
+//	  },
+//	  "total":   N,              // 参与分桶的未软删媒体总数
+//	  "dominant": "warm"         // count 最大的类别；total=0 时为 null
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。时间口径统一用 UTC（与 created_at 一致）。
+func (s *Server) handleMediaColorTemperature(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 色温桶：0=warm,1=cool,2=natural。
+	warm, cool, natural := int64(0), int64(0), int64(0)
+	var total int64
+	for _, m := range mediaList {
+		// 优先用拍摄时间 taken_at（毫秒时间戳）；缺失(=0)则回退到上传时间 created_at。
+		var t time.Time
+		if m.TakenAt != 0 {
+			t = time.UnixMilli(m.TakenAt).UTC()
+		} else {
+			t = m.CreatedAt.UTC()
+		}
+		hour := t.Hour()
+		switch {
+		case hour >= 18 && hour < 22: // 晚上 18-22h → 暖色调
+			warm++
+		case hour >= 6 && hour < 10: // 早上 6-10h → 冷色调
+			cool++
+		default: // 其他时段 → 自然光
+			natural++
+		}
+		total++
+	}
+
+	dominant := any(nil)
+	best := warm
+	bestName := "warm"
+	if cool > best {
+		best = cool
+		bestName = "cool"
+	}
+	if natural > best {
+		best = natural
+		bestName = "natural"
+	}
+	if total > 0 {
+		dominant = bestName
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"distribution": map[string]int64{
+			"warm":    warm,
+			"cool":    cool,
+			"natural": natural,
+		},
+		"total":    total,
+		"dominant": dominant,
 	})
 }
 
