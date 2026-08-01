@@ -154,6 +154,11 @@ func (s *Server) registerRoutes() {
 	// 与 storage-breakdown（类型+月份单维分桶）互补：v2 做二维交叉，便于前端按年看类型构成、
 	// 按类型看年度分布。矩阵方向为 type→year（year→type 见 storage-deep-analysis）。
 	s.mux.HandleFunc("/api/media/storage-breakdown-v2", s.handleStorageBreakdownV2)
+	// 存储分项 v3：按 type × year × size_range 三维交叉嵌套，叶子节点返 count+bytes。
+	// 与 storage-breakdown-v2（type×year 二维矩阵）互补：v3 在每个 (type,year) 格内再按
+	// 大小档（small/medium/large/xlarge，与 by-size-range / storage-deep-analysis 同阈值）拆分，
+	// 便于前端做\"某年图片里大/小文件各占多少\"的下钻分析。响应为嵌套结构 breakdown[type][year][size_range]。
+	s.mux.HandleFunc("/api/media/media-storage-breakdown-v3", s.handleStorageBreakdownV3)
 	// V7：搜索建议（基于文件名前缀）
 	s.mux.HandleFunc("/api/media/search-suggestions", s.handleMediaSearchSuggestions)
 	// V24：多源增强搜索建议（文件名+标签+相册名合并去重）
@@ -22145,6 +22150,132 @@ func (s *Server) handleMediaFavoriteAnalysis(w http.ResponseWriter, r *http.Requ
 		},
 		"by_hour":      hours,
 		"avg_age_days": avgAgeDays,
+	})
+}
+
+// handleStorageBreakdownV3 GET /api/media/media-storage-breakdown-v3 — 三维交叉存储分项。
+//
+// 按 type × year × size_range 三维交叉分组，叶子节点返回 count 与 bytes，另返 total。
+// 与 storage-breakdown-v2（type×year 二维矩阵）互补：v3 在每个 (type,year) 格内再按
+// 大小档拆分，便于前端做"某年图片里大/小文件各占多少"的下钻分析。
+//
+// 数据源：s.store.ListMediaByUser（当前用户全部 media，含软删行，handler 内跳过 m.Deleted）。
+// 时间口径：按 CreatedAt（上传时间）的 UTC 年份分桶，与 storage-breakdown-v2 /
+// storage-deep-analysis 一致；不用 TakenAt（EXIF 拍摄时间），因为该字段可空（0=未知）。
+// 类型归一：空串归 "IMAGE"（与 storage-breakdown-v2 / storage-deep-analysis 同口径）。
+// 大小分桶：与 by-size-range / storage-deep-analysis 同阈值——
+//
+//	small <1MB、medium 1-10MB、large 10-100MB、xlarge >100MB。
+//
+// 响应结构：
+//
+//	{
+//	  "breakdown": {
+//	    "IMAGE": {
+//	      "2024": {
+//	        "small":  {"count": N, "bytes": N},
+//	        "medium": {"count": N, "bytes": N},
+//	        "large":  {...},
+//	        "xlarge": {...}
+//	      },
+//	      "2025": {...}
+//	    },
+//	    "VIDEO":     {...},
+//	    "LIVE_PHOTO": {...}
+//	  },
+//	  "total": {"count": N, "bytes": N}
+//	}
+//
+// 按数据如实出现填充（不预置空年份/类型/大小槽），便于前端按实际存在的维度渲染，
+// 与 storage-breakdown-v2 的填充策略一致。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleStorageBreakdownV3(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// leafStat 是三维交叉叶子节点 (type, year, size_range) 的统计单元。
+	type leafStat struct {
+		Count int   `json:"count"`
+		Bytes int64 `json:"bytes"`
+	}
+	// breakdown: type -> year -> size_range -> stat。按数据如实出现填充，不预置空槽。
+	breakdown := make(map[string]map[string]map[string]*leafStat)
+	var totalCount int
+	var totalBytes int64
+
+	const mb = 1024 * 1024
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		totalBytes += m.Size
+
+		// 归一化类型：空串归 IMAGE（与 storage-breakdown-v2 / storage-deep-analysis 同口径）。
+		t := m.Type
+		if t == "" {
+			t = "IMAGE"
+		}
+		year := m.CreatedAt.UTC().Format("2006")
+
+		// 大小分桶：与 by-size-range / storage-deep-analysis 同阈值。
+		// small <1MB、medium 1-10MB、large 10-100MB、xlarge >100MB。
+		sizeMB := m.Size / mb
+		var bucket string
+		switch {
+		case sizeMB < 1:
+			bucket = "small"
+		case sizeMB < 10:
+			bucket = "medium"
+		case sizeMB < 100:
+			bucket = "large"
+		default:
+			bucket = "xlarge"
+		}
+
+		ty, ok := breakdown[t]
+		if !ok {
+			ty = make(map[string]map[string]*leafStat)
+			breakdown[t] = ty
+		}
+		ys, ok := ty[year]
+		if !ok {
+			ys = make(map[string]*leafStat)
+			ty[year] = ys
+		}
+		leaf, ok := ys[bucket]
+		if !ok {
+			leaf = &leafStat{}
+			ys[bucket] = leaf
+		}
+		leaf.Count++
+		leaf.Bytes += m.Size
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"breakdown": breakdown,
+		"total": map[string]any{
+			"count": totalCount,
+			"bytes": totalBytes,
+		},
 	})
 }
 
