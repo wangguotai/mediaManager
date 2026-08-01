@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -167,6 +168,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-search-suggestions", s.handleMediaPrefixSearchSuggestions)
 	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
+	// 智能搜索（自然语言解析）：GET ?q=去年夏天的视频
+	// 解析中文查询中的时间/类型/大小/标签关键词，转换为 AdvancedSearchOpts 条件。
+	// 支持 "去年夏天的视频" "大于10MB的图片" "最近7天 #旅行" 等模糊查询。
+	s.mux.HandleFunc("/api/media/media-smart-search", s.handleMediaSmartSearch)
 	// V9：媒体旋转（更新 EXIF orientation / 旋转标记）
 	s.mux.HandleFunc("/api/media/rotate", s.handleMediaRotate)
 	// V9：批量旋转多个媒体（单条 UPDATE，返回实际旋转计数）
@@ -5098,6 +5103,374 @@ func (s *Server) handleMediaAdvancedSearch(w http.ResponseWriter, r *http.Reques
 		"total": len(mediaList),
 	})
 }
+
+// smartParsedQuery 是智能搜索解析后的结构化查询表示，与 AdvancedSearchOpts
+// 对应但面向返回给前端的展示字段（含 null 友好的指针类型，未解析到的维度返回 null）。
+type smartParsedQuery struct {
+	Type      string   `json:"type,omitempty"`       // IMAGE / VIDEO / LIVE_PHOTO；未识别为空
+	DateRange *struct {
+		From string `json:"from"` // RFC3339
+		To   string `json:"to"`   // RFC3339
+		Label string `json:"label"` // 可读标签，如 "去年夏天"
+	} `json:"date_range,omitempty"`
+	SizeRange *struct {
+		Min    int64  `json:"min,omitempty"` // 字节；0 表示无下限
+		Max    int64  `json:"max,omitempty"` // 字节；0 表示无上限
+		Label  string `json:"label"`         // 可读标签，如 "大于10MB"
+	} `json:"size_range,omitempty"`
+	Tags []string `json:"tags,omitempty"` // #标签名 列表（不含 #）
+}
+
+// handleMediaSmartSearch — GET /api/media/media-smart-search?q=<自然语言查询>
+//
+// 把中文自然语言搜索查询解析为结构化条件（类型/时间范围/大小范围/标签），
+// 转换为 storage.AdvancedSearchOpts 调 AdvancedSearchMedia 执行，最后返回：
+//
+//	{
+//	  "results": [media...],
+//	  "total": N,
+//	  "parsed_query": {type, date_range, size_range, tags}
+//	}
+//
+// 解析是 keyword-based 的，识别以下模式（不区分顺序，未命中的词静默忽略）：
+//
+//   - 类型：图片/照片→IMAGE，视频→VIDEO，Live/动态照片/Live Photo→LIVE_PHOTO
+//   - 时间：去年 / 今年 / 去年夏天 / 去年春天 / 去年秋天 / 去年冬天 /
+//     上个月 / 本月 / 本周 / 最近N天 / 最近N个月 / 今年N月
+//   - 大小：大于X / 小于X / 超过X（X 可带 MB/KB/GB 单位，不区分大小写）
+//   - 标签：#标签名（多个 # 标签取首个，AdvancedSearchOpts 仅支持单标签精确匹配）
+//
+// 需认证（user_id 由 authMiddleware 注入）+ store（未注入返回 503）。
+// ?limit 控制返回上限，默认 100，最大 500，与 advanced-search 对齐。
+func (s *Server) handleMediaSmartSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	parsed := parseSmartQuery(q)
+	opts := storage.AdvancedSearchOpts{
+		Type:    parsed.Type,
+		Limit:   limit,
+		MinSize: 0,
+		MaxSize: 0,
+	}
+	if parsed.DateRange != nil {
+		opts.DateFrom = parsed.DateRange.From
+		opts.DateTo = parsed.DateRange.To
+	}
+	if parsed.SizeRange != nil {
+		opts.MinSize = parsed.SizeRange.Min
+		opts.MaxSize = parsed.SizeRange.Max
+	}
+	if len(parsed.Tags) > 0 {
+		// AdvancedSearchOpts 仅支持单标签精确匹配，取第一个 # 标签。
+		opts.Tag = parsed.Tags[0]
+	}
+
+	mediaList, err := s.store.AdvancedSearchMedia(r.Context(), uid, opts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results":      mediaList,
+		"total":        len(mediaList),
+		"parsed_query": parsed,
+		"raw_query":    q,
+	})
+}
+
+// parseSmartQuery 把中文自然语言查询字符串解析为结构化条件。
+// 识别类型/时间范围/大小范围/标签四类关键词，未命中的文本静默忽略。
+// 返回的 smartParsedQuery 中，未识别到的维度为零值/nil，前端可据此显示"该维度未限制"。
+func parseSmartQuery(q string) smartParsedQuery {
+	var pq smartParsedQuery
+	if q == "" {
+		return pq
+	}
+	lower := strings.ToLower(q)
+
+	// --- 类型识别 ---
+	// 注意先匹配 LIVE_PHOTO 相关词（"live"/"动态照片"）再匹配 VIDEO（"视频"），
+	// 否则 "动态照片" 中的 "照片" 会先被 IMAGE 分支误捕获。这里按特异性降序匹配。
+	switch {
+	case strings.Contains(lower, "live photo") || strings.Contains(lower, "live photo") ||
+		strings.Contains(q, "动态照片") || strings.Contains(q, "实况") || strings.Contains(lower, "live"):
+		pq.Type = "LIVE_PHOTO"
+	case strings.Contains(q, "视频"):
+		pq.Type = "VIDEO"
+	case strings.Contains(q, "图片") || strings.Contains(q, "照片") || strings.Contains(q, "图像"):
+		pq.Type = "IMAGE"
+	}
+
+	// --- 标签识别：#标签名（ASCII # 后跟非空白字符序列）---
+	// 多个 # 标签全部收集到 Tags，但 AdvancedSearchOpts 仅用第一个做精确匹配。
+	for _, tok := range strings.Fields(q) {
+		if strings.HasPrefix(tok, "#") {
+			name := strings.TrimPrefix(tok, "#")
+			// 去掉可能的尾随标点（中文逗号/句号等）
+			name = strings.TrimRight(name, "，。,.;；！!？?、")
+			if name != "" {
+				pq.Tags = append(pq.Tags, name)
+			}
+		}
+	}
+
+	now := time.Now()
+	// --- 时间范围识别 ---（按特异性降序，先匹配长词再匹配短词，避免 "去年" 提前吞掉 "去年夏天"）
+	dr := parseSmartDateRange(q, now)
+	if dr != nil {
+		pq.DateRange = dr
+	}
+
+	// --- 大小范围识别 ---
+	sr := parseSmartSizeRange(lower)
+	if sr != nil {
+		pq.SizeRange = sr
+	}
+
+	return pq
+}
+
+// parseSmartDateRange 解析中文时间描述为 [from, to] 区间（RFC3339）+ 可读 label。
+// 返回 nil 表示未识别到任何时间描述。now 为参照"现在"，便于测试与相对计算。
+//
+// 支持的模式（按匹配优先级）：
+//
+//	去年夏天 / 去年春天 / 去年秋天 / 去年冬天  — 去年某季（3个月窗口）
+//	去年          — 去年全年
+//	今年N月       — 今年第 N 月（1-12）
+//	今年          — 今年至今
+//	上个月        — 自然上一个完整月
+//	本月 / 这个月  — 当前月
+//	本周 / 这周    — 当前自然周（周一起算）
+//	最近N天       — 向前 N 天（含今天），N 为正整数
+//	最近N个月     — 向前 N 个自然月
+//	最近 / 近期    — 最近 30 天
+func parseSmartDateRange(q string, now time.Time) *struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Label string `json:"label"`
+} {
+	mk := func(from, to time.Time, label string) *struct {
+		From  string `json:"from"`
+		To    string `json:"to"`
+		Label string `json:"label"`
+	} {
+		return &struct {
+			From  string `json:"from"`
+			To    string `json:"to"`
+			Label string `json:"label"`
+		}{
+			From:  from.Format(time.RFC3339),
+			To:    to.Format(time.RFC3339),
+			Label: label,
+		}
+	}
+	// dayRange 返回 [now-N+1天的0点, now+1天的0点)，即"最近N天"含今天共 N 个自然日。
+	dayRange := func(n int, label string) *struct {
+		From  string `json:"from"`
+		To    string `json:"to"`
+		Label string `json:"label"`
+	} {
+		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		from := startOfDay.AddDate(0, 0, -(n - 1))
+		to := startOfDay.AddDate(0, 0, 1) // 不含上界，到此刻已覆盖今天
+		return mk(from, to, label)
+	}
+	// monthRange 返回 [给定年月1日0点, 下月1日0点)。
+	monthRange := func(year int, month time.Month, label string) *struct {
+		From  string `json:"from"`
+		To    string `json:"to"`
+		Label string `json:"label"`
+	} {
+		from := time.Date(year, month, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(0, 1, 0)
+		return mk(from, to, label)
+	}
+
+	thisYear := now.Year()
+	lastYear := thisYear - 1
+
+	// 去年 + 季节（长度优先，避免被 "去年" 短匹配吞掉）
+	switch {
+	case strings.Contains(q, "去年夏天"):
+		// 夏天 6-8月，跨 3 个月：从 6/1 起
+		from := time.Date(lastYear, time.June, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(0, 3, 0)
+		return mk(from, to, "去年夏天")
+	case strings.Contains(q, "去年春天"):
+		// 春天 3-5月，跨 3 个月：从 3/1 起
+		from := time.Date(lastYear, time.March, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(0, 3, 0)
+		return mk(from, to, "去年春天")
+	case strings.Contains(q, "去年秋天"):
+		from := time.Date(lastYear, time.September, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(0, 3, 0)
+		return mk(from, to, "去年秋天")
+	case strings.Contains(q, "去年冬天"):
+		// 冬天 12-2月：跨年，取去年12月到今年2月底
+		from := time.Date(lastYear, time.December, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(0, 3, 0)
+		return mk(from, to, "去年冬天")
+	case strings.Contains(q, "去年"):
+		from := time.Date(lastYear, time.January, 1, 0, 0, 0, 0, now.Location())
+		to := from.AddDate(1, 0, 0)
+		return mk(from, to, "去年")
+	}
+
+	// 今年某月：今年N月 / 今年 N月 / 今年N月份
+	if re := smartMonthRe.FindStringSubmatch(q); re != nil {
+		m, err := strconv.Atoi(re[1])
+		if err == nil && m >= 1 && m <= 12 {
+			return monthRange(thisYear, time.Month(m), "今年"+re[1]+"月")
+		}
+	}
+
+	switch {
+	case strings.Contains(q, "今年"):
+		from := time.Date(thisYear, time.January, 1, 0, 0, 0, 0, now.Location())
+		to := time.Date(thisYear+1, time.January, 1, 0, 0, 0, 0, now.Location())
+		return mk(from, to, "今年")
+	case strings.Contains(q, "上个月"):
+		first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		from := first.AddDate(0, -1, 0)
+		to := first
+		return mk(from, to, "上个月")
+	case strings.Contains(q, "本月") || strings.Contains(q, "这个月"):
+		return monthRange(thisYear, now.Month(), "本月")
+	case strings.Contains(q, "本周") || strings.Contains(q, "这周"):
+		// 周一起算的自然周：从本周一到下周一
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7 // 周日归为 7，使周一=1
+		}
+		monday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).
+			AddDate(0, 0, -(weekday - 1))
+		to := monday.AddDate(0, 0, 7)
+		return mk(monday, to, "本周")
+	}
+
+	// 最近N天 / 最近N个月
+	if re := smartRecentDaysRe.FindStringSubmatch(q); re != nil {
+		n, err := strconv.Atoi(re[1])
+		if err == nil && n > 0 {
+			return dayRange(n, "最近"+re[1]+"天")
+		}
+	}
+	if re := smartRecentMonthsRe.FindStringSubmatch(q); re != nil {
+		n, err := strconv.Atoi(re[1])
+		if err == nil && n > 0 {
+			startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			from := startOfMonth.AddDate(0, -n, 0)
+			to := startOfMonth.AddDate(0, 1, 0)
+			return mk(from, to, "最近"+re[1]+"个月")
+		}
+	}
+
+	// 最近 / 近期（无具体数字）→ 最近 30 天
+	if strings.Contains(q, "最近") || strings.Contains(q, "近期") {
+		return dayRange(30, "最近30天")
+	}
+
+	return nil
+}
+
+// parseSmartSizeRange 解析大小描述为 [min,max] 字节区间 + 可读 label。
+// 输入 q 应为小写。支持 "大于X" / "小于X" / "超过X" / "不超过X"，
+// X 可带可选单位 MB/KB/GB/TB（不区分大小写，省略时按字节）。
+// 返回 nil 表示未识别到任何大小描述。
+func parseSmartSizeRange(q string) *struct {
+	Min   int64  `json:"min,omitempty"`
+	Max   int64  `json:"max,omitempty"`
+	Label string `json:"label"`
+} {
+	// 先尝试 "大于/超过"（min 约束，max 置 0）
+	if re := smartSizeGtRe.FindStringSubmatch(q); re != nil {
+		bytes, ok := smartSizeToBytes(re[1], re[2])
+		if ok && bytes > 0 {
+			label := strings.TrimSpace(re[0])
+			return &struct {
+				Min   int64  `json:"min,omitempty"`
+				Max   int64  `json:"max,omitempty"`
+				Label string `json:"label"`
+			}{Min: bytes, Label: label}
+		}
+	}
+	// "小于/不超过"（max 约束）
+	if re := smartSizeLtRe.FindStringSubmatch(q); re != nil {
+		bytes, ok := smartSizeToBytes(re[1], re[2])
+		if ok && bytes > 0 {
+			label := strings.TrimSpace(re[0])
+			return &struct {
+				Min   int64  `json:"min,omitempty"`
+				Max   int64  `json:"max,omitempty"`
+				Label string `json:"label"`
+			}{Max: bytes, Label: label}
+		}
+	}
+	return nil
+}
+
+// smartSizeToBytes 把 (数字字符串, 单位字符串) 转成字节数。
+// unit 为空或非识别单位时按字节处理。单位不区分大小写（调用方应已小写化）。
+// ok=false 表示数字解析失败。
+func smartSizeToBytes(numStr, unit string) (int64, bool) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	unit = strings.ToLower(strings.TrimSpace(unit))
+	var mult float64 = 1
+	switch unit {
+	case "", "b":
+		mult = 1
+	case "kb":
+		mult = 1024
+	case "mb":
+		mult = 1024 * 1024
+	case "gb":
+		mult = 1024 * 1024 * 1024
+	case "tb":
+		mult = 1024 * 1024 * 1024 * 1024
+	}
+	return int64(n * mult), true
+}
+
+// 智能搜索用的预编译正则（包级 var，避免每次请求重编译）。
+var (
+	// 今年N月 —— 匹配 "今年3月" / "今年 3月" / "今年12月份"
+	smartMonthRe = regexp.MustCompile(`今年\s*(\d{1,2})\s*月`)
+	// 最近N天 —— 匹配 "最近7天" / "最近 7天" / "近7天"
+	smartRecentDaysRe = regexp.MustCompile(`(?:最近|近)\s*(\d+)\s*天`)
+	// 最近N个月 —— 匹配 "最近3个月" / "最近 3个月"
+	smartRecentMonthsRe = regexp.MustCompile(`最近\s*(\d+)\s*个月`)
+	// 大于/超过 X(单位) —— 匹配 "大于10mb" / "超过 100 kb" / "大于10"
+	// 数字允许小数，单位为可选的字母序列（b/kb/mb/gb/tb 不区分大小写，调用方已小写化输入）。
+	smartSizeGtRe = regexp.MustCompile(`(?:大于|超过|多于)\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)?`)
+	// 小于/不超过 X(单位)
+	smartSizeLtRe = regexp.MustCompile(`(?:小于|不超过|少于)\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)?`)
+)
 
 // handleMediaRecentActivity V7：GET /api/media/recent-activity
 // 合并最近上传/收藏/分享活动，按时间倒序返回（最多 20 条）。
