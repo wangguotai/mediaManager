@@ -2327,6 +2327,48 @@ object MediaService {
     }
 
     /**
+     * GET /api/media/media-duplicate-deep?limit=50 — 重复深度分析（三类重复一次返回）。
+     *
+     * 后端一次 ListMediaByUser 全量拉取后在 Go 侧聚合，同时返回三类重复文件分析，供前端
+     * "深度去重"卡片一次加载渲染：
+     *
+     * a) exact_groups：相同 SHA256 的完全重复（同内容多份占用）。
+     * b) near_pairs  ：SHA256 不同但同类型 + 同分辨率(总像素) + 文件大小 ±5% 的近似重复
+     *    （可能是同一照片的不同格式/质量版本）。
+     * c) burst_groups：同一小时内按拍摄时间连续拍摄的同类型媒体（典型如连拍/截图）。
+     *
+     * 同时返回汇总字段：total_reclaimable_bytes（三类可回收字节之和）、
+     * total_redundant_count（三类冗余文件数之和），以及每类的截断前全量计数
+     * （exact_groups_total / near_pairs_total / burst_groups_total）与每类可回收字节。
+     *
+     * 本方法**简化处理**：直接返回后端响应体原始 JSON 字符串，由调用方（设置页
+     * [com.wgt.media.DuplicateDeepCard]）按需运行时解析所需字段，避免在此声明一长串
+     * 一次性 data class。与 [getBackendInfo] 同属"返回 String?"的简化范式。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态/错误态处理（不展示卡片数据）。
+     * 鉴权头由 [jsonClient] 的 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param limit 每类返回条数上限（默认 50，后端上限 500）；total_* 汇总为截断前全量统计
+     * @return 后端响应体 JSON 字符串；失败返回 null
+     */
+    suspend fun getMediaDuplicateDeep(limit: Int = 50): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-duplicate-deep") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                response.bodyAsText()
+            } else {
+                logger.info("MediaService", "getMediaDuplicateDeep status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaDuplicateDeep FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V7：GET /api/rn/manifest → RN bundle 版本信息。
      * 用于设置页"检查更新"功能。
      */
