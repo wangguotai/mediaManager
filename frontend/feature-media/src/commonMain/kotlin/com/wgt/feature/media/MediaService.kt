@@ -3746,6 +3746,47 @@ object MediaService {
     data class HourCount(val hour: Int, val count: Int)
 
     /**
+     * V8：GET /api/media/media-camera-stats — 拍摄设备分布统计。
+     *
+     * 后端按文件名前缀（IMG_/IMG-/PXL_/Screenshot/WXCam_/VIDEO_/DCIM 等）推断拍摄设备
+     * 并统计每类数量与占比，倒序返回 top 15。响应（与后端 [handleMediaCameraStats] 对齐）：
+     *
+     * `{cameras: [{camera, count, percentage}], total}`
+     *
+     * - [camera] 设备/来源名（如 "Apple (IMG_)"、"截图"、"微信相机"）。
+     * - [count] 该类媒体数量。
+     * - [percentage] 占总量百分比（0~100，Double）。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaByHour] / [getMediaTimeAnalysis] 同语义。
+     */
+    suspend fun getMediaCameraStats(): List<CameraStat>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-camera-stats") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["cameras"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val name = o["camera"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    CameraStat(
+                        camera = name,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaCameraStats FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：拍摄设备单条统计（设备名 + 数量 + 百分比，与后端 cameras[] 对齐）。 */
+    data class CameraStat(val camera: String, val count: Int, val percentage: Double)
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与

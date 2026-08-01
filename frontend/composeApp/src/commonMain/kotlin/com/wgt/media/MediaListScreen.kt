@@ -1814,6 +1814,17 @@ private fun MyTabContent(
             }
         }
 
+        // V8：拍摄设备分布卡片（调 media-camera-stats，显示设备分布 top5）。
+        // 后端按文件名前缀推断设备（Apple/Samsung/Pixel/截图/微信相机 等）并倒序返回；
+        // 此处取前 5 行渲染。请求失败或无数据时 getMediaCameraStats 返回 null，静默跳过。
+        var cameraStats by remember { mutableStateOf<List<MediaService.CameraStat>?>(null) }
+        LaunchedEffect(Unit) { cameraStats = MediaService.getMediaCameraStats() }
+        cameraStats?.let { cams ->
+            if (cams.isNotEmpty() && cams.sumOf { it.count } > 0) {
+                CameraStatsCard(cams)
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }
@@ -4423,6 +4434,75 @@ private fun StatItem(label: String, count: Int, bytes: Long) {
         Text("$count", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
         Text(formatBytesToMB(bytes), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
     }
+}
+
+/**
+ * V8：拍摄设备分布卡片 —— 「我的」Tab 中展示拍摄设备/来源分布 top5。
+ *
+ * 后端 [/api/media/media-camera-stats] 按文件名前缀推断设备（IMG_→Apple、IMG-→Samsung、
+ * PXL_→Pixel、Screenshot→截图、WXCam_→微信相机 等）并按数量倒序返回；本卡片取前 5 行渲染。
+ * 每行格式：`📱 <camera> (<N> 项 · <X>%)`，与「拍摄时段」卡片的左标签 + 进度条 + 右数值布局一致，
+ * 便于「我的」Tab 统计卡的视觉统一。
+ *
+ * 抽取为独立 [Composable] 以保持 [MyTabContent] 可读性（该函数已是超长函数）。
+ * 调用方负责 null/空态过滤，本函数假定 [cameras] 非空且总数 > 0。
+ *
+ * @param cameras 已按数量倒序的设备统计列表（最多取前 5 行）
+ */
+@Composable
+private fun CameraStatsCard(cameras: List<MediaService.CameraStat>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("拍摄设备", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+            // 后端已按 count 倒序，取前 5 行；总占比用作进度条分母（取已返回明细之和，
+            // 与后端 percentage 口径一致：count/total*100）。
+            val top = cameras.take(5).filter { it.count > 0 }
+            val maxCount = top.maxOf { it.count }.coerceAtLeast(1)
+            top.forEach { stat ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "📱 ${stat.camera}",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    LinearProgressIndicator(
+                        progress = { (stat.count.toFloat() / maxCount).coerceIn(0f, 1f) },
+                        modifier = Modifier.width(72.dp).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surface
+                    )
+                    Text(
+                        "${stat.count} 项 · ${formatPercent(stat.percentage)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.width(76.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * V8：百分比格式化——保留一位小数（commonMain 无 String.format，沿用 take 截断约定，
+ * 与标签影响力 coverage_percent / power_score 等处一致）。整数百分比省略小数（如 50% / 33.3%）。
+ */
+private fun formatPercent(pct: Double): String {
+    if (pct % 1.0 == 0.0) return "${pct.toInt()}%"
+    val raw = pct.toString()
+    return if (raw.indexOf('.') >= 0) "${raw.take(raw.indexOf('.') + 2)}%" else "$raw%"
 }
 
 /**
