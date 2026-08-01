@@ -4043,6 +4043,12 @@ private fun MyTabContent(
                             // 后端已按 power_score DESC 返回，此处取 top 5。null/空静默跳过。
                             var tagPower by remember { mutableStateOf<List<MediaService.TagPowerItem>?>(null) }
                             LaunchedEffect(Unit) { tagPower = MediaService.getTagPowerScore() }
+                            // V24：标签关联矩阵（调 GET /api/media/media-tag-correlation），用于"关联矩阵"区。
+                            // 后端返 top N 标签的 N×N 共现矩阵（含对角线=self count）；前端取 top 5
+                            // 标签、仅渲染 i<j 且 count>0 的共现对，避免重复与零共现。null（请求失败/
+                            // 未铺量）或矩阵维度不足则静默跳过，不影响既有区域。
+                            var tagCorrelation by remember { mutableStateOf<MediaService.TagCorrelation?>(null) }
+                            LaunchedEffect(Unit) { tagCorrelation = MediaService.getMediaTagCorrelation(limit = 10) }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -4207,6 +4213,72 @@ private fun MyTabContent(
                                                                 fontSize = 12.sp,
                                                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                                             )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // V24：标签关联矩阵区——调 getMediaTagCorrelation，文字版渲染 top 5
+                                            // 标签的共现对（i<j 且 count>0）。不画表格，仅显示有共现的标签对：
+                                            // 每行 "#tag1 ↔ #tag2 (count)"。矩阵对角线为标签自身 count（跳过），
+                                            // 利用对称性只取上三角避免重复。null（请求失败/未铺量）或维度不足（tags
+                                            // 或 matrix 行列不匹配/不足 2 个标签）则静默跳过，不影响既有区域。
+                                            tagCorrelation?.let { corr ->
+                                                val topN = 5
+                                                // 取前 topN 标签及对应矩阵行/列，行/列与 tags 同序。
+                                                val viewTags = corr.tags.take(topN)
+                                                val n = viewTags.size
+                                                // 矩阵行数与列数需对齐 viewTags 维度，否则跳过（防御后端异常返回）。
+                                                val matrixOk = n >= 2 && corr.matrix.size >= n &&
+                                                    corr.matrix.subList(0, n).all { it.size >= n }
+                                                if (matrixOk) {
+                                                    // 收集 i<j 且 count>0 的共现对，按 count 倒序取 top 5。
+                                                    val pairList = mutableListOf<Triple<String, String, Int>>()
+                                                    for (i in 0 until n) {
+                                                        for (j in (i + 1) until n) {
+                                                            val c = corr.matrix[i][j]
+                                                            if (c > 0) {
+                                                                pairList.add(Triple(viewTags[i], viewTags[j], c))
+                                                            }
+                                                        }
+                                                    }
+                                                    if (pairList.isNotEmpty()) {
+                                                        Spacer(modifier = Modifier.height(12.dp))
+                                                        Text(
+                                                            "关联矩阵",
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 14.sp,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        // 副标题：与"常一起出现"同源但取自矩阵视角，标注 top 标签范围。
+                                                        Text(
+                                                            "共 ${corr.totalTags} 个标签，矩阵视角（top $n）",
+                                                            fontSize = 11.sp,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                        )
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        pairList.sortedByDescending { it.third }.take(5).forEach { (a, b, c) ->
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(vertical = 2.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Text(
+                                                                    "#$a ↔ #$b",
+                                                                    fontSize = 13.sp,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                    modifier = Modifier.weight(1f),
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                                Text(
+                                                                    "$c",
+                                                                    fontSize = 12.sp,
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 }

@@ -4967,6 +4967,65 @@ object MediaService {
     )
 
     /**
+     * 标签关联性矩阵数据（GET /api/media/media-tag-correlation）。
+     *
+     * 与 [TagNetwork]/[TagPair] 同源共现语义但输出 N×N 完整矩阵（含对角线）：
+     * [tags] 为 top N 标签名数组（顺序即行/列索引），[matrix][i][j] 表示同时拥有
+     * tag_i 和 tag_j 的 media 数量；对角线 [matrix][i][i] = 该标签自身关联 media 数
+     * （即该标签 count）。对称矩阵。[totalTags] 为该用户全部标签数（含未入选者），
+     * 供前端展示"共 N 个标签"汇总。
+     *
+     * 适合热力图 / 弦图等矩阵可视化；本前端目前仅渲染文字版共现对列表。
+     */
+    data class TagCorrelation(
+        val tags: List<String>,
+        val matrix: List<List<Int>>,
+        val totalTags: Int
+    )
+
+    /**
+     * GET /api/media/media-tag-correlation?limit=N — 标签关联性矩阵。
+     *
+     * 后端取 count DESC 排序后的 top N 标签（默认 10，范围 [1,100]），构建 N×N
+     * 矩阵：cell[i][j] = 同时拥有 tag_i 和 tag_j 的 media 数量；对角线 cell[i][i] =
+     * 该标签自身关联 media 数（即 count）。响应: `{tags, matrix, total_tags}`。
+     *
+     * 与 [getTagCoOccurrence] 的区别：后者只返 count>=2 的稀疏标签对列表（适合
+     * "哪些标签经常共现"的查询）；本端点返完整 N×N 矩阵，适合矩阵可视化。前端在
+     * 标签管理面板"常一起出现"区之后用此矩阵渲染文字版 top 5 共现对（i<j 且 count>0）。
+     *
+     * 解析沿用 [getTagNetwork] 的运行时 JSON 操作（无 serialization 编译器插件依赖）。
+     * 失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip 静默跳过矩阵区，
+     * 不崩溃标签管理面板。
+     *
+     * @param limit 取前 N 个标签构建矩阵（透传 query param）；默认 10，前端取 top 5 渲染。
+     * @return 标签关联矩阵（tags + matrix + totalTags）；失败返回 null
+     */
+    suspend fun getMediaTagCorrelation(limit: Int = 10): TagCorrelation? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-tag-correlation") {
+                parameter("limit", limit)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val tags = o["tags"]?.jsonArray?.map { it.jsonPrimitive.contentOrNull ?: "" } ?: emptyList()
+                val matrix = o["matrix"]?.jsonArray?.map { row ->
+                    row.jsonArray.map { cell -> cell.jsonPrimitive.intOrNull ?: 0 }
+                } ?: emptyList()
+                TagCorrelation(
+                    tags = tags,
+                    matrix = matrix,
+                    totalTags = o["total_tags"]?.jsonPrimitive?.intOrNull ?: tags.size
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagCorrelation FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 标签层级子节点（[tag] = 子标签名，[count] = 该子标签自身关联媒体数）。
      * 后端 count 仅含子标签自身，不含父标签，避免重复统计口径混乱。
      */
@@ -7554,6 +7613,104 @@ object MediaService {
             logger.error("MediaService", "getFullReport FAILED: ${e::class.simpleName} ${e.message}")
             null
         }
+    }
+
+    /**
+     * GET /api/media/media-bulk-export — 批量导出当前用户媒体元数据（筛选后 JSON）。
+     *
+     * 后端按可选筛选条件返回命中媒体的元数据列表（[exported_at, total, media:[...]]），
+     * 每条 media 携带 id/filename/type/size/mime/width/height/sha256/created_at/taken_at。
+     * 各筛选条件均可选，空串即不施加该条件：
+     *
+     * - [type]：IMAGE / VIDEO / LIVE_PHOTO（精确匹配；后端对空 type 行归一为 IMAGE 再比）
+     * - [tag]：精确标签名，命中 media_tags 关联的 media_id 集合做内存交集
+     * - [dateFrom]：日期（YYYY-MM-DD）。前端把"YYYY-MM-DD"补成 RFC3339 当地 00:00:00→Z 透传。
+     *   后端按 time.Parse(time.RFC3339) 解析，非法值静默忽略，故空串/格式错时仅不施加该条件。
+     * - [dateTo]：同 [dateFrom]，对应闭区间右端（created_at <= 该时刻）。前端补成当天 23:59:59→Z。
+     *
+     * 返回 pretty 化后的 JSON 字符串（2 空格缩进，便于阅读）；非 200 或网络异常返回 null，
+     * UI 侧提示"导出失败"。与 [getFullReport] 同款 pretty 化逻辑。
+     *
+     * @param type 媒体类型筛选，空串不施条件
+     * @param tag 标签筛选，空串不施条件
+     * @param dateFrom 起始日期 YYYY-MM-DD，空串不施条件
+     * @param dateTo 截止日期 YYYY-MM-DD，空串不施条件
+     * @return pretty 化后的 JSON 字符串；失败返回 null
+     */
+    suspend fun getMediaBulkExport(
+        type: String = "",
+        tag: String = "",
+        dateFrom: String = "",
+        dateTo: String = ""
+    ): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${'$'}{backendBaseUrl()}/api/media/media-bulk-export") {
+                if (type.isNotBlank()) parameter("type", type.trim())
+                if (tag.isNotBlank()) parameter("tag", tag.trim())
+                // 日期补齐为 RFC3339：date_from 当地 00:00:00 / date_to 当地 23:59:59 + Z。
+                // 后端按 RFC3339 解析；非法值静默忽略，故补齐失败也只退化为"不加该条件"。
+                if (dateFrom.isNotBlank()) parameter("date_from", toRfc3339Start(dateFrom.trim()))
+                if (dateTo.isNotBlank()) parameter("date_to", toRfc3339End(dateTo.trim()))
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                logger.info(
+                    "MediaService",
+                    "getMediaBulkExport type=${'$'}type tag=${'$'}tag dateFrom=${'$'}dateFrom dateTo=${'$'}dateTo " +
+                        "status=${'$'}{response.status} bytes=${'$'}{body.length}"
+                )
+                // pretty 化：与 getFullReport 同款，解析失败（非合法 JSON）原样返回。
+                runCatching {
+                    val pretty = Json {
+                        prettyPrint = true
+                        prettyPrintIndent = "  "
+                        ignoreUnknownKeys = true
+                    }
+                    val element = pretty.parseToJsonElement(body)
+                    pretty.encodeToString(JsonElement.serializer(), element)
+                }.getOrDefault(body)
+            } else {
+                logger.info("MediaService", "getMediaBulkExport status=${'$'}{response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error(
+                "MediaService",
+                "getMediaBulkExport FAILED: ${'$'}{e::class.simpleName} ${'$'}{e.message}"
+            )
+            null
+        }
+    }
+
+    /**
+     * 把 "YYYY-MM-DD" 解析为 RFC3339 起点时刻字符串（当地 00:00:00→Z，UTC 简化）。
+     *
+     * 前端 commonMain 无 java.time/kotlinx-datetime，用纯整数补齐：把"年-月-日"各段拼成
+     * "YYYY-MM-DDT00:00:00Z"，交给后端 time.Parse(time.RFC3339) 解析。非法输入（含分月天数
+     * 不合法）返回空串——调用方据此决定是否附加该 query 参数（空串则不附加）。
+     *
+     * 仅做格式拼接，不做历法校验（如 2-30）；后端 Parse 会拒绝并静默忽略，影响只是不加条件。
+     */
+    private fun toRfc3339Start(date: String): String {
+        val parts = date.split('-')
+        if (parts.size != 3) return ""
+        val y = parts[0].trim(); val m = parts[1].trim(); val d = parts[2].trim()
+        if (y.length != 4 || m.length != 2 || d.length != 2) return ""
+        if (y.any { !it.isDigit() } || m.any { !it.isDigit() } || d.any { !it.isDigit() }) return ""
+        return "${'$'}${'$'}{y}-${'$'}${'$'}{m}-${'$'}${'$'}{d}T00:00:00Z"
+    }
+
+    /**
+     * 把 "YYYY-MM-DD" 解析为 RFC3339 结束时刻字符串（当地 23:59:59→Z，UTC 简化）。
+     * 与 [toRfc3339Start] 配对，对应闭区间右端。合法性同款判定。
+     */
+    private fun toRfc3339End(date: String): String {
+        val parts = date.split('-')
+        if (parts.size != 3) return ""
+        val y = parts[0].trim(); val m = parts[1].trim(); val d = parts[2].trim()
+        if (y.length != 4 || m.length != 2 || d.length != 2) return ""
+        if (y.any { !it.isDigit() } || m.any { !it.isDigit() } || d.any { !it.isDigit() }) return ""
+        return "${'$'}${'$'}{y}-${'$'}${'$'}{m}-${'$'}${'$'}{d}T23:59:59Z"
     }
 
     /**
