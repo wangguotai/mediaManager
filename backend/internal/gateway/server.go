@@ -528,6 +528,10 @@ func (s *Server) registerRoutes() {
 	// 智能归档建议：筛选冷数据（>180天）中的大视频（>50MB），建议移至独立"归档"相册。
 	// 与 media-archive-status（温度档统计）互补：后者只统计分布，本端点给出可操作建议清单。
 	s.mux.HandleFunc("/api/media/archive-suggest", s.handleArchiveSuggest)
+	// 归档建议V2（多维度评分+原因+潜在节省）：对全量未软删 media 按 年龄/无标签/
+	// 不在相册/大小/非收藏 五维加权打分，按 archive_score 倒序给出应归档到冷存储的清单。
+	// 与 archive-suggest（仅冷数据+大视频筛选）互补：本端点做多维度智能评分并给出每条原因。
+	s.mux.HandleFunc("/api/media/media-archive-recommend-v2", s.handleMediaArchiveRecommendV2)
 	// V8：同步状态摘要
 	s.mux.HandleFunc("/api/media/sync-status", s.handleMediaSyncStatus)
 	// V8：所有相册摘要
@@ -23196,4 +23200,226 @@ func shootUnixOf(takenAtMs int64, createdAt time.Time) int64 {
 		return takenAtMs / 1000
 	}
 	return createdAt.Unix()
+}
+
+// handleMediaArchiveRecommendV2 GET /api/media/media-archive-recommend-v2 — 归档建议V2。
+//
+// 多维度智能评分，推荐应归档到冷存储的媒体。对全量未软删 media 按下列规则累加
+// archive_score（分数越高越建议归档）：
+//   - 年龄 > 180 天:    +30   （冷数据，长期未活跃）
+//   - 无标签:           +20   （未分类，难以检索管理）
+//   - 不在任何相册:     +20   （未被组织收纳）
+//   - 大小 > 10MB:      +15   （占用空间大，归档收益高）
+//   - 非收藏:           +15   （非用户偏好重点，归档低风险）
+//
+// 数据源：一次 ListMediaByUser 全量拉取；标签集合经 ListAllTags + 逐标签 SearchMediaByTag
+// 合并（与 handleMediaTagStatDetailed 同模式，避免逐条 ListMediaTags 的 N+1）；收藏集经
+// mediaSvc.favoriteProvider；相册集经 mediaSvc.albumStoreProvider。三者 best-effort：当
+// 对应 provider 未配置（纯测试/无该能力的 mediaSvc）时，该维度不评分、reasons 不列对应项，
+// 评分仍基于其余维度，端点正常返回。需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// ?limit=20（默认 20，钳制 [1,200]）。按 archive_score 倒序，并列按 size 倒序作稳定 tiebreaker。
+// 返回：{recommendations:[{media_id,filename,score,size,age_days,type,reasons:[...]}],
+//        total, potential_savings_bytes, scored_count, user_id}
+// potential_savings_bytes 为返回的 recommendations 中各条 size 之和（归档后可从热存储释放的上限）。
+func (s *Server) handleMediaArchiveRecommendV2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// limit：默认 20，钳制 [1, 200]。
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 200 {
+				n = 200
+			}
+			limit = n
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 评分常量与阈值。
+	const (
+		coldThresholdDays = 180
+		coldScore         = 30
+		noTagScore        = 20
+		notInAlbumScore   = 20
+		largeSizeScore    = 15
+		largeSizeMB       = 10
+		mbBytes           = 1024 * 1024
+		notFavScore       = 15
+	)
+	largeSizeThreshold := int64(largeSizeMB) * int64(mbBytes)
+	now := time.Now()
+	coldThreshold := time.Duration(coldThresholdDays) * 24 * time.Hour
+
+	// 收藏集合（best-effort）：mediaSvc 实现 favoriteProvider 时启用。
+	favSet := make(map[string]struct{})
+	favOK := false
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favOK = true
+		for _, id := range fav.ListFavorites(uid) {
+			favSet[id] = struct{}{}
+		}
+	}
+
+	// 相册 media 集合（best-effort）：mediaSvc 实现 albumStoreProvider 时启用。
+	albumSet := make(map[string]struct{})
+	albumOK := false
+	if ap, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumOK = true
+		for _, album := range ap.ListAlbums(uid) {
+			if album == nil {
+				continue
+			}
+			for _, id := range album.MediaIDs {
+				albumSet[id] = struct{}{}
+			}
+		}
+	}
+
+	// 有标签的 media_id 集合（best-effort）：store 必已注入（前面校验）。ListAllTags +
+	// 逐标签 SearchMediaByTag 合并，与 handleMediaTagStatDetailed 同模式。标签查询失败
+	// 时该维度降级为“所有 media 都算有标签”（不扣分），保证端点可用。
+	taggedSet := make(map[string]struct{})
+	taggedOK := false
+	if tagNames, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+		taggedOK = true
+		for _, tn := range tagNames {
+			ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tn)
+			if serr != nil {
+				// 单标签查询失败不致命，best-effort 继续。
+				continue
+			}
+			for _, id := range ids {
+				taggedSet[id] = struct{}{}
+			}
+		}
+	} // taggedOK=false 时视为该维度不可用，不评分。
+
+	type rec struct {
+		MediaID  string   `json:"media_id"`
+		Filename string   `json:"filename"`
+		Score    int      `json:"score"`
+		Size     int64    `json:"size"`
+		AgeDays  int64    `json:"age_days"`
+		Type     string   `json:"type"`
+		Reasons  []string `json:"reasons"`
+	}
+
+	recs := make([]rec, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m == nil || m.Deleted {
+			continue
+		}
+		age := now.Sub(m.CreatedAt)
+		ageDays := int64(age / (24 * time.Hour))
+
+		score := 0
+		reasons := make([]string, 0, 5)
+
+		// 维度1：年龄 > 180 天。
+		if age > coldThreshold {
+			score += coldScore
+			reasons = append(reasons, fmt.Sprintf("上传已 %d 天（超过 %d 天冷数据阈值）", ageDays, coldThresholdDays))
+		}
+		// 维度2：无标签（best-effort，taggedOK 时才评分）。
+		if taggedOK {
+			if _, has := taggedSet[m.ID]; !has {
+				score += noTagScore
+				reasons = append(reasons, "无标签（未分类，难以检索）")
+			}
+		}
+		// 维度3：不在任何相册（best-effort，albumOK 时才评分）。
+		if albumOK {
+			if _, in := albumSet[m.ID]; !in {
+				score += notInAlbumScore
+				reasons = append(reasons, "不在任何相册中（未被组织收纳）")
+			}
+		}
+		// 维度4：大小 > 10MB。
+		if m.Size > largeSizeThreshold {
+			score += largeSizeScore
+			reasons = append(reasons, fmt.Sprintf("体积 %.2f MB（超过 %d MB，归档收益高）", float64(m.Size)/float64(mbBytes), largeSizeMB))
+		}
+		// 维度5：非收藏（best-effort，favOK 时才评分）。
+		if favOK {
+			if _, is := favSet[m.ID]; !is {
+				score += notFavScore
+				reasons = append(reasons, "非收藏媒体（归档低风险）")
+			}
+		}
+
+		if score == 0 {
+			continue // 无任何归档信号，不列入建议
+		}
+
+		recs = append(recs, rec{
+			MediaID:  m.ID,
+			Filename: m.Filename,
+			Score:    score,
+			Size:     m.Size,
+			AgeDays:  ageDays,
+			Type:     m.Type,
+			Reasons:  reasons,
+		})
+	}
+
+	// 排序：archive_score 倒序；并列按 size 倒序（归档收益大的优先），构成稳定顺序。
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].Score != recs[j].Score {
+			return recs[i].Score > recs[j].Score
+		}
+		return recs[i].Size > recs[j].Size
+	})
+
+	scoredCount := len(recs)
+	// 截取 limit 条返回；potential_savings 仅按返回清单累计。
+	if limit < len(recs) {
+		recs = recs[:limit]
+	}
+	var potentialSavings int64
+	for _, rc := range recs {
+		potentialSavings += rc.Size
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recommendations":          recs,
+		"total":                    len(recs),
+		"potential_savings_bytes":  potentialSavings,
+		"potential_savings_mb":     round2(float64(potentialSavings) / float64(mbBytes)),
+		"scored_count":             scoredCount, // 截取前进入评分的 media 总数
+		"limit":                    limit,
+		"dimensions": map[string]any{
+			"age_over_days":     coldThresholdDays,
+			"age_score":         coldScore,
+			"no_tag_score":      noTagScore,
+			"not_in_album_score": notInAlbumScore,
+			"large_size_mb":     largeSizeMB,
+			"large_size_score":  largeSizeScore,
+			"not_favorite_score": notFavScore,
+			"favorite_enabled":  favOK,
+			"album_enabled":     albumOK,
+			"tag_enabled":       taggedOK,
+		},
+		"user_id": uid,
+	})
 }
