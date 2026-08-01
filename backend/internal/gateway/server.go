@@ -240,6 +240,10 @@ func (s *Server) registerRoutes() {
 	// （taken_at，缺失则回退 created_at）推断地点类型，统计 indoor/outdoor/office/unknown
 	// 分布与主导类型。Media model 无 GPS 字段，故为启发式估算，非精确坐标。需认证+store。
 	s.mux.HandleFunc("/api/media/media-gps-estimate", s.handleMediaGpsEstimate)
+	// 媒体心情分析：基于拍摄时段（taken_at，缺失则回退 created_at）的小时数推断照片"心情"——
+	// 清晨清新(6-10h)/午后活力(10-16h)/黄昏浪漫(16-19h)/夜晚神秘(19-6h)，统计各心情
+	// count+percentage+emoji 与 dominant_mood。需认证+store。
+	s.mux.HandleFunc("/api/media/media-mood-analysis", s.handleMediaMoodAnalysis)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
@@ -6647,6 +6651,124 @@ func (s *Server) handleMediaColorTemperature(w http.ResponseWriter, r *http.Requ
 		},
 		"total":    total,
 		"dominant": dominant,
+	})
+}
+
+// handleMediaMoodAnalysis GET /api/media/media-mood-analysis — 照片心情分析。
+//
+// 对当前用户全部未软删媒体，按拍摄时段（taken_at 毫秒时间戳；缺失=0 时回退到
+// created_at 上传时间）的 UTC 小时数推断照片"心情"，统计四类分布：
+//
+//	清晨清新  → 6-10h   拍摄，晨光柔和、空气通透
+//	午后活力  → 10-16h  拍摄，正午强光、明亮高对比
+//	黄昏浪漫  → 16-19h  拍摄，日落金光、暖调低角度
+//	夜晚神秘  → 19-6h   拍摄，暗光长曝、氛围感强
+//
+// 响应结构：
+//
+//	{
+//	  "moods": [                  // 按 count 降序，含 0 计数的类别
+//	    {"mood":"清晨清新","count":N,"percentage":12.34,"emoji":"🌅"},
+//	    ...
+//	  ],
+//	  "total":          N,        // 参与分桶的未软删媒体总数
+//	  "dominant_mood":  "清晨清新" // count 最大的心情；total=0 时为 null
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。时间口径统一用 UTC（与 created_at 一致，
+// 与 media-color-temperature / media-gps-estimate 等同类端点口径相同）。
+func (s *Server) handleMediaMoodAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 心情桶，固定顺序与时段边界对齐，便于稳定渲染。
+	type moodBucket struct {
+		mood  string
+		emoji string
+		count int64
+	}
+	buckets := []*moodBucket{
+		{mood: "清晨清新", emoji: "🌅"},
+		{mood: "午后活力", emoji: "☀️"},
+		{mood: "黄昏浪漫", emoji: "🌇"},
+		{mood: "夜晚神秘", emoji: "🌃"},
+	}
+	// hour → bucket 索引映射（19-6h 跨午夜，统一归夜晚神秘）。
+	bucketByHour := func(hour int) int {
+		switch {
+		case hour >= 6 && hour < 10:
+			return 0 // 清晨清新
+		case hour >= 10 && hour < 16:
+			return 1 // 午后活力
+		case hour >= 16 && hour < 19:
+			return 2 // 黄昏浪漫
+		default: // 19-23h 与 0-5h → 夜晚神秘
+			return 3
+		}
+	}
+
+	var total int64
+	for _, m := range mediaList {
+		// 优先用拍摄时间 taken_at（毫秒时间戳）；缺失(=0)则回退到上传时间 created_at。
+		var t time.Time
+		if m.TakenAt != 0 {
+			t = time.UnixMilli(m.TakenAt).UTC()
+		} else {
+			t = m.CreatedAt.UTC()
+		}
+		buckets[bucketByHour(t.Hour())].count++
+		total++
+	}
+
+	// 按 count 降序输出（count 相同保持定义顺序，稳定可预期）。
+	sorted := make([]*moodBucket, len(buckets))
+	copy(sorted, buckets)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].count > sorted[j].count
+	})
+
+	moods := make([]map[string]any, 0, len(sorted))
+	for _, b := range sorted {
+		var pct float64
+		if total > 0 {
+			pct = float64(b.count) / float64(total) * 100
+			// 保留两位小数，避免浮点尾长。
+			pct = math.Round(pct*100) / 100
+		}
+		moods = append(moods, map[string]any{
+			"mood":       b.mood,
+			"count":      b.count,
+			"percentage": pct,
+			"emoji":      b.emoji,
+		})
+	}
+
+	// dominant_mood：count 最大的类别（已降序，取首位）；total=0 时为 null。
+	var dominant any
+	if total > 0 {
+		dominant = sorted[0].mood
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"moods":         moods,
+		"total":         total,
+		"dominant_mood": dominant,
 	})
 }
 
