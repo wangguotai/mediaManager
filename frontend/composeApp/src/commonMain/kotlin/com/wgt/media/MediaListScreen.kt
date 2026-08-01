@@ -4988,6 +4988,11 @@ private fun MyTabContent(
                             // null（请求失败）或空则静默跳过，不影响既有区域。
                             var tagEvolution by remember { mutableStateOf<List<MediaService.TagEvolution>?>(null) }
                             LaunchedEffect(Unit) { tagEvolution = MediaService.getMediaTagEvolution(months = 6) }
+                            // V8：标签智能语义分组（调 GET /api/media/media-tag-smart-group），用于"智能分组"区。
+                            // 后端按预设语义簇（旅行/美食/人物/风景/其他）归类全部标签；
+                            // null（请求失败）或空则静默跳过，不影响既有区域。
+                            var tagSmartGroup by remember { mutableStateOf<List<MediaService.TagSmartGroup>?>(null) }
+                            LaunchedEffect(Unit) { tagSmartGroup = MediaService.getMediaTagSmartGroup() }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -5265,6 +5270,47 @@ private fun MyTabContent(
                                                             )
                                                             Text(
                                                                 label,
+                                                                fontSize = 12.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // V8：智能分组区——调 getMediaTagSmartGroup()，展示标签按语义
+                                            // 簇（旅行/美食/人物/风景/其他）的分组结果。每组一行：
+                                            // "📂 group_name (N 个标签): tag1, tag2, ..."，最多展示 5 组。
+                                            // null（请求失败/未铺量）或空则静默跳过，不影响既有区域。
+                                            tagSmartGroup?.let { groups ->
+                                                if (groups.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text(
+                                                        "智能分组",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    groups.take(5).forEach { g ->
+                                                        // 标签列表拼成 "tag1, tag2, ..."，过长省略。
+                                                        val tagsStr = g.tags.joinToString(", ")
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.Top
+                                                        ) {
+                                                            Text(
+                                                                "📂 ${g.groupName}（${g.count} 个标签）：$tagsStr",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 2,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                "${g.totalMedia} 项",
                                                                 fontSize = 12.sp,
                                                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                                             )

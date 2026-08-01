@@ -5762,6 +5762,52 @@ object MediaService {
     )
 
     /**
+     * V8：GET /api/media/media-tag-smart-group — 标签智能语义分组。
+     *
+     * 后端按预设语义簇（旅行/美食/人物/风景/其他）将用户全部标签归入若干组，
+     * 如"旅行"/"旅游"/"trip"/"travel"→旅行组。返回
+     * `{groups: [{group_name, tags, count, total_media}], total_groups, ungrouped_count}`：
+     * - groups：按预设顺序输出，仅含命中的组；count 为组内标签数，
+     *   total_media 为该组所有标签关联的去重未软删 media 数。
+     * - total_groups：实际有标签的组数（含其他组，若非空）。
+     * - ungrouped_count：未归入任何预设语义组的标签数（即"其他组"内的标签数）。
+     *
+     * 返回 `null` = 网络/HTTP 失败（UI 隐藏整区）；非 null（可能为空列表）= 成功。
+     * 调用方最多展示 5 个组。
+     */
+    suspend fun getMediaTagSmartGroup(): List<TagSmartGroup>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-tag-smart-group")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["groups"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagSmartGroup(
+                        groupName = o["group_name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        tags = o["tags"]?.jsonArray?.map { t ->
+                            t.jsonPrimitive.contentOrNull ?: ""
+                        } ?: emptyList(),
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagSmartGroup FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V8：标签智能语义分组单项（[getMediaTagSmartGroup] 返回）。
+     *  [count] = 组内标签数，[totalMedia] = 该组所有标签关联的去重 media 数。 */
+    data class TagSmartGroup(
+        val groupName: String = "",
+        val tags: List<String> = emptyList(),
+        val count: Int = 0,
+        val totalMedia: Int = 0
+    )
+
+    /**
      * V9：GET /api/media/tag-network — 标签网络图数据（节点+边）。
      *
      * 与 [getTagCoOccurrence] 同源数据但输出图结构：标签作为节点（[TagNode.count]
