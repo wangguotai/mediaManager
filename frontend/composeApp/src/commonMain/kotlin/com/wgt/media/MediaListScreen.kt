@@ -931,6 +931,133 @@ private fun MyTabContent(
             }
         }
 
+        // 成长里程碑卡片 —— 调 media-growth-milestone 展示已达成里程碑 (100/500/1000/...)
+        // 的达成日期 + 下一目标 + 预测达成日期。置于媒体库总览后、用户信息卡片前。
+        // null 或 total==0 时静默跳过（不占位），与总览卡片同等空态处理。
+        var growthMilestone by remember { mutableStateOf<MediaService.GrowthMilestone?>(null) }
+        LaunchedEffect(Unit) { growthMilestone = MediaService.getMediaGrowthMilestone() }
+        growthMilestone?.let { gm ->
+            if (gm.total > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "成长里程碑",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 已达成里程碑：每个 milestone 对应一个 emoji + 数值 + 达成日期。
+                        // emoji 按里程碑数值映射（与总览卡片 emoji 风格一致）。
+                        if (gm.achieved.isNotEmpty()) {
+                            Text(
+                                "已达成",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            gm.achieved.forEach { item ->
+                                val emoji = when (item.milestone) {
+                                    100 -> "💯"
+                                    500 -> "🏆"
+                                    1000 -> "🎉"
+                                    5000 -> "🚀"
+                                    10000 -> "💎"
+                                    else -> "📌"
+                                }
+                                // date 为 RFC3339 UTC，取前 10 位 (YYYY-MM-DD) 展示。
+                                val dateStr = item.date.take(10)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(emoji, fontSize = 16.sp)
+                                    Text(
+                                        "${item.milestone}",
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        "· $dateStr",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    Text(
+                                        "${item.mediaCount} 项",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                        }
+                        // 下一目标 + 预测达成日期。
+                        // nextMilestone 为 null 表示全部里程碑已达成（展示"全部达成"）；
+                        // projectedDate 为 null 表示无法预测（无足够历史数据）。
+                        gm.nextMilestone?.let { next ->
+                            if (gm.achieved.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "🎯 下一目标",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "$next",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 16.sp
+                                )
+                            }
+                            gm.projectedDate?.let { pd ->
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "预测达成 ${pd.take(10)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        } ?: run {
+                            // 全部里程碑已达成。
+                            if (gm.achieved.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "🏅 全部里程碑已达成",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "累计 ${gm.total} 项媒体",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(

@@ -8865,6 +8865,89 @@ object MediaService {
     }
 
     /**
+     * 成长里程碑 —— 媒体库规模达成关键节点 (100/500/1000/5000/10000) 的历史记录
+     * 与下一目标的预测达成日期。
+     *
+     * 后端 `GET /api/media/media-growth-milestone` 基于 ListMediaByUser 按上传时间
+     * 正序累计，记录每个里程碑首次达成日期（见 [MilestoneItem]），并按全程日均增长
+     * 速率外推 [nextMilestone] 的预测达成日期 [projectedDate]。
+     *
+     * @param achieved       已达成的里程碑列表（按 milestone 升序）
+     * @param nextMilestone  下一未达成里程碑数值；全部已达成时为 null
+     * @param projectedDate  下一里程碑预测达成日期（RFC3339 UTC）；无数据时为 null
+     * @param total          媒体总数（未软删）
+     */
+    data class GrowthMilestone(
+        val achieved: List<MilestoneItem>,
+        val nextMilestone: Int?,
+        val projectedDate: String?,
+        val total: Int
+    )
+
+    /**
+     * 单个已达成里程碑（与后端 achievedMilestone JSON 对齐）。
+     *
+     * @param milestone   里程碑阈值（100/500/1000/5000/10000）
+     * @param date        达成日期（RFC3339 UTC，如 `2025-01-15T…Z`）
+     * @param mediaCount  达成时点的累计媒体数
+     */
+    data class MilestoneItem(
+        val milestone: Int,
+        val date: String,
+        val mediaCount: Int
+    )
+
+    /**
+     * GET /api/media/media-growth-milestone — 媒体增长里程碑。
+     *
+     * 后端追踪媒体库规模达成关键里程碑 (100/500/1000/5000/10000) 的日期，并基于
+     * 历史增长速率预测下一里程碑的达成日期。前端用于"我的"Tab 成长里程碑卡片
+     * 展示已达成里程碑 + 下一目标 + 预测日期。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaLibraryOverview] 同款）。**不附加 per-call
+     * 鉴权头**——Bearer token 由 [jsonClient] 的 `defaultRequest` 统一注入（与
+     * [getRelatedMedia] / [getMediaList] 同款）。`next_milestone` / `projected_date`
+     * 可为 JSON null，前端按可空类型接收（[nextMilestone] / [projectedDate]）。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @return 里程碑对象；失败返回 null
+     */
+    suspend fun getMediaGrowthMilestone(): GrowthMilestone? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-growth-milestone")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val achieved = o["achieved"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val ms = item["milestone"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+                    MilestoneItem(
+                        milestone = ms,
+                        date = item["date"]?.jsonPrimitive?.contentOrNull ?: "",
+                        mediaCount = item["media_count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                GrowthMilestone(
+                    achieved = achieved,
+                    nextMilestone = o["next_milestone"]
+                        ?.takeIf { it !is JsonNull }
+                        ?.let { it.jsonPrimitive.intOrNull },
+                    projectedDate = o["projected_date"]
+                        ?.takeIf { it !is JsonNull }
+                        ?.let { it.jsonPrimitive.contentOrNull },
+                    total = o["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaGrowthMilestone status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaGrowthMilestone FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；
