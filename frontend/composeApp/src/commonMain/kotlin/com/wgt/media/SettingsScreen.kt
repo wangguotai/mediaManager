@@ -3281,13 +3281,13 @@ private fun SummaryReportContent(report: MediaService.SummaryReport) {
         if (report.stats.liveCount > 0) ReportRow("Live Photo", "${report.stats.liveCount}")
         ReportRow("相册", "${report.stats.albumCount}")
         ReportRow("收藏", "${report.stats.favoriteCount}")
-        ReportRow("总占用", "%.1f MB".format(report.stats.totalMB))
+        ReportRow("总占用", "${kotlin.math.round(report.stats.totalMB * 10.0) / 10.0} MB")
     }
 
     // —— 维度 2：月度分布 ——
     ReportSection(title = "📅 月度分布") {
         ReportRow("年度上传", "${report.yearly.totalCount} 项")
-        ReportRow("年度体积", "%.1f MB".format(report.yearly.totalMB))
+        ReportRow("年度体积", "${kotlin.math.round(report.yearly.totalMB * 10.0) / 10.0} MB")
         if (report.yearly.topDay.date.isNotEmpty() && report.yearly.topDay.count > 0) {
             ReportRow("最忙的一天", "${report.yearly.topDay.date}（${report.yearly.topDay.count} 项）")
         }
@@ -3391,7 +3391,7 @@ private fun SummaryReportContent(report: MediaService.SummaryReport) {
     ReportSection(title = "🔥 上传活跃度") {
         ReportRow("活跃天数", "${report.activity.activeDays} 天")
         ReportRow("总上传", "${report.activity.totalUploads} 次")
-        ReportRow("日均上传", "%.1f 项/天".format(report.activity.avgPerDay))
+        ReportRow("日均上传", "${kotlin.math.round(report.activity.avgPerDay * 10.0) / 10.0} 项/天")
         ReportRow("连续上传", "${report.activity.streak} 天（最长 ${report.activity.maxStreak} 天）")
         if (report.activity.mostActiveMonth > 0) {
             ReportRow("最活跃月份", "${report.activity.mostActiveMonth} 月")
