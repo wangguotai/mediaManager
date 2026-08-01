@@ -438,6 +438,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/upload-calendar", s.handleMediaUploadCalendar)
 	// 连续上传天数统计（current/longest streak，类似 GitHub 连续贡献天数）。
 	s.mux.HandleFunc("/api/media/upload-streak", s.handleUploadStreak)
+	// 时间线大事件（媒体库重要节点：首次上传/最忙日/最长间隔/里程碑）。
+	// 仅基于 created_at 一次 ListMediaByUser 全量拉取后在 Go 侧聚合，只读端点。
+	s.mux.HandleFunc("/api/media/media-timeline-events", s.handleMediaTimelineEvents)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
@@ -10178,6 +10181,151 @@ func (s *Server) handleUploadStreak(w http.ResponseWriter, r *http.Request) {
 		"total_active_days": len(days),
 		"last_upload_date":  lastUpload,
 		"today_count":       todayCount,
+	})
+}
+
+// handleMediaTimelineEvents GET /api/media/media-timeline-events — 时间线大事件。
+//
+// 返回媒体库中的重要时间节点，供前端"时间线"页面渲染里程碑卡片：
+//   - first_upload   : 首次上传日期 + 文件名（最早的 created_at）
+//   - busiest_day    : 上传最多的一天（日期 + count，并列取最早一天）
+//   - longest_gap    : 最长上传间隔（天数，相邻两次上传之间的最大间隔）
+//   - milestone_100  : 第 100 个媒体上传日期（累计达 100 的那一刻）
+//   - milestone_500  : 第 500 个（若总量不足则省略）
+//
+// 数据源：s.store.ListMediaByUser（仅未软删行，created_at DESC）。在 Go 侧按
+// created_at 升序排序后顺序扫描计算。所有日期按 UTC 取（与 upload-streak /
+// volume-report 等统计端点口径一致，避免时区错位）。
+//
+// 响应：
+//
+//	{
+//	  "events": [
+//	    {"type":"first_upload","date":"2026-01-15","detail":"IMG_0001.jpg"},
+//	    {"type":"busiest_day","date":"2026-03-08","detail":"12 uploads"},
+//	    {"type":"longest_gap","date":"2026-02-10","detail":"23 days"},
+//	    {"type":"milestone_100","date":"2026-04-01","detail":"100th upload"}
+//	  ],
+//	  "total_events": 4
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503；无上传历史返回空 events。
+func (s *Server) handleMediaTimelineEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 过滤软删行（ListMediaByUser 已过滤，此处防御式跳过）。
+	usable := make([]*storage.Media, 0, len(mediaList))
+	for _, m := range mediaList {
+		if !m.Deleted {
+			usable = append(usable, m)
+		}
+	}
+	if len(usable) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"events":      []any{},
+			"total_events": 0,
+		})
+		return
+	}
+
+	// 按 created_at 升序排序（最早在前），便于顺序扫描里程碑与间隔。
+	sort.Slice(usable, func(i, j int) bool {
+		return usable[i].CreatedAt.Before(usable[j].CreatedAt)
+	})
+
+	type timelineEvent struct {
+		Type   string `json:"type"`
+		Date   string `json:"date"`
+		Detail string `json:"detail"`
+	}
+	events := make([]timelineEvent, 0, 5)
+
+	// first_upload：最早一条。
+	first := usable[0]
+	events = append(events, timelineEvent{
+		Type:   "first_upload",
+		Date:   first.CreatedAt.UTC().Format("2006-01-02"),
+		Detail: first.Filename,
+	})
+
+	// busiest_day：按 UTC 日期分桶，取 count 最大的一天（并列取最早）。
+	dayCount := make(map[string]int, len(usable))
+	for _, m := range usable {
+		dayCount[m.CreatedAt.UTC().Format("2006-01-02")]++
+	}
+	var busiestDay string
+	var busiestCount int
+	for _, m := range usable { // 借升序保证并列取最早
+		d := m.CreatedAt.UTC().Format("2006-01-02")
+		if dayCount[d] > busiestCount {
+			busiestCount = dayCount[d]
+			busiestDay = d
+		}
+	}
+	if busiestCount > 0 {
+		events = append(events, timelineEvent{
+			Type:   "busiest_day",
+			Date:   busiestDay,
+			Detail: fmt.Sprintf("%d uploads", busiestCount),
+		})
+	}
+
+	// longest_gap：相邻两次上传（按 created_at 升序）的最大间隔天数。
+	// date 取间隔结束（即较晚）那条的日期，便于前端在时间线上定位。
+	var gapDays int
+	var gapEndDate string
+	for i := 1; i < len(usable); i++ {
+		gap := usable[i].CreatedAt.Sub(usable[i-1].CreatedAt).Hours() / 24
+		days := int(gap)
+		if float64(days) < gap { // 向上取整，避免不足一天的间隔被截为 0
+			days++
+		}
+		if days > gapDays {
+			gapDays = days
+			gapEndDate = usable[i].CreatedAt.UTC().Format("2006-01-02")
+		}
+	}
+	if gapDays > 0 && gapEndDate != "" {
+		events = append(events, timelineEvent{
+			Type:   "longest_gap",
+			Date:   gapEndDate,
+			Detail: fmt.Sprintf("%d days", gapDays),
+		})
+	}
+
+	// milestone_100 / milestone_500：累计达第 N 个的日期。
+	addMilestone := func(n int, label string) {
+		if len(usable) >= n {
+			events = append(events, timelineEvent{
+				Type:   label,
+				Date:   usable[n-1].CreatedAt.UTC().Format("2006-01-02"),
+				Detail: fmt.Sprintf("%dth upload", n),
+			})
+		}
+	}
+	addMilestone(100, "milestone_100")
+	addMilestone(500, "milestone_500")
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":       events,
+		"total_events": len(events),
 	})
 }
 
