@@ -2037,6 +2037,95 @@ private fun MyTabContent(
             }
         }
 
+        // V9：宽高比分析卡片（调 media-aspect-ratio，按 w/h 分横向/纵向/方形/全景 4 档）。
+        // 后端按 width/height 比值归入 panorama(w/h>2)/landscape(>1.2)/portrait(h/w>1.2)/
+        // square(其余) 四档，每档 count/percentage，另返回 total 与 most_common（最常见档 type）。
+        // 无尺寸媒体不计入 total；total=0 或请求失败时返回 null，静默跳过。
+        var aspectRatioAnalysis by remember { mutableStateOf<MediaService.AspectRatioAnalysis?>(null) }
+        LaunchedEffect(Unit) { aspectRatioAnalysis = MediaService.getMediaAspectRatio() }
+        aspectRatioAnalysis?.let { ar ->
+            if (ar.total > 0 && ar.ratios.isNotEmpty()) {
+                // 最常见档高亮（most_common 可空，为空时不高亮任何行）。
+                val mostCommon = ar.mostCommon
+                // 档位 → emoji + 中文标签映射（与后端 4 档 type 对齐，emoji 与任务约定一致）。
+                fun emojiLabel(type: String): String = when (type) {
+                    "landscape" -> "📐横向"
+                    "portrait" -> "📏纵向"
+                    "square" -> "⬜方形"
+                    "panorama" -> "🌅全景"
+                    else -> type // 防御：后端将来新增档位时原样展示，不崩溃
+                }
+                // 最大档计数，用于进度条归一化（coerceAtLeast(1) 避免除零）。
+                val maxRatioCount = ar.ratios.maxOf { it.count }.coerceAtLeast(1)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("宽高比", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 4 行：每档 emoji+标签 + 进度条 + count · percentage，最常见档高亮 primary。
+                        ar.ratios.forEach { r ->
+                            val ratio = (r.count.toFloat() / maxRatioCount).coerceIn(0f, 1f)
+                            val isMostCommon = mostCommon != null && r.type == mostCommon
+                            val rowColor = if (isMostCommon) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            val barColor = if (isMostCommon) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    emojiLabel(r.type),
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isMostCommon) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor,
+                                    modifier = Modifier.width(72.dp)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { ratio },
+                                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                    color = barColor,
+                                    trackColor = MaterialTheme.colorScheme.surface
+                                )
+                                Text(
+                                    "${r.count} 个 · ${formatPercent(r.percentage)}",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isMostCommon) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor.copy(alpha = if (isMostCommon) 1f else 0.7f),
+                                    modifier = Modifier.width(80.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：最常见档 + 总样本数。
+                        val mostCommonLabel = if (mostCommon != null) emojiLabel(mostCommon) else "—"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("🏆 最常见 $mostCommonLabel",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                            Text("共 ${ar.total} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                        }
+                        Text(
+                            "基于 ${ar.total} 项有尺寸媒体（按 width/height 比值）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：上传时段 24h 柱状图（调 media-by-hour）
         var mediaByHour by remember { mutableStateOf<List<MediaService.HourCount>?>(null) }
         LaunchedEffect(Unit) { mediaByHour = MediaService.getMediaByHour() }

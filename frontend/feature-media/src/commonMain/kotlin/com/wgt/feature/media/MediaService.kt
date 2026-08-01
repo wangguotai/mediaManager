@@ -4026,6 +4026,73 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-aspect-ratio — 媒体宽高比分布分析。
+     *
+     * 后端按 width/height 比值将每条媒体（含图片+视频，无尺寸信息的跳过）归入
+     * 4 个固定档：panorama（w/h>2.0，全景/超宽幅）/ landscape（w/h>1.2，横向）/
+     * portrait（h/w>1.2，纵向）/ square（其余，近似方形）。每档返回 count 与
+     * percentage（相对有尺寸媒体总数，total=0 时均为 0），另返回 total 与 most_common
+     * （数量最多的一档 type；无样本时为 null）。响应结构（与后端
+     * [handleMediaAspectRatio] 对齐）：
+     *
+     * `{ratios: [{type, count, percentage}], total, most_common}`
+     *
+     * - [ratios] 固定 4 项，顺序固定 panorama→landscape→portrait→square（宽→高趋势）。
+     * - [type] 档位标识（"panorama"/"landscape"/"portrait"/"square"）。
+     * - [count] / [percentage] 该档数量 / 占比（0~100，Double）。
+     * - [total] 有尺寸信息的媒体总数（无尺寸的不计入）。
+     * - [mostCommon] 最常见档位 type；无样本时为 null（前端展示时判空）。
+     *
+     * 失败（非 200 / 网络异常）或 total=0（无样本）返回 null，调用方按 null
+     * 静默跳过卡片渲染，与 [getMediaDurationAnalysis] / [getMediaTimeAnalysis] 同语义。
+     */
+    suspend fun getMediaAspectRatio(): AspectRatioAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-aspect-ratio") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                if (total == 0) return null
+                val ratios = obj["ratios"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val type = o["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    RatioItem(
+                        type = type,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = o["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                // most_common 后端可为 string 或 null；null 时 contentOrNull 返回 null。
+                val mostCommon = obj["most_common"]?.jsonPrimitive?.contentOrNull
+                AspectRatioAnalysis(
+                    ratios = ratios,
+                    total = total,
+                    mostCommon = mostCommon
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaAspectRatio FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 宽高比分布分析结果（4 档分布 + 总数 + 最常见档位，与后端 media-aspect-ratio 对齐）。 */
+    data class AspectRatioAnalysis(
+        val ratios: List<RatioItem>,
+        val total: Int,
+        val mostCommon: String?
+    )
+
+    /** 宽高比单档统计（档位 type + 数量 + 百分比，与后端 ratios[] 对齐）。 */
+    data class RatioItem(
+        val type: String,
+        val count: Int,
+        val percentage: Double
+    )
+
+    /**
      * V22：GET /api/media/media-time-analysis — 上传 vs 拍摄延迟分析。
      *
      * 后端基于当前用户全部未软删媒体的 [taken_at]（拍摄时间，EXIF/元数据）与
