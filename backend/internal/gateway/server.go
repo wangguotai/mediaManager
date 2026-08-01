@@ -537,6 +537,12 @@ func (s *Server) registerRoutes() {
 	// 与 storage-breakdown（类型+月份分桶）/ by-size-range（仅大小分桶单维度）互补：
 	// 本端点做二维交叉，便于前端展示"每年图片/视频各占多少"、"大文件主要是视频还是图片"。
 	s.mux.HandleFunc("/api/media/storage-deep-analysis", s.handleStorageDeepAnalysis)
+	// 存储效率分析：综合平均每 MB 媒体数、重复率、孤立率（简化为 0）与平均大小惩罚，
+	// 给出 0-100 效率评分 + A/B/C/D 等级 + 优化建议清单。只读分析端点。
+	// 区别于 storage-health（健康度，关注重复/孤立/配额/冷数据）与 storage-recommendations
+	// （清理建议+可回收空间估算）：本端点聚焦"存储效率"——每 MB 容纳的媒体数与平均大小是否合理，
+	// 评分模型 = 100 - (duplicate_rate*30 + avg_size_penalty*30)。
+	s.mux.HandleFunc("/api/media/media-storage-efficiency", s.handleMediaStorageEfficiency)
 	// 仪表盘（合并存储健康度+quick_stats+upload_streak+recent_activity+tag_top3+coverage 为一次请求），
 	// 供前端首页/我的Tab 一次拉取渲染全部关键卡片，区别于 stat-summary（偏数据概览）与 full-report（年度报告）。
 	s.mux.HandleFunc("/api/media/dashboard", s.handleMediaDashboard)
@@ -14659,6 +14665,164 @@ func (s *Server) handleStorageDeepAnalysis(w http.ResponseWriter, r *http.Reques
 			"bytes": totalBytes,
 			"mb":    float64(totalBytes) / float64(mb),
 		},
+	})
+}
+
+// handleMediaStorageEfficiency GET /api/media/media-storage-efficiency — 存储效率分析。
+//
+// 聚焦"存储空间利用是否高效"：综合平均每 MB 的媒体数（密度）、重复文件率、
+// 孤立文件率（简化为 0，避免 IO 放大）与平均大小惩罚（文件偏大扣分），
+// 给出 0-100 效率评分 + A/B/C/D 等级 + 针对性优化建议清单。
+//
+// 区别于 handleStorageHealth（健康度，关注重复/孤立/配额/冷数据四维加权）：
+// 本端点用"每 MB 媒体数"作为效率核心指标，结合 avg_size_penalty 评估是否
+// 存在过多大文件拖累单位空间利用，评分模型更贴合"空间利用率"语义。
+//
+// 评分模型：efficiency_score = 100 - (duplicate_rate*30 + avg_size_penalty*30)
+//   - duplicate_rate    = duplicate_count / total_media（同一 SHA256 出现 >1 份视重复）
+//   - orphan_rate       = 0（孤立文件需磁盘扫描，本端点跳过避免 IO 放大，与 storage-health 一致）
+//   - avg_size_penalty  = 平均每份媒体大小相对基准 2MB 的偏离惩罚：
+//     若 avg_bytes_per_media <= 2MB 视为合理（penalty=0），超出则按比例线性增长，
+//     上限 1（avg>=20MB 时罚满）。
+//   - avg_bytes_per_media = total_bytes / total_media
+//   - media_per_mb        = total_media / (total_bytes / 1MB)，每 MB 容纳的媒体数（密度，越高越高效）
+//
+// 空库（total_media=0）视为满分（无浪费），各比率归 0。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaStorageEfficiency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const mb int64 = 1024 * 1024
+	const baselineAvgBytes int64 = 2 * mb    // 平均大小基准 2MB（视为合理上限）
+	const penaltyCapAvgBytes int64 = 20 * mb // 平均大小罚满阈值 20MB
+
+	// 一次遍历：统计总量、总字节、按 SHA256 重复组数。
+	totalMedia := 0
+	var totalBytes int64
+	shaCounts := make(map[string]int)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalMedia++
+		totalBytes += m.Size
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+	}
+
+	// 重复文件份：每个 SHA256 出现 >1，超出 1 份的部分计入重复；重复组数 = sha256 出现 >1 的不同值个数。
+	duplicateCount := 0
+	duplicateGroups := 0
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateGroups++
+			duplicateCount += c - 1
+		}
+	}
+
+	// 孤立文件需磁盘扫描，本端点默认跳过（避免 IO 放大），按 0 计。
+	// 如需精确孤立率，调用方可用 /api/media/orphan-check 单独扫描。
+	orphanCount := 0
+
+	// 各项比率 [0,1]，totalMedia 为 0 时全部归 0（空库视为满分高效）。
+	duplicateRate := 0.0
+	orphanRate := 0.0
+	avgBytesPerMedia := 0.0
+	mediaPerMB := 0.0
+	if totalMedia > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+		orphanRate = float64(orphanCount) / float64(totalMedia)
+		avgBytesPerMedia = float64(totalBytes) / float64(totalMedia)
+		if totalBytes > 0 {
+			mediaPerMB = float64(totalMedia) / (float64(totalBytes) / float64(mb))
+		}
+	}
+
+	// 平均大小惩罚：avg <= baseline（2MB）视为合理不扣分；超出则线性增长至
+	// penaltyCap（20MB）时罚满 1。避免大文件主导存储时效率分虚高。
+	avgSizePenalty := 0.0
+	if avgBytesPerMedia > float64(baselineAvgBytes) {
+		avgSizePenalty = (avgBytesPerMedia - float64(baselineAvgBytes)) / float64(penaltyCapAvgBytes-baselineAvgBytes)
+	}
+
+	// 效率评分：100 - 加权扣分（重复率权重 30 + 平均大小惩罚权重 30，合计 60，留 40 分宽容带）。
+	// 各扣分项上限为其权重，避免单项异常拉爆到负分。
+	dupPenalty := min01(duplicateRate) * 30
+	sizePenalty := min01(avgSizePenalty) * 30
+	score := 100.0 - (dupPenalty + sizePenalty)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	// 等级映射：A(>=85) / B(70-84) / C(50-69) / D(<50)，与 storage-health 一致。
+	grade := "D"
+	switch {
+	case score >= 85:
+		grade = "A"
+	case score >= 70:
+		grade = "B"
+	case score >= 50:
+		grade = "C"
+	}
+
+	// 优化建议：按各项扣分严重程度给出针对性提示。
+	suggestions := make([]string, 0, 5)
+	if duplicateCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("检测到 %d 份重复文件（%d 组，重复率 %.1f%%），建议用 /api/media/duplicate-cleanup 清理可立即提升效率", duplicateCount, duplicateGroups, duplicateRate*100))
+	}
+	if avgBytesPerMedia > float64(baselineAvgBytes) {
+		suggestions = append(suggestions, fmt.Sprintf("平均每份媒体 %.2f MB 超出基准 2MB，建议检查是否存在大量未压缩大文件，可用 /api/media/by-size-range 查看大文件分布", avgBytesPerMedia/float64(mb)))
+	}
+	if mediaPerMB > 0 && mediaPerMB < 0.1 {
+		suggestions = append(suggestions, fmt.Sprintf("每 MB 仅容纳 %.2f 个媒体（密度偏低），存储多为大文件占据，建议压缩或归档大视频", mediaPerMB))
+	}
+	if orphanCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("检测到 %d 个孤立文件（DB 有记录但磁盘缺失），建议用 /api/media/cleanup-orphan 处理", orphanCount))
+	}
+	if totalMedia > 0 && duplicateRate < 0.05 && avgBytesPerMedia <= float64(baselineAvgBytes) {
+		suggestions = append(suggestions, "存储效率良好，每 MB 媒体密度合理且重复率低，建议保持当前使用习惯")
+	}
+	if len(suggestions) == 0 {
+		suggestions = append(suggestions, "存储效率良好，建议保持当前使用习惯")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_media":         totalMedia,
+		"total_bytes":         totalBytes,
+		"avg_bytes_per_media": int64(avgBytesPerMedia),
+		"media_per_mb":        round2(mediaPerMB),
+		"duplicate_rate":      round2(duplicateRate),
+		"duplicate_count":     duplicateCount,
+		"duplicate_groups":    duplicateGroups,
+		"orphan_rate":         round2(orphanRate),
+		"orphan_count":        orphanCount,
+		"efficiency_score":    int(score),
+		"grade":               grade,
+		"suggestions":         suggestions,
+		"user_id":             uid,
 	})
 }
 
