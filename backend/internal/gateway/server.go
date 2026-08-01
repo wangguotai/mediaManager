@@ -240,6 +240,11 @@ func (s *Server) registerRoutes() {
 	// 与 growth-report 区别：growth-report 返周/月/年三档对比快照；本端点聚焦"全年汇总"
 	// （总量+趋势+预测），供前端"媒体量报告"卡片一次加载。
 	s.mux.HandleFunc("/api/media/media-volume-report", s.handleMediaVolumeReport)
+	// 视频时长分析：对 VIDEO 类型媒体按时长分段统计分布（<30s/30s-2min/2-5min/
+	// 5-15min/>15min），返回每段 count+percentage 与 total_videos/avg/max 时长。
+	// 筛选与 media_id 来自 Store（ListMediaByUser），单条时长经 videoInfoProvider
+	// （ffprobe）逐条获取，故需要 Store+provider 双就绪。
+	s.mux.HandleFunc("/api/media/media-duration-analysis", s.handleMediaDurationAnalysis)
 	// 用户活跃度评分（基于 upload/favorite/share/tag/rename/rotate 各维度加权打分+等级+明细）。
 	// 数据来源：audit_log 操作统计（AuditLogStats）+ ListMediaByUser 取上传数 +
 	// favoriteProvider.ListFavorites 取当前收藏数（audit_log 仅记录 unfavorite）。
@@ -6630,7 +6635,7 @@ func (s *Server) handleStorageGrowthPrediction(w http.ResponseWriter, r *http.Re
 	//    defaultQuotaBytes 保持一致）下"用完"的具体日期。增长率为 0 或无趋势 → null；
 	//    已达/超配额 → 当前日期（视为已用完）。
 	const quotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB
-	var estimatedFullDate any // 默认 nil → JSON null
+	var estimatedFullDate any                        // 默认 nil → JSON null
 	now := time.Now().UTC()
 	if monthlyGrowth > 0 && currentBytes < quotaBytes {
 		remaining := quotaBytes - currentBytes
@@ -8039,6 +8044,116 @@ func (s *Server) handleMediaQuickStats(w http.ResponseWriter, r *http.Request) {
 		"video_count":    vidCount,
 		"album_count":    albumCount,
 		"favorite_count": favoriteCount,
+	})
+}
+
+// handleMediaDurationAnalysis 处理 GET /api/media/media-duration-analysis，对当前
+// 用户 VIDEO 类型媒体按时长分段统计分布。
+//
+// 数据来源：media_id 与 type 来自 Store.ListMediaByUser（仅未软删媒体）；单条视频
+// 时长由 videoInfoProvider.GetVideoInfo（ffprobe，秒）逐条获取。因此 Store 未注入
+// 返回 503，mediaSvc 未实现 videoInfoProvider 返回 501。
+//
+// 时长分段：<30s / 30s-2min / 2-5min / 5-15min / >15min。ffprobe 失败或时长为 0
+// 的条目计入 <30s 段（保守归入最短段，避免丢失计数）。每个分段返回 count 与
+// percentage（相对视频总数，空集时为 0）。total_videos 为实际取到时长的视频数；
+// avg_duration/max_duration 单位为秒。
+func (s *Server) handleMediaDurationAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	provider, ok := s.mediaSvc.(videoInfoProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "video info is not supported by the configured media service"})
+		return
+	}
+
+	// 1) 取用户全部媒体，筛出 VIDEO 类型 id（保持 created_at DESC 顺序便于稳定的逐条探测）。
+	var videoIDs []string
+	if mediaList, err := s.store.ListMediaByUser(r.Context(), uid); err != nil {
+		slog.Warn("media-duration-analysis: list media failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to list media"})
+		return
+	} else {
+		for _, m := range mediaList {
+			if m.Type == "VIDEO" {
+				videoIDs = append(videoIDs, m.ID)
+			}
+		}
+	}
+
+	// 2) 逐条 ffprobe 取时长。单条超时 15s（与 handleMediaVideoInfo 一致），失败/为 0
+	// 计入最短段。使用注入 uid 的 ctx 供 service 层 resolveMediaPath 定位文件。
+	type bucket struct {
+		tier     string
+		lowerSec float64 // 含
+		upperSec float64 // 不含；math.Inf(1) 表示无上界
+		count    int
+	}
+	buckets := []bucket{
+		{"<30s", 0, 30, 0},
+		{"30s-2min", 30, 120, 0},
+		{"2-5min", 120, 300, 0},
+		{"5-15min", 300, 900, 0},
+		{">15min", 900, math.Inf(1), 0},
+	}
+	var totalDuration float64
+	var maxDuration float64
+	videoCount := len(videoIDs)
+	for _, id := range videoIDs {
+		ctx, cancel := context.WithTimeout(service.WithUserID(r.Context(), uid), 15*time.Second)
+		info, err := provider.GetVideoInfo(ctx, &service.VideoInfoRequest{MediaId: id})
+		cancel()
+		if err != nil {
+			slog.Warn("media-duration-analysis: get video info failed", "media_id", id, "error", err)
+			buckets[0].count++ // ffprobe 失败保守归入 <30s
+			continue
+		}
+		d := info.DurationSeconds
+		totalDuration += d
+		if d > maxDuration {
+			maxDuration = d
+		}
+		for i := range buckets {
+			if d >= buckets[i].lowerSec && d < buckets[i].upperSec {
+				buckets[i].count++
+				break
+			}
+		}
+	}
+
+	tiers := make([]map[string]any, 0, len(buckets))
+	for _, b := range buckets {
+		pct := 0.0
+		if videoCount > 0 {
+			pct = float64(b.count) / float64(videoCount) * 100
+		}
+		tiers = append(tiers, map[string]any{
+			"tier":       b.tier,
+			"count":      b.count,
+			"percentage": pct,
+		})
+	}
+	avgDuration := 0.0
+	if videoCount > 0 {
+		avgDuration = totalDuration / float64(videoCount)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tiers":        tiers,
+		"total_videos": videoCount,
+		"avg_duration": avgDuration,
+		"max_duration": maxDuration,
 	})
 }
 
