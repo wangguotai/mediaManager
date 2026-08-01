@@ -2574,6 +2574,96 @@ private fun MyTabContent(
             }
         }
 
+        // 月度亮点卡片（调 media-monthly-highlights，显示每月首上传/最大文件/末上传）。
+        // 后端返回最近 N 个月（默认 6）每月 first/largest/last 三条媒体引用；某月无媒体
+        // 时对应字段为 null。此处取前 3 个月渲染，每行：📤 首个 / 📦 最大(X MB) / 📌 末个。
+        // 任一月三字段全 null 时跳过该行；列表空或请求失败时静默跳过整张卡（与其他统计卡一致）。
+        var monthlyHighlights by remember { mutableStateOf<List<MediaService.MonthlyHighlight>?>(null) }
+        LaunchedEffect(Unit) { monthlyHighlights = MediaService.getMediaMonthlyHighlights(months = 6) }
+        monthlyHighlights?.let { highlights ->
+            // 取前 3 个月，并过滤掉三字段全空的月份（无任何媒体）。
+            val rows = highlights.take(3).filter { it.first != null || it.largest != null || it.last != null }
+            if (rows.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "月度亮点",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        rows.forEach { hl ->
+                            // 月份标题行
+                            Text(
+                                hl.month,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                            // 📤 首个
+                            hl.first?.let { f ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("📤", fontSize = 12.sp)
+                                    Text(
+                                        "首个: ${f.filename}",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            // 📦 最大（附文件大小 MB）
+                            hl.largest?.let { lg ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("📦", fontSize = 12.sp)
+                                    Text(
+                                        "最大: ${lg.filename} (${lg.sizeMB} MB)",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            // 📌 末个
+                            hl.last?.let { l ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("📌", fontSize = 12.sp)
+                                    Text(
+                                        "末个: ${l.filename}",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            if (rows.indexOf(hl) < rows.lastIndex) {
+                                HorizontalDivider(
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /

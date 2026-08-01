@@ -4714,6 +4714,76 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-monthly-highlights?months=N — 月度亮点（最近 N 个月，每月
+     * 首上传 / 最大文件 / 末上传）。仅基于 created_at 一次全量拉取后在 Go 侧聚合，只读端点。
+     *
+     * 后端响应（与 [handleMediaMonthlyHighlights] 对齐）：
+     *   `{months: [{month, first, largest, last}], total_months}`
+     * 其中 month 为 "YYYY-MM"；first/last 为 `{id, filename}`（无 size），
+     * largest 为 `{id, filename, size}`；某月无媒体时对应字段为 null（前端按 null 跳过该行）。
+     *
+     * @param months 查询月数，默认 6，透传 query（?months=N），后端钳制 [1,120]。
+     * @return 月份亮点列表（按后端顺序，最近月在最前）；非 200 / 异常返回 null，调用方按 null 静默跳过。
+     */
+    suspend fun getMediaMonthlyHighlights(months: Int = 6): List<MonthlyHighlight>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-monthly-highlights") {
+                parameter("months", months)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["months"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val month = o["month"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    // first/last 仅 {id, filename}；缺失（null）时返回 null 字段。
+                    fun parseMedia(key: String): HighlightMedia? {
+                        val hm = o[key]?.jsonObject ?: return null
+                        return HighlightMedia(
+                            id = hm["id"]?.jsonPrimitive?.contentOrNull ?: return null,
+                            filename = hm["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                            size = hm["size"]?.jsonPrimitive?.longOrNull ?: 0L
+                        )
+                    }
+                    MonthlyHighlight(
+                        month = month,
+                        first = parseMedia("first"),
+                        largest = parseMedia("largest"),
+                        last = parseMedia("last")
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaMonthlyHighlights status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaMonthlyHighlights FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 月度亮点单项：月份键 + 首个 / 最大 / 末个媒体引用（任一可为 null 表示该月无对应）。 */
+    data class MonthlyHighlight(
+        val month: String,
+        val first: HighlightMedia?,
+        val largest: HighlightMedia?,
+        val last: HighlightMedia?
+    )
+
+    /** 亮点媒体引用：id + 文件名 + 字节数（first/last 后端不返回 size，默认 0）。 */
+    data class HighlightMedia(
+        val id: String,
+        val filename: String,
+        val size: Long = 0L
+    ) {
+        /** 字节数转 MB 字符串（一位小数，commonMain 无 String.format，沿用 take 截断）。 */
+        val sizeMB: String
+            get() {
+                val s = (size.toDouble() / (1024.0 * 1024.0)).toString()
+                return s.take(s.indexOf('.') + 2)
+            }
+    }
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：
