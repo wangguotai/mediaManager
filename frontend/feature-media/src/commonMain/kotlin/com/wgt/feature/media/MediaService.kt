@@ -4423,6 +4423,85 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
+     *
+     * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：
+     *   - avg_per_day   窗口内平均每日上传量（四舍五入两位小数，Double）。
+     *   - total         窗口内上传总量（Int）。
+     *   - days          窗口天数（Int，默认 7，钳制 [1,365]）。
+     *   - window_start / window_end  窗口起止日期（"YYYY-MM-DD" UTC）。
+     *   - max_day       上传最多的一天 {date, count}（全 0 → {date:"", count:0}）。
+     *   - peak_days     超过 avg*1.5 的高峰日 [{date, count, ratio}]（按 date 升序；可为空）。
+     *   - peak_threshold / peak_multiplier  高峰判定阈值与倍数（仅信息用，前端可不显示）。
+     *
+     * days 参数透传 query（?days=N）；非 200 / 异常返回 null，调用方按 null 静默跳过。
+     */
+    suspend fun getMediaUploadVelocity(days: Int = 7): UploadVelocity? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-upload-velocity") {
+                parameter("days", days)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // max_day 嵌套对象 {date, count}；缺失时退化为默认（空串 + 0）。
+                val md = obj["max_day"]?.jsonObject
+                val maxDay = MaxDay(
+                    date = md?.get("date")?.jsonPrimitive?.contentOrNull ?: "",
+                    count = md?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                // peak_days 为对象数组 [{date, count, ratio}]；缺失或非数组时返回空列表。
+                val peaks = obj["peak_days"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    PeakDay(
+                        date = date,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        ratio = o["ratio"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                } ?: emptyList()
+                UploadVelocity(
+                    avgPerDay = obj["avg_per_day"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    days = obj["days"]?.jsonPrimitive?.intOrNull ?: days,
+                    windowStart = obj["window_start"]?.jsonPrimitive?.contentOrNull ?: "",
+                    windowEnd = obj["window_end"]?.jsonPrimitive?.contentOrNull ?: "",
+                    maxDay = maxDay,
+                    peakDays = peaks,
+                    peakThreshold = obj["peak_threshold"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaUploadVelocity FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 最近 N 天上传速度分析（平均/最高/高峰日列表）。 */
+    data class UploadVelocity(
+        val avgPerDay: Double,
+        val total: Int,
+        val days: Int,
+        val windowStart: String,
+        val windowEnd: String,
+        val maxDay: MaxDay,
+        val peakDays: List<PeakDay>,
+        val peakThreshold: Double
+    )
+
+    /** 上传最多的一天。 */
+    data class MaxDay(
+        val date: String,
+        val count: Int
+    )
+
+    /** 高峰日（超过平均 1.5 倍）；ratio = count / avg。 */
+    data class PeakDay(
+        val date: String,
+        val count: Int,
+        val ratio: Double
+    )
+
+    /**
      * V21：GET /api/media/media-archive-status — 媒体归档状态（热/温/冷数据温度分布）。
      *
      * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：

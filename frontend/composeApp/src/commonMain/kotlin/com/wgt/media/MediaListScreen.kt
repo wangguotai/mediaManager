@@ -2292,6 +2292,92 @@ private fun MyTabContent(
             }
         }
 
+        // 上传速度卡片（调 media-upload-velocity?days=7，展示最近 7 天的平均/最高/高峰日）。
+        // 后端按 UTC 日期分桶最近 N 天上传量，返回 avg_per_day / max_day / peak_days 等。
+        // 请求失败或 total=0（窗口内无上传）时静默跳过，与色温分布等卡片同语义。
+        var uploadVelocity by remember { mutableStateOf<MediaService.UploadVelocity?>(null) }
+        LaunchedEffect(Unit) { uploadVelocity = MediaService.getMediaUploadVelocity(days = 7) }
+        uploadVelocity?.let { v ->
+            if (v.total > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "上传速度",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 平均：X 项/天（一位小数，commonMain 无 String.format，用 take 截断）。
+                        val avgStr = v.avgPerDay.toString().let { it.take(it.indexOf('.') + 2) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("平均", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "$avgStr 项/天",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        // 最高：date (N 项)；max_day 全 0 时（total>0 不会发生，但防御）跳过。
+                        if (v.maxDay.date.isNotEmpty() && v.maxDay.count > 0) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("最高", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "${v.maxDay.date} (${v.maxDay.count} 项)",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        // 高峰日列表（每行: date · N 项）；空列表不渲染该区块。
+                        if (v.peakDays.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "高峰日（超过均值 1.5 倍）",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            v.peakDays.take(5).forEach { pd ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        pd.date,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        "${pd.count} 项",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "基于 ${v.days} 天 · 共 ${v.total} 项（${v.windowStart} ~ ${v.windowEnd}）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
