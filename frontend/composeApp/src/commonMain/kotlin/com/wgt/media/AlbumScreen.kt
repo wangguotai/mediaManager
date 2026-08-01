@@ -341,6 +341,44 @@ private fun AlbumListPage(
                 }
             }
 
+            // 相册封面质量统计行——显示 A/B/C 级分布；C 级 > 0 时红色提示低质量封面。
+            // 仅在 total > 0 时显示（无封面相册时隐藏，避免空噪音）。
+            var coverQuality by remember { mutableStateOf<MediaService.AlbumCoverQuality?>(null) }
+            LaunchedEffect(albums) {
+                if (albums.isNotEmpty()) {
+                    coverQuality = MediaService.getAlbumCoverQuality()
+                } else {
+                    coverQuality = null
+                }
+            }
+            coverQuality?.let { cq ->
+                if (cq.total > 0) {
+                    val gradeA = cq.gradeDistribution["A"] ?: 0
+                    val gradeB = cq.gradeDistribution["B"] ?: 0
+                    val gradeC = cq.gradeDistribution["C"] ?: 0
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            Text(
+                                "🖼️ A级 $gradeA · B级 $gradeB · C级 $gradeC",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (gradeC > 0) {
+                                Text(
+                                    "⚠️ 有 $gradeC 个低质量封面",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // V7 §2.3：我的相册 / 共享相册 Tab 切换
             val sharedAlbums = viewModel.sharedAlbumList
             var selectedTab by remember { mutableStateOf(0) }

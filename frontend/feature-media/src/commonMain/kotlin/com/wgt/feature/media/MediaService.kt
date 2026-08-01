@@ -1718,6 +1718,79 @@ object MediaService {
     }
 
     /**
+     * 相册封面质量条目——GET /api/media/album-cover-quality 返回的单条相册封面质量信息。
+     *
+     * 与后端 [handleAlbumCoverQuality] 返回字段对齐：
+     * album_id / name / cover_id / quality_grade / resolution。
+     */
+    data class CoverQualityItem(
+        val albumId: String = "",
+        val name: String = "",
+        val coverId: String = "",
+        val qualityGrade: String = "",
+        val resolution: String = ""
+    )
+
+    /**
+     * 相册封面质量汇总——GET /api/media/album-cover-quality 返回的聚合数据。
+     *
+     * 后端返回 `{albums:[{album_id,name,cover_id,quality_grade,resolution}], total, grade_distribution:{A,B,C}}`。
+     * - [albums]：有封面相册的逐条质量信息（无封面相册不在列表中）。
+     * - [total]：有封面的相册数（即 albums 列表长度）。
+     * - [gradeDistribution]：A/B/C 三级分布数量（key 为 "A"/"B"/"C"）。
+     *
+     * 后端不可用/出错时返回 null（与 [getAlbumSharingSummary] 同语义）。
+     */
+    data class AlbumCoverQuality(
+        val albums: List<CoverQualityItem> = emptyList(),
+        val total: Int = 0,
+        val gradeDistribution: Map<String, Int> = emptyMap()
+    )
+
+    /**
+     * GET /api/media/album-cover-quality — 获取相册封面质量评分汇总
+     * （各相册封面 A/B/C 级分布 + 逐条质量信息）。
+     *
+     * 后端按封面 media 分辨率评级：A≥1920×1080、B≥1280×720、C 为更低/缺分辨率。
+     * 返回 `{albums:[{album_id,name,cover_id,quality_grade,resolution}], total, grade_distribution:{A,B,C}}`。
+     * 失败时返回 null（与 [getAlbumSharingSummary] 同语义——区分"成功但空"与"网络失败"）。
+     *
+     * @return 相册封面质量汇总，或 null（失败）
+     */
+    suspend fun getAlbumCoverQuality(): AlbumCoverQuality? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album-cover-quality")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val arr = obj["albums"]?.jsonArray ?: JsonArray(emptyList())
+                val items = arr.map { el ->
+                    val o = el.jsonObject
+                    CoverQualityItem(
+                        albumId = o["album_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        name = o["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        coverId = o["cover_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        qualityGrade = o["quality_grade"]?.jsonPrimitive?.contentOrNull ?: "",
+                        resolution = o["resolution"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+                val dist: Map<String, Int> = obj["grade_distribution"]?.jsonObject?.mapValues { (_, v) ->
+                    v.jsonPrimitive.intOrNull ?: 0
+                } ?: emptyMap()
+                AlbumCoverQuality(
+                    albums = items,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: items.size,
+                    gradeDistribution = dist
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAlbumCoverQuality FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 相册内媒体分布分析——GET /api/media/album-media-distribution?album_id=xxx。
      *
      * 后端返回 `{by_type, by_month, by_size, total}`：
