@@ -557,6 +557,11 @@ func (s *Server) registerRoutes() {
 	// 整体趋势方向（up/down/stable）。只读端点，与 share-analytics（汇总数字）互补——
 	// 本端点聚焦时序趋势，供前端"分享活动"折线图渲染。
 	s.mux.HandleFunc("/api/media/media-share-activity", s.handleMediaShareActivity)
+	// 分享深度分析：在 share-analytics（仅汇总计数）与 share-activity（仅时序趋势）
+	// 基础上扩展为多维画像——使用率（active/expired/expiring_soon）+ 密码保护占比 +
+	// 分享的媒体按类型分布（by_media_type）+ 按月创建趋势（by_month）+ 平均有效期天数
+	// （avg_lifetime_days）。一次 ListShareTokensByUser + ListMediaByUser 拉取后在 Go 侧聚合。
+	s.mux.HandleFunc("/api/media/media-share-deep-analysis", s.handleMediaShareDeepAnalysis)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：审计日志——列表/统计/记录
@@ -14632,6 +14637,192 @@ func (s *Server) handleMediaShareActivity(w http.ResponseWriter, r *http.Request
 		"expired_shares": expired,
 		"trend":          trend,
 		"days":           days,
+	})
+}
+
+// handleMediaShareDeepAnalysis GET /api/media/media-share-deep-analysis — 分享深度分析。
+//
+// 在 share-analytics（仅返汇总计数）与 share-activity（仅返时序趋势）基础上做多维画像，
+// 一次请求返回分享链接的使用率 + 密码保护占比 + 被分享媒体的类型分布 + 按月创建趋势 +
+// 平均有效期天数，供前端"分享深度分析"卡片渲染。响应：
+//
+//	{
+//	  "summary": {
+//	    "total":              N,     // 分享链接总数
+//	    "active":             N,     // 未过期（含永不过期 + 过期时间晚于 now）
+//	    "expired":            N,     // 已过期（过期时间早于 now，永不过期不计入）
+//	    "expiring_soon":      N,     // 7 天内将过期（仅算未过期且非永久）
+//	    "password_protected": N,     // 设置了密码的分享数
+//	    "active_percentage":  12.34  // active/total*100，保留两位小数；total=0 时为 0
+//	  },
+//	  "by_media_type":      {"IMAGE":N,"VIDEO":N,"LIVE":N,"OTHER":N}, // 分享的媒体按类型分布
+//	  "by_month":           [{"month":"2026-03","count":N}, ...],     // 按月创建趋势，升序
+//	  "avg_lifetime_days":  7.5   // 平均有效期天数（ExpiresAt-CreatedAt，排除永不过期）；
+//	                              // 无有效样本或全部永不过期时为 null
+//	}
+//
+// 数据来源：store.ListShareTokensByUser + store.ListMediaByUser（后者建立 media_id→type
+// 索引，用于 by_media_type；分享引用的 media_id 未在库中找到时归入 OTHER）。ExpiresAt 零值
+// 表示永不过期（计为 active，不计为 expired/expiring_soon，亦不计入 avg_lifetime_days）。
+// 过期时序口径与 share-analytics / share-activity 完全一致。查询失败回 500。
+// 鉴权：/api/media/ 前缀由 authMiddleware 自动注入 user_id。
+func (s *Server) handleMediaShareDeepAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	tokens, err := s.store.ListShareTokensByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 建立 media_id→type 索引（用于 by_media_type）。ListMediaByUser 失败不致命——
+	// 未命中索引的 media 统一归入 OTHER，仍可返回其余统计。
+	mediaType := make(map[string]string)
+	if mediaList, merr := s.store.ListMediaByUser(r.Context(), uid); merr == nil {
+		for _, m := range mediaList {
+			if m.Deleted {
+				continue // 软删媒体不再计入类型分布（与 favorite-analysis 同口径）
+			}
+			mediaType[m.ID] = strings.ToUpper(m.Type)
+		}
+	}
+
+	now := time.Now().UTC()
+	soonCutoff := now.AddDate(0, 0, 7)
+
+	total := len(tokens)
+	active := 0
+	expired := 0
+	passwordProtected := 0
+	expiringSoon := 0
+
+	var imgCount, vidCount, liveCount, otherCount int64
+	monthCount := make(map[string]int) // "2006-01" → count
+	var lifetimeSum float64
+	var lifetimeCount int
+
+	// 归一化媒体类型到 by_media_type 的 IMAGE/VIDEO/LIVE/OTHER 四桶。
+	normalizeType := func(t string) string {
+		switch t {
+		case "IMAGE", "PHOTO":
+			return "IMAGE"
+		case "VIDEO":
+			return "VIDEO"
+		case "LIVE_PHOTO", "LIVE":
+			return "LIVE"
+		default:
+			return "OTHER"
+		}
+	}
+
+	for _, st := range tokens {
+		// —— 密码保护统计 ——
+		if st.PasswordHash != "" {
+			passwordProtected++
+		}
+
+		// —— 使用率统计（口径与 share-analytics 完全一致）——
+		if st.ExpiresAt.IsZero() {
+			// 永不过期：算 active，不计 expired 也不计 expiring_soon，亦不计入 avg_lifetime。
+			active++
+		} else {
+			expiresUTC := st.ExpiresAt.UTC()
+			if !expiresUTC.Before(now) {
+				active++
+				if !expiresUTC.After(soonCutoff) {
+					expiringSoon++
+				}
+			} else {
+				expired++
+			}
+			// —— 平均有效期：仅对有明确过期时间的分享计算（永久分享不计入）——
+			if !st.CreatedAt.IsZero() {
+				lifetimeDays := expiresUTC.Sub(st.CreatedAt.UTC()).Hours() / 24
+				if lifetimeDays >= 0 {
+					lifetimeSum += lifetimeDays
+					lifetimeCount++
+				}
+			}
+		}
+
+		// —— by_media_type：解析该分享引用的 media_id 列表，按类型累计 ——
+		if st.MediaIDs != "" {
+			var ids []string
+			if jerr := json.Unmarshal([]byte(st.MediaIDs), &ids); jerr == nil {
+				for _, mid := range ids {
+					switch normalizeType(mediaType[mid]) {
+					case "IMAGE":
+						imgCount++
+					case "VIDEO":
+						vidCount++
+					case "LIVE":
+						liveCount++
+					default:
+						otherCount++
+					}
+				}
+			}
+		}
+
+		// —— by_month：按创建时间的 UTC 月份分桶（零值跳过）——
+		if !st.CreatedAt.IsZero() {
+			key := st.CreatedAt.UTC().Format("2006-01")
+			monthCount[key]++
+		}
+	}
+
+	// 保留两位小数的活跃率。
+	var activePct float64
+	if total > 0 {
+		activePct = round2(float64(active) / float64(total) * 100)
+	}
+
+	// by_month 按月份升序输出（key 为 "2006-01"，字符串字典序与时间升序一致）。
+	monthKeys := make([]string, 0, len(monthCount))
+	for k := range monthCount {
+		monthKeys = append(monthKeys, k)
+	}
+	sort.Strings(monthKeys)
+	byMonth := make([]map[string]any, 0, len(monthKeys))
+	for _, k := range monthKeys {
+		byMonth = append(byMonth, map[string]any{"month": k, "count": monthCount[k]})
+	}
+
+	// 平均有效期天数；无有效样本时为 null。
+	var avgLifetimeDays any
+	if lifetimeCount > 0 {
+		avgLifetimeDays = round2(lifetimeSum / float64(lifetimeCount))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": map[string]any{
+			"total":              total,
+			"active":             active,
+			"expired":            expired,
+			"expiring_soon":      expiringSoon,
+			"password_protected": passwordProtected,
+			"active_percentage":  activePct,
+		},
+		"by_media_type": map[string]any{
+			"IMAGE": imgCount,
+			"VIDEO": vidCount,
+			"LIVE":  liveCount,
+			"OTHER": otherCount,
+		},
+		"by_month":          byMonth,
+		"avg_lifetime_days": avgLifetimeDays,
 	})
 }
 
