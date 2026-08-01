@@ -8725,6 +8725,46 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-storage-breakdown-v3 — 三维存储分项（JSON 字符串）。
+     *
+     * 后端按 type × year × size_range 三维交叉分组，叶子节点 `{count, bytes}`；顶层另附 `total`。
+     * 响应结构（[handleStorageBreakdownV3] 已上线，commit def9ef7）：
+     * ```
+     * { "breakdown": { "IMAGE": { "2024": { "small":{count,bytes}, "medium":{...},
+     *                                        "large":{...}, "xlarge":{...} },
+     *                           "2025": {...} },
+     *                  "VIDEO": {...}, "LIVE_PHOTO": {...} },
+     *   "total":     { "count": N, "bytes": N } }
+     * ```
+     * 大小分桶与 storage-deep-analysis 同阈值：small<1MB / medium 1-10MB / large 10-100MB /
+     * xlarge>100MB；年份用 CreatedAt UTC 年份；空类型归 IMAGE。breakdown 按数据如实填充
+     * （不预置空槽），故前端访问 `(type,year)` 缺格须宽容回退。
+     *
+     * 与 [getStorageBreakdownV2]（类型×年份 二维，已结构化解析）互补：本端点含第三维 size_range
+     * 嵌套。任务要求前端简化为按类型+年份的二维 2×2 概要展示，故此处服务层直接返回原始 JSON
+     * 字符串；卡片层 [StorageBreakdownV3Card] 用 `Json.parseToJsonElement` 取
+     * `breakdown[IMAGE|VIDEO][2024|2025][*].count` 之和做二维概要，每层缺失即 `?: 0` 回退。
+     *
+     * 鉴权头由 [jsonClient] 的 `defaultRequest` 中心化注入，此处不带 per-call auth lambda。
+     *
+     * @return 后端原始 JSON 字符串；HTTP 非 200 或网络异常返回 null
+     */
+    suspend fun getStorageBreakdownV3(): String? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-storage-breakdown-v3")
+            if (response.status == HttpStatusCode.OK) {
+                response.body<String>()
+            } else {
+                logger.info("MediaService", "getStorageBreakdownV3 status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageBreakdownV3 FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/stat-summary — 一站式统计汇总。
      *
      * 单次请求合并"我的"Tab 多个卡片所需的最常用统计（summary / tags / audit / quota /
