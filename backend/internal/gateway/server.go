@@ -256,6 +256,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/batch-download-urls", s.handleMediaBatchDownloadUrls)
 	// V7：批量下载（zip）
 	s.mux.HandleFunc("/api/media/batch-download", s.handleMediaBatchDownload)
+	// 批量导出媒体元数据为 JSON（支持按类型/标签/日期范围筛选）。
+	// 数据源 ListMediaByUser（未软删，created_at DESC），在 Go 侧按条件筛选；
+	// tag 条件用 SearchMediaByTag 取命中 media_id 集合做内存交集。
+	s.mux.HandleFunc("/api/media/media-bulk-export", s.handleMediaBulkExport)
 	s.mux.HandleFunc("/api/media/stream/", s.handleMediaStream)
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
@@ -14233,6 +14237,137 @@ func isAllowedMethod(m string) bool {
 func isJSONContentType(ct string) bool {
 	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	return ct == "application/json" || strings.HasSuffix(ct, "+json")
+}
+
+// handleMediaBulkExport GET /api/media/media-bulk-export — 批量导出当前用户媒体元数据为 JSON。
+//
+// 支持 query 筛选（均可选，未给则不施加该条件）：
+//
+//	type      — IMAGE / VIDEO / LIVE_PHOTO（精确匹配；空 type 行归一为 IMAGE 再比）
+//	tag       — 精确标签名，命中 media_tags 关联的 media_id 集合做内存交集
+//	date_from — RFC3339，created_at >= 该时刻
+//	date_to   — RFC3339，created_at <= 该时刻
+//
+// 数据源 ListMediaByUser（未软删，created_at DESC），在 Go 侧按上述条件筛选；
+// tag 条件额外用 SearchMediaByTag 取命中 media_id 集合，仅保留 id 在集合内的行。
+// exported_at 为当前 UTC 时刻（RFC3339）。媒体条目字段与 /api/media/album/export
+// 口径一致，并额外携带拍摄时间 taken_at（int64 毫秒时间戳，0 表未知）。
+//
+// 需认证（user_id 由 authMiddleware 注入），store 未注入返回 503。响应：
+//
+//	{exported_at, total, media:[{id,filename,type,size,mime,width,height,
+//	   sha256,created_at,taken_at}]}
+func (s *Server) handleMediaBulkExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	q := r.URL.Query()
+	wantType := strings.TrimSpace(q.Get("type"))
+	tag := strings.TrimSpace(q.Get("tag"))
+
+	// date_from / date_to 解析为 RFC3339 时刻；非法值静默忽略（不施加该条件）。
+	var fromTime, toTime time.Time
+	if v := strings.TrimSpace(q.Get("date_from")); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			fromTime = t
+		}
+	}
+	if v := strings.TrimSpace(q.Get("date_to")); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			toTime = t
+		}
+	}
+	useFrom := !fromTime.IsZero()
+	useTo := !toTime.IsZero()
+
+	// tag 条件：取命中标签的 media_id 集合，后续仅保留集合内的行。
+	var tagSet map[string]struct{}
+	hasTagFilter := tag != ""
+	if hasTagFilter {
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, tag)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		tagSet = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			tagSet[id] = struct{}{}
+		}
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type exportItem struct {
+		ID        string `json:"id"`
+		Filename  string `json:"filename"`
+		Type      string `json:"type"`
+		Size      int64  `json:"size"`
+		Mime      string `json:"mime"`
+		Width     int32  `json:"width"`
+		Height    int32  `json:"height"`
+		SHA256    string `json:"sha256"`
+		CreatedAt string `json:"created_at"`
+		TakenAt   int64  `json:"taken_at"`
+	}
+	items := make([]exportItem, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m == nil {
+			continue
+		}
+		// type 筛选：空 type 行按 codebase 约定归一为 IMAGE 再比较。
+		t := m.Type
+		if t == "" {
+			t = "IMAGE"
+		}
+		if wantType != "" && t != wantType {
+			continue
+		}
+		if hasTagFilter {
+			if _, ok := tagSet[m.ID]; !ok {
+				continue
+			}
+		}
+		// created_at 日期范围筛选（闭区间）。用 UTC 比较避免时区漂移。
+		ca := m.CreatedAt.UTC()
+		if useFrom && ca.Before(fromTime) {
+			continue
+		}
+		if useTo && ca.After(toTime) {
+			continue
+		}
+		items = append(items, exportItem{
+			ID:        m.ID,
+			Filename:  m.Filename,
+			Type:      t,
+			Size:      m.Size,
+			Mime:      m.Mime,
+			Width:     m.Width,
+			Height:    m.Height,
+			SHA256:    m.SHA256,
+			CreatedAt: ca.Format(time.RFC3339),
+			TakenAt:   m.TakenAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exported_at": time.Now().UTC().Format(time.RFC3339),
+		"total":       len(items),
+		"media":       items,
+	})
 }
 
 // handleUserActivityScore GET /api/media/user-activity-score — 用户活跃度评分。
