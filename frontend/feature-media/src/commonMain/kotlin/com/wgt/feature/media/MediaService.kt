@@ -4484,6 +4484,62 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-mood-analysis — 照片心情分析。
+     *
+     * 后端对当前用户全部未软删媒体，按拍摄时段（taken_at 毫秒；缺失=0 回退 created_at）
+     * 的 UTC 小时推断照片"心情"，统计四类分布（[handleMediaMoodAnalysis] 与色温/地点
+     * 同类端点口径一致，统一 UTC）：
+     *   - 清晨清新 → 6-10h   🌅
+     *   - 午后活力 → 10-16h  ☀️
+     *   - 黄昏浪漫 → 16-19h  🌇
+     *   - 夜晚神秘 → 19-6h   🌃
+     *
+     * 响应结构：`{moods:[{mood,count,percentage,emoji}], total, dominant_mood}`
+     * - 后端按 count 降序输出（count 相同保持定义顺序），故返回列表首位即主调。
+     * - [total] 为 0 时 dominant_mood 为 JSON null，此时 moods 各 count 均为 0；
+     *   前端按 total==0 静默跳过卡片渲染（与 [getMediaGpsEstimate] 同语义）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getMediaGpsEstimate] 同款）。HTTP 非 200 / 网络异常返回 null，调用方按空态处理。
+     *
+     * @return 心情分桶列表（按 count 降序）；失败返回 null。主调 = 首位（total>0 时）。
+     */
+    suspend fun getMediaMoodAnalysis(): List<MoodItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-mood-analysis")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // moods 为对象数组 [{mood,count,percentage,emoji}]；缺失或非数组时返回 null。
+                obj["moods"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    // mood 缺失则整条丢弃（无意义），其余字段宽容回退。
+                    val mood = item["mood"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    MoodItem(
+                        mood = mood,
+                        count = item["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        percentage = item["percentage"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        emoji = item["emoji"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaMoodAnalysis status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaMoodAnalysis FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 照片心情分桶（mood 名称 + 计数 + 百分比 + emoji）。 */
+    data class MoodItem(
+        val mood: String,
+        val count: Int,
+        val percentage: Double,
+        val emoji: String
+    )
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：

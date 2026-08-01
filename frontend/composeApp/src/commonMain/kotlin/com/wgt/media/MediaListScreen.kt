@@ -2474,6 +2474,93 @@ private fun MyTabContent(
             }
         }
 
+        // 照片心情卡片（调 media-mood-analysis，按拍摄时段推断清晨/午后/黄昏/夜晚四类心情分布）。
+        // 后端按 taken_at（缺失回退 created_at）UTC 小时分桶：6-10h 清晨清新、10-16h 午后活力、
+        // 16-19h 黄昏浪漫、19-6h 夜晚神秘；返回 moods[{mood,count,percentage,emoji}]/total/dominant_mood。
+        // 后端按 count 降序输出，故列表首位即主调（dominant_mood），其余顺位。
+        // 请求失败或 total=0 静默跳过，与色温分布/拍摄地点等卡片同语义。
+        var moodAnalysis by remember { mutableStateOf<List<MediaService.MoodItem>?>(null) }
+        LaunchedEffect(Unit) { moodAnalysis = MediaService.getMediaMoodAnalysis() }
+        moodAnalysis?.let { moods ->
+            // total>0 才渲染（total=0 时后端仍返回四条 count=0，无展示意义）。
+            val totalMood = moods.sumOf { it.count }
+            if (totalMood > 0) {
+                // 主调 = count 最大者（后端已降序，首位即主调；此处再取一次最大值以稳健）。
+                val dominantMood = moods.maxByOrNull { it.count }?.mood
+                // 进度条归一化基准：四档中最大 count（coerceAtLeast(1) 避免除零）。
+                val maxMoodCount = moods.maxOf { it.count }.coerceAtLeast(1)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("照片心情", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        moods.forEach { m ->
+                            val isDominant = m.mood == dominantMood
+                            val rowColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            val barColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            val ratio = (m.count.toFloat() / maxMoodCount).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("${m.emoji} ${m.mood}", fontSize = 12.sp,
+                                    fontWeight = if (isDominant) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor)
+                                Text("${m.count} 项 · ${formatPercent(m.percentage)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                            // 比例条：主调档着色更深（与拍摄地点/色温分布卡片同款 Box 比例条）。
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(ratio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(barColor)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：主调高亮 + 总数。
+                        if (dominantMood != null) {
+                            val dominantEmoji = moods.firstOrNull { it.mood == dominantMood }?.emoji ?: ""
+                            Text(
+                                "🏆 主调 ${dominantEmoji} ${dominantMood} · 共 ${totalMood} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        } else {
+                            Text(
+                                "共 ${totalMood} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                        Text(
+                            "按拍摄时段（taken_at / created_at UTC 小时）推断心情基调",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
