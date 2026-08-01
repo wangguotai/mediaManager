@@ -672,6 +672,12 @@ func (s *Server) registerRoutes() {
 	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
 	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
+	// 终极总览：GET /api/media/media-library-overview?year=2026 —— 一次请求扁平合并 30+ 统计维度，
+	// 供前端\"总览\"页单次加载渲染全部关键数字（计数/评分/趋势/标签/健康/活跃等）。
+	// 区别于 summary-report/full-report/dashboard（各自分块嵌套）：本端点把所有维度展平到 overview
+	// 单层 JSON 对象，前端无需逐层解包；year 仅影响 this_month/avg_daily 等\"指定年度\"口径字段，
+	// 计数/评分/标签/健康等全库口径字段与 year 无关。各子项 best-effort 容错（单步失败置零不阻断）。
+	s.mux.HandleFunc("/api/media/media-library-overview", s.handleMediaLibraryOverview)
 	// 媒体质量评估：对每个媒体按分辨率/大小/类型综合评分，返回 top/bottom 质量与平均分。
 	// 仅对 IMAGE 评分（VIDEO/LIVE_PHOTO 信息不足），一次 ListMediaByUser 全量拉取后在
 	// Go 侧计算 quality_score = min(精度/4K,1)*50 + min(大小/10MB,1)*30 + 类型奖励*20。
@@ -12731,6 +12737,425 @@ func (s *Server) handleMediaDecadeDistribution(w http.ResponseWriter, r *http.Re
 		"decades": buckets,
 		"total":   total,
 	})
+}
+
+// handleMediaLibraryOverview GET /api/media/media-library-overview?year=2026 — 终极总览。
+//
+// 一次请求扁平合并 30+ 统计维度为单层 overview 对象，供前端"总览/概览"页单次加载渲染
+// 全部关键数字，避免并发拉取 dashboard / summary-report / full-report / collection-health
+// 等多端点。本端点与上述分块嵌套报告的区别：所有维度展平到 overview 同一层，前端无需
+// 逐层解包（stats.total_media → overview.total_media）。
+//
+// 涵盖维度（口径与各源端点保持一致，best-effort 容错）：
+//
+//   - 计数        : total_media / total_bytes / image_count / video_count / live_count
+//                   / favorites / albums / shares / trash（全库口径，trash=回收站软删数）
+//   - 健康评分    : health_score（存→重复/配额/冷数据加权，同 storage-health）
+//                   / efficiency_score（重复率+平均大小惩罚，同 media-storage-efficiency）
+//                   / diversity_score（type/mime/hour/tag 归一化熵均值，同 media-content-diversity）
+//                   / activity_score（upload/favorite/share/tag/rename/rotate 加权归一化，同 collection-health）
+//                   / avg_quality（四项评分均值，0-100）
+//   - 趋势/活跃   : this_month_count（指定年份当月新增）/ avg_daily（当年日均）
+//                   / streak（当前连续上传天数，UTC 日期口径） / longest_streak / active_days
+//   - 标签        : total_tags / tag_coverage（已打标签媒体百分比，0-100）
+//   - 完整性      : total_duplicates（SHA256 重复份）/ total_errors（zero_size 计数，跳过磁盘扫描避免 IO 放大）
+//   - 存储补充    : duplicate_rate / quota_usage / cold_count / avg_bytes_per_media
+//
+// year 默认当年（UTC），?year=2026 指定；非法回退当年。year 仅影响 this_month_count / avg_daily
+// 等年度口径字段；全库口径字段与 year 无关。需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaLibraryOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// year 默认当年（UTC），?year=2026 指定；非法回退当年（同 yearly-review/full-report 口径）。
+	now := time.Now().UTC()
+	year := now.Year()
+	if q := r.URL.Query().Get("year"); q != "" {
+		if y, err := strconv.Atoi(q); err == nil && y >= 1970 && y <= 9999 {
+			year = y
+		}
+	}
+	today := now.Format("2006-01-02")
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// ===== 单次遍历：派生计数 / 健康基础量 / 重复 / diversity / streak / 年度口径 =====
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 storage-health/dashboard 一致
+	const mb int64 = 1024 * 1024
+	const baselineAvgBytes int64 = 2 * mb    // 平均大小基准 2MB（同 media-storage-efficiency）
+	const penaltyCapAvgBytes int64 = 20 * mb // 平均大小罚满阈值 20MB
+
+	var (
+		// 计数
+		totalMedia              int
+		imgCount, vidCount, liveCount int
+		totalBytes              int64
+		// 健康基础量
+		coldCount   int
+		shaCounts   = make(map[string]int)
+		errorCount  int // zero_size（skip 磁盘扫描，口径同 summary-report 的简化完整度）
+		// diversity（全库未删口径）
+		typeCounts  = make(map[string]int)
+		mimeCounts  = make(map[string]int)
+		hourCounts  = make(map[string]int, 24)
+		// streak / 年度
+		daySet      = make(map[string]bool)
+		yearDays    = 0
+		monthCounts = make([]int64, 12)
+	)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalMedia++
+		totalBytes += m.Size
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			imgCount++
+		case "VIDEO":
+			vidCount++
+		case "LIVE_PHOTO", "LIVE":
+			liveCount++
+		}
+		// health 维度
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+		// integrity（简化：zero_size 计 error，跳过磁盘扫描避免 IO 放大，同 summary-report）
+		if m.Size <= 0 {
+			errorCount++
+		}
+		// diversity 维度
+		typeCounts[m.Type]++
+		if m.Mime != "" {
+			mimeCounts[m.Mime]++
+		}
+		hourCounts[strconv.Itoa(m.CreatedAt.Hour())]++
+		// streak 维度（UTC 日期，与 handleUploadStreak 一致避免时区错位）
+		day := m.CreatedAt.Format("2006-01-02")
+		daySet[day] = true
+		// 年度口径
+		ca := m.CreatedAt.UTC()
+		if ca.Year() == year {
+			yearDays++
+			monthCounts[ca.Month()-1]++
+		}
+	}
+
+	// ===== 计数补充：favorites / albums / shares / trash =====
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites(uid))
+	}
+	albumCount := 0
+	if provider, ok := s.mediaSvc.(albumStoreProvider); ok {
+		albumCount = len(provider.ListAlbums(uid))
+	}
+	shareCount := 0
+	if tokens, serr := s.store.ListShareTokensByUser(r.Context(), uid); serr == nil {
+		shareCount = len(tokens)
+	} else {
+		slog.Warn("library-overview: list share tokens failed", "error", serr)
+	}
+	trashCount := 0
+	if n, terr := s.store.CountTrashByUser(r.Context(), uid); terr == nil {
+		trashCount = n
+	} else {
+		slog.Warn("library-overview: count trash failed", "error", terr)
+	}
+
+	// ===== 重复文件份 + 比率（health/efficiency/integrity 共用同一口径）=====
+	duplicateCount := 0
+	duplicateGroups := 0
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateGroups++
+			duplicateCount += c - 1
+		}
+	}
+	duplicateRate := 0.0
+	if totalMedia > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalMedia)
+	}
+
+	// ===== 维度 1：health_score（同 storage-health 口径，orphan=0 跳过磁盘扫描）=====
+	ageScore := 1.0
+	if totalMedia > 0 {
+		ageScore = 1.0 - float64(coldCount)/float64(totalMedia)
+	}
+	quotaUsage := 0.0
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(totalBytes) / float64(defaultQuotaBytes)
+	}
+	usedQuotaPercent := 0.0
+	if defaultQuotaBytes > 0 {
+		usedQuotaPercent = quotaUsage * 100
+	}
+	healthScore := 100.0 - (min01(duplicateRate)*30 + min01(quotaUsage)*30 + (1.0-min01(ageScore))*20)
+	if healthScore < 0 {
+		healthScore = 0
+	}
+	if healthScore > 100 {
+		healthScore = 100
+	}
+
+	// ===== 维度 2：efficiency_score（同 media-storage-efficiency）=====
+	avgBytesPerMedia := 0.0
+	if totalMedia > 0 {
+		avgBytesPerMedia = float64(totalBytes) / float64(totalMedia)
+	}
+	avgSizePenalty := 0.0
+	if avgBytesPerMedia > float64(baselineAvgBytes) {
+		avgSizePenalty = (avgBytesPerMedia - float64(baselineAvgBytes)) / float64(penaltyCapAvgBytes-baselineAvgBytes)
+	}
+	efficiencyScore := 100.0 - (min01(duplicateRate)*30 + min01(avgSizePenalty)*30)
+	if efficiencyScore < 0 {
+		efficiencyScore = 0
+	}
+	if efficiencyScore > 100 {
+		efficiencyScore = 100
+	}
+
+	// ===== 维度 3：diversity_score（同 media-content-diversity：type/mime/hour/tag 归一化熵均值）=====
+	normEntropy := func(counts map[string]int) float64 {
+		if len(counts) <= 1 {
+			return 0
+		}
+		n := 0
+		for _, c := range counts {
+			n += c
+		}
+		if n == 0 {
+			return 0
+		}
+		var h float64
+		for _, c := range counts {
+			if c <= 0 {
+				continue
+			}
+			p := float64(c) / float64(n)
+			h -= p * math.Log(p)
+		}
+		return h / math.Log(float64(len(counts)))
+	}
+	// tag 分布用 TagStats（best-effort：失败置空，diversity 仍可由 type/mime/hour 计算）。
+	tagCounts := make(map[string]int)
+	totalTags := 0
+	if totalMedia > 0 {
+		if stats, serr := s.store.TagStats(r.Context(), uid); serr == nil {
+			for _, st := range stats {
+				name, _ := st["tag"].(string)
+				cnt, _ := st["count"].(int)
+				if name != "" {
+					tagCounts[name] = cnt
+					totalTags++
+				}
+			}
+		} else {
+			slog.Warn("library-overview: tag stats failed", "error", serr)
+		}
+	}
+	typeEnt := normEntropy(typeCounts)
+	mimeEnt := normEntropy(mimeCounts)
+	hourEnt := normEntropy(hourCounts)
+	tagEnt := normEntropy(tagCounts)
+	diversityScore := round2((typeEnt + mimeEnt + hourEnt + tagEnt) / 4)
+	if totalMedia == 0 {
+		diversityScore = 0
+	}
+
+	// ===== 维度 4：activity_score（同 collection-health：加权原始分归一化到 0-100）=====
+	var actionCount map[string]int
+	if stats, aerr := s.store.AuditLogStats(r.Context(), uid); aerr == nil {
+		actionCount = make(map[string]int, len(stats))
+		for _, st := range stats {
+			action, _ := st["action"].(string)
+			cnt, _ := st["count"].(int)
+			if action == "" {
+				continue
+			}
+			actionCount[action] += cnt
+		}
+	} else {
+		slog.Warn("library-overview: audit log stats failed", "error", aerr)
+		actionCount = map[string]int{}
+	}
+	favCountForActivity := favoriteCount
+	if favCountForActivity == 0 {
+		favCountForActivity = actionCount["favorite"]
+	}
+	shareAct := actionCount["share"] + actionCount["share_toggle"]
+	rawActivityScore := totalMedia*3 + favCountForActivity*2 + shareAct*4 + actionCount["tag"]*1 + actionCount["rename"]*1 + actionCount["rotate"]*1
+	activityScore := float64(rawActivityScore)
+	if activityScore > 100 {
+		activityScore = 100
+	}
+	if activityScore < 0 {
+		activityScore = 0
+	}
+
+	// ===== avg_quality：四项评分均值（0-100）=====
+	avgQuality := (healthScore + efficiencyScore + float64(diversityScore)*100 + activityScore) / 4.0
+	if avgQuality < 0 {
+		avgQuality = 0
+	}
+	if avgQuality > 100 {
+		avgQuality = 100
+	}
+
+	// ===== tag_coverage：已打标签媒体百分比（0-100，同 media-coverage 口径）=====
+	liveIDs := make(map[string]struct{}, totalMedia)
+	for _, m := range mediaList {
+		if !m.Deleted {
+			liveIDs[m.ID] = struct{}{}
+		}
+	}
+	taggedSet := make(map[string]struct{})
+	if totalMedia > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		} else {
+			slog.Warn("library-overview: list tags failed", "error", terr)
+		}
+	}
+	taggedCount := 0
+	for id := range taggedSet {
+		if _, ok := liveIDs[id]; ok {
+			taggedCount++
+		}
+	}
+	tagCoverage := 0.0
+	if totalMedia > 0 {
+		tagCoverage = float64(taggedCount) / float64(totalMedia) * 100
+	}
+
+	// ===== streak / longest_streak / active_days（UTC 日期口径，同 dashboard）=====
+	sortedDays := make([]string, 0, len(daySet))
+	for d := range daySet {
+		sortedDays = append(sortedDays, d)
+	}
+	sort.Strings(sortedDays)
+	longestStreak := 0
+	curRun := 0
+	var prev time.Time
+	for _, d := range sortedDays {
+		t, perr := time.Parse("2006-01-02", d)
+		if perr != nil {
+			continue
+		}
+		if curRun == 0 || t.Sub(prev) == 24*time.Hour {
+			curRun++
+			if curRun > longestStreak {
+				longestStreak = curRun
+			}
+		} else {
+			curRun = 1
+		}
+		prev = t
+	}
+	// current streak：从今天（或昨天）往前连续有上传的天数。
+	currentStreak := 0
+	cursor, _ := time.Parse("2006-01-02", today)
+	if !daySet[today] {
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+	for daySet[cursor.Format("2006-01-02")] {
+		currentStreak++
+		cursor = cursor.AddDate(0, 0, -1)
+	}
+
+	// ===== this_month_count（指定年份当月新增） / avg_daily（当年日均）=====
+	thisMonth := int(now.Month())
+	thisMonthCount := monthCounts[thisMonth-1]
+	avgDaily := 0.0
+	daysInYear := 0
+	if year == now.Year() {
+		daysInYear = now.YearDay() // 今年到今天的累计天数
+	} else {
+		// 完整年份：闰年 366 否则 365
+		if isLeapYear(year) {
+			daysInYear = 366
+		} else {
+			daysInYear = 365
+		}
+	}
+	if daysInYear > 0 {
+		avgDaily = float64(yearDays) / float64(daysInYear)
+	}
+
+	// ===== 扁平合并 30+ 维度（全库口径 + 评分 + 趋势 + 标签 + 完整性）=====
+	overview := map[string]any{
+		// 计数维度
+		"total_media":       totalMedia,
+		"total_bytes":       totalBytes,
+		"image_count":       imgCount,
+		"video_count":       vidCount,
+		"live_count":        liveCount,
+		"favorites":         favoriteCount,
+		"albums":            albumCount,
+		"shares":            shareCount,
+		"trash":             trashCount,
+		// 评分维度（0-100）
+		"health_score":      int(healthScore),
+		"efficiency_score":  int(efficiencyScore),
+		"diversity_score":   diversityScore,
+		"activity_score":    int(activityScore),
+		"avg_quality":       round2(avgQuality),
+		// 趋势/活跃维度
+		"this_month_count":  thisMonthCount,
+		"avg_daily":         round2(avgDaily),
+		"streak":            currentStreak,
+		"longest_streak":    longestStreak,
+		"active_days":       len(daySet),
+		// 标签维度
+		"total_tags":        totalTags,
+		"tag_coverage":      round2(tagCoverage),
+		// 完整性维度
+		"total_duplicates":  duplicateCount,
+		"total_errors":      errorCount,
+		// 存储补充维度
+		"duplicate_rate":    round2(duplicateRate),
+		"quota_usage":       round2(quotaUsage),
+		"used_quota_percent": round2(usedQuotaPercent),
+		"cold_count":        coldCount,
+		"avg_bytes_per_media": int64(avgBytesPerMedia),
+		"year":              year,
+		"user_id":           uid,
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"overview":     overview,
+		"generated_at": now.Format(time.RFC3339),
+	})
+}
+
+// isLeapYear 判断公历闰年（能被4整除且不能被100整除，或能被400整除）。
+func isLeapYear(y int) bool {
+	return y%4 == 0 && (y%100 != 0 || y%400 == 0)
 }
 
 // handleMediaQualityAssessment GET /api/media/media-quality-assessment —
