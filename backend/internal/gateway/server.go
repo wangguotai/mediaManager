@@ -699,6 +699,12 @@ func (s *Server) registerRoutes() {
 	// 智能洞察报告——自动分析用户媒体库并给出可操作建议（重复/存储分布/上传习惯/
 	// 未标签/最大相册/存储健康度），一次请求合并多个分析维度，供前端"洞察"卡片展示。
 	s.mux.HandleFunc("/api/media/insights", s.handleMediaInsights)
+	// AI 洞察报告——综合存储/标签/重复/活跃度/多样性五维度分析，生成"AI 风格"的个性化
+	// 洞察建议（每条带 category/priority/actionable/action_url）。与 /insights 互补：
+	// 后者返 {type,title,detail} 建议；本端点返 {category,text,priority,...} 并额外给出
+	// 存储增长预测、最活跃月份、多样性评分等"AI 解读"口径，供前端"AI 洞察"卡片展示。
+	// 只读端点，需认证 + store，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-ai-insights", s.handleMediaAIInsights)
 	// 相册智能建议——基于未分类媒体（不在任何相册中的 media）按日期/类型/标签分组，
 	// 推荐可创建的相册（如"2026年7月的照片"、"视频合集"、"旅行标签"等），供前端
 	// "推荐相册"功能展示并让用户一键创建。只读端点。
@@ -21946,6 +21952,326 @@ func (s *Server) handleMediaInsights(w http.ResponseWriter, r *http.Request) {
 		"insights": insights,
 		"total":    len(insights),
 		"user_id":  uid,
+	})
+}
+
+// handleMediaAIInsights GET /api/media/media-ai-insights — AI 洞察报告。
+//
+// 综合调用各分析口径，生成"AI 风格"的个性化洞察建议，一次请求合并存储/标签/重复/
+// 活跃度/多样性五维度分析，每条带 category/text/priority/actionable/action_url，
+// 供前端"AI 洞察"卡片直接渲染。与 /api/media/insights 互补：后者返 {type,title,detail}
+// 的可操作建议列表；本端点返 {category,text,...} 的"AI 解读式"洞察，额外覆盖存储增长
+// 预测、最活跃月份、多样性评分等维度。
+//
+// 五类洞察（仅当对应条件成立才产出，避免空建议噪音）：
+//
+//	a) storage     — 存储增长预测：配额使用率与预计用完日期（复用 storage-growth-prediction 口径）
+//	b) tag         — 标签使用：最常用标签及其覆盖率（复用 TagStats 口径，按 count DESC）
+//	c) duplicate   — 重复文件：可回收数量与空间（复用 storage-recommendations 的 SHA256 分组口径）
+//	d) activity    — 活跃度：最活跃月份及其上传量（复用 media-count-by-month 的 created_at 分桶口径）
+//	e) diversity   — 多样性评分：类型/MIME/时段/标签四维度 Shannon 熵归一化（复用 media-content-diversity 口径）
+//
+// 数据来源：store.ListMediaByUser 一次拉全量未软删媒体 → 单遍历派生存储/重复/时段/
+// 月份分桶；store.TagStats 派生标签覆盖；多样性用四维度熵。各维度独立容错（单步失败记
+// warn 不阻断）。需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应：{ insights: [{category,text,priority,actionable,action_url}], total, generated_at }
+// priority ∈ {"high","medium","low"}；actionable 表示是否可点击 action_url 采取行动。
+func (s *Server) handleMediaAIInsights(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 storage-growth-prediction / insights 一致
+	now := time.Now()
+
+	// 单遍历：总量/字节/类型分布/SHA256 重复/上传时段/月份分桶。
+	totalCount := 0
+	var usedBytes int64
+	shaCounts := make(map[string]int)
+	monthCounts := make(map[string]int)  // YYYY-MM → count
+	monthBytes := make(map[string]int64) // YYYY-MM → bytes
+	typeCounts := map[string]int{"IMAGE": 0, "VIDEO": 0, "LIVE_PHOTO": 0}
+	mimeCounts := make(map[string]int)
+	hourCounts := make(map[string]int, 24)
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		usedBytes += m.Size
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+		month := m.CreatedAt.UTC().Format("2006-01")
+		monthCounts[month]++
+		monthBytes[month] += m.Size
+		typeCounts[m.Type]++
+		if m.Mime != "" {
+			mimeCounts[m.Mime]++
+		}
+		hourCounts[strconv.Itoa(m.CreatedAt.Hour())]++
+	}
+
+	// (a) 存储增长预测：最近最多 6 样本月拟合月均增长率，估算配额用完日期。
+	// 口径与 handleStorageGrowthPrediction 完全一致（同分桶、同 sampleMonths、同 linear 外推、
+	// 同 estimated_full_date 三态：null=无趋势 / 日期=可推 / 当日=已满）。
+	monthKeys := make([]string, 0, len(monthBytes))
+	for mk := range monthBytes {
+		monthKeys = append(monthKeys, mk)
+	}
+	sort.Strings(monthKeys)
+	const sampleMonths = 6
+	recent := monthKeys
+	if len(recent) > sampleMonths {
+		recent = recent[len(recent)-sampleMonths:]
+	}
+	var sampleBytesSum int64
+	for _, mk := range recent {
+		sampleBytesSum += monthBytes[mk]
+	}
+	monthlyGrowth := int64(0)
+	if len(recent) >= 2 {
+		monthlyGrowth = sampleBytesSum / int64(len(recent))
+	}
+	var estimatedFullDate any // 默认 nil → JSON null
+	nowUTC := now.UTC()
+	if monthlyGrowth > 0 && usedBytes < defaultQuotaBytes {
+		remaining := defaultQuotaBytes - usedBytes
+		n := remaining / monthlyGrowth
+		if remaining%monthlyGrowth != 0 {
+			n++
+		}
+		estimatedFullDate = nowUTC.AddDate(0, int(n), 0).Format("2006-01-02")
+	} else if usedBytes >= defaultQuotaBytes {
+		estimatedFullDate = nowUTC.Format("2006-01-02")
+	}
+	quotaPercent := 0.0
+	if defaultQuotaBytes > 0 {
+		quotaPercent = float64(usedBytes) / float64(defaultQuotaBytes) * 100
+	}
+
+	// (b) 标签：最常用标签（TagStats 已按 count DESC 返回，取首个）+ 覆盖率。
+	// 覆盖率 = topTagCount / totalCount * 100，反映该标签触达的媒体比例。
+	var topTag string
+	var topTagCount int
+	hasTopTag := false
+	if totalCount > 0 {
+		if stats, terr := s.store.TagStats(r.Context(), uid); terr == nil {
+			for _, st := range stats {
+				name, _ := st["tag"].(string)
+				cnt, _ := st["count"].(int)
+				if name != "" && cnt > topTagCount {
+					topTag = name
+					topTagCount = cnt
+					hasTopTag = true
+				}
+			}
+		} else {
+			slog.Warn("ai-insights: tag stats failed", "error", terr)
+		}
+	}
+	topTagCover := 0.0
+	if totalCount > 0 && topTagCount > 0 {
+		topTagCover = float64(topTagCount) / float64(totalCount) * 100
+	}
+
+	// (c) 重复文件：每个 SHA256 出现 >1，超出 1 份计入重复；可回收 = Σ(count-1)*sizePerFile。
+	// 口径与 handleMediaInsights / storage-recommendations 完全一致。
+	dupCount := 0
+	var dupReclaimable int64
+	for sha, c := range shaCounts {
+		if c <= 1 {
+			continue
+		}
+		dupCount += c - 1
+		var sizePerFile int64
+		for _, m := range mediaList {
+			if m.SHA256 == sha && !m.Deleted {
+				sizePerFile = m.Size
+				break
+			}
+		}
+		dupReclaimable += int64(c-1) * sizePerFile
+	}
+
+	// (d) 最活跃月份：count 最大者，并列时按 YYYY-MM 升序取最早（稳定输出）。
+	// 口径与 handleMediaCountByMonth 一致（created_at 的 UTC YYYY-MM 分桶）。
+	var activeMonth string
+	maxMonthCount := -1
+	for _, mk := range monthKeys { // monthKeys 已升序，并列取首个
+		if c := monthCounts[mk]; c > maxMonthCount {
+			maxMonthCount = c
+			activeMonth = mk
+		}
+	}
+
+	// (e) 多样性评分：四维度 Shannon 熵归一化后取均值（口径与 handleMediaContentDiversity 一致）。
+	// 归一化 = entropy / ln(k)；单一类别熵为 0。综合 0-100 分（×100），等级 A/B/C/D。
+	typeDiv := func(counts map[string]int) float64 {
+		if len(counts) <= 1 {
+			return 0
+		}
+		n := 0
+		for _, c := range counts {
+			n += c
+		}
+		if n == 0 {
+			return 0
+		}
+		var h float64
+		for _, c := range counts {
+			if c <= 0 {
+				continue
+			}
+			p := float64(c) / float64(n)
+			h -= p * math.Log(p)
+		}
+		return h / math.Log(float64(len(counts)))
+	}
+	tagCounts := make(map[string]int)
+	if totalCount > 0 {
+		if stats, terr := s.store.TagStats(r.Context(), uid); terr == nil {
+			for _, st := range stats {
+				name, _ := st["tag"].(string)
+				cnt, _ := st["count"].(int)
+				if name != "" {
+					tagCounts[name] = cnt
+				}
+			}
+		}
+	}
+	typeEnt := typeDiv(typeCounts)
+	mimeEnt := typeDiv(mimeCounts)
+	hourEnt := typeDiv(hourCounts)
+	tagEnt := typeDiv(tagCounts)
+	diversityScore := round2((typeEnt + mimeEnt + hourEnt + tagEnt) / 4 * 100) // 0-100
+	diversityGrade := gradeFromScore(diversityScore)
+
+	// 汇聚洞察条目：仅当条件成立才产出，避免空建议噪音。
+	type aiInsight struct {
+		Category   string `json:"category"`
+		Text       string `json:"text"`
+		Priority   string `json:"priority"`
+		Actionable bool   `json:"actionable"`
+		ActionURL  string `json:"action_url,omitempty"`
+	}
+	insights := make([]aiInsight, 0, 5)
+
+	// (a) storage：库增长与配额预测。空库不产（无增长可预测）。
+	if totalCount > 0 {
+		var growthText string
+		if monthlyGrowth > 0 {
+			growthPct := float64(monthlyGrowth) / float64(usedBytes) * 100
+			if estimatedFullDate != nil {
+				if fd, ok := estimatedFullDate.(string); ok {
+					growthText = fmt.Sprintf("你的媒体库以每月约 %s（%s）的速度增长（+%.1f%%），预计 %s 用完 10GB 配额", formatBytes(monthlyGrowth), fmtPercent(growthPct), growthPct, fd)
+				}
+			}
+			if growthText == "" {
+				growthText = fmt.Sprintf("你的媒体库以每月约 %s 的速度增长（+%.1f%%），当前已用 %s（%s 配额）", formatBytes(monthlyGrowth), float64(monthlyGrowth)/float64(usedBytes)*100, formatBytes(usedBytes), fmtPercent(quotaPercent))
+			}
+		} else {
+			growthText = fmt.Sprintf("你的媒体库当前占用 %s（%s 配额），近期无显著增长趋势", formatBytes(usedBytes), fmtPercent(quotaPercent))
+		}
+		priority := "low"
+		actionable := false
+		if quotaPercent >= 80 {
+			priority = "high"
+			actionable = true
+		} else if quotaPercent >= 50 {
+			priority = "medium"
+		}
+		insights = append(insights, aiInsight{
+			Category:   "storage",
+			Text:       growthText,
+			Priority:   priority,
+			Actionable: actionable,
+			ActionURL:  "/api/media/storage-growth-prediction",
+		})
+	}
+
+	// (b) tag：最常用标签及覆盖率。无标签不产。
+	if hasTopTag {
+		insights = append(insights, aiInsight{
+			Category:   "tag",
+			Text:       fmt.Sprintf("你最常使用 #%s 标签（%d 次），覆盖 %s 的媒体", topTag, topTagCount, fmtPercent(topTagCover)),
+			Priority:   "low",
+			Actionable: true,
+			ActionURL:  "/api/media/tag/stats",
+		})
+	}
+
+	// (c) duplicate：可回收重复文件。有重复才产。
+	if dupCount > 0 {
+		priority := "medium"
+		if dupReclaimable >= 500*1024*1024 { // ≥500MB 视为高优先级
+			priority = "high"
+		}
+		insights = append(insights, aiInsight{
+			Category:   "duplicate",
+			Text:       fmt.Sprintf("发现 %d 个重复文件，可回收 %s", dupCount, formatBytes(dupReclaimable)),
+			Priority:   priority,
+			Actionable: true,
+			ActionURL:  "/api/media/duplicates",
+		})
+	}
+
+	// (d) activity：最活跃月份。空库不产。
+	if totalCount > 0 && activeMonth != "" && maxMonthCount > 0 {
+		insights = append(insights, aiInsight{
+			Category:   "activity",
+			Text:       fmt.Sprintf("你在 %s 最活跃，上传了 %d 项", activeMonth, maxMonthCount),
+			Priority:   "low",
+			Actionable: false,
+		})
+	}
+
+	// (e) diversity：多样性评分（始终产出——空库也算 D 级，避免空列表 JSON null）。
+	var divText string
+	if totalCount == 0 {
+		divText = "你的媒体库为空，暂无法评估多样性"
+	} else {
+		distHint := "类型分布均匀"
+		if diversityScore < 40 {
+			distHint = "类型分布较为单一"
+		} else if diversityScore < 60 {
+			distHint = "类型分布有一定侧重"
+		}
+		divText = fmt.Sprintf("你的媒体库多样性评分为 %.0f/100（%s级），%s", diversityScore, diversityGrade, distHint)
+	}
+	divPriority := "low"
+	if totalCount > 0 && diversityScore < 40 {
+		divPriority = "medium"
+	}
+	insights = append(insights, aiInsight{
+		Category:   "diversity",
+		Text:       divText,
+		Priority:   divPriority,
+		Actionable: true,
+		ActionURL:  "/api/media/media-content-diversity",
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"insights":     insights,
+		"total":        len(insights),
+		"generated_at": now.UTC().Format(time.RFC3339),
 	})
 }
 
