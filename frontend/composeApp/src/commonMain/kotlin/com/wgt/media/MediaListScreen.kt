@@ -156,6 +156,12 @@ fun MediaListScreen(
     var showAdvancedSearch by remember { mutableStateOf(false) }
     val advancedSearchScope = rememberCoroutineScope()
 
+    // 智能搜索对话框显隐：SearchBar 上的「🤖 智能搜索」按钮触发，
+    // SmartSearchDialog 内部就地调 MediaService.getMediaSmartSearch（自然语言查询），
+    // 命中结果经 onResults 回调灌入 viewModel.applyAdvancedSearchResults 替换列表。
+    // 复用 advancedSearchScope 即可（同为后台搜索协程，无并发冲突）。
+    var showSmartSearch by remember { mutableStateOf(false) }
+
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
 
@@ -473,6 +479,26 @@ fun MediaListScreen(
         )
     }
 
+    // 智能搜索对话框：用户输入自然语言查询（如"去年夏天的视频"），
+    // SmartSearchDialog 内部调 MediaService.getMediaSmartSearch，命中结果经
+    // onResults 灌入 viewModel.applyAdvancedSearchResults 替换列表；
+    // 空结果在对话框内已展示"找到 0 项"，此处额外 Snackbar 提示并关闭对话框。
+    // 复用 advancedSearchScope 发起后台搜索协程（搜索请求本身在 Dialog 内同步等待）。
+    if (showSmartSearch) {
+        SmartSearchDialog(
+            onDismiss = { showSmartSearch = false },
+            onResults = { list, total, parsed ->
+                showSmartSearch = false
+                viewModel.applyAdvancedSearchResults(list)
+                if (total == 0) {
+                    advancedSearchScope.launch {
+                        snackbarHostState.showSnackbar("未找到匹配的媒体")
+                    }
+                }
+            }
+        )
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -681,7 +707,8 @@ fun MediaListScreen(
                         if (query.isNotBlank()) SearchHistory.add(query)
                     },
                     onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ },
-                    onAdvancedSearch = { showAdvancedSearch = true }
+                    onAdvancedSearch = { showAdvancedSearch = true },
+                    onSmartSearch = { showSmartSearch = true }
                 )
 
                     // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效

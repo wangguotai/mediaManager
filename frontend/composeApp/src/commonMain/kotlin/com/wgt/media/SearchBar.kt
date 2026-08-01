@@ -48,6 +48,7 @@ import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import media.MediaMetadata
 import kotlin.time.Clock
 import mediamanager.composeapp.generated.resources.Res
 import mediamanager.composeapp.generated.resources.ic_arrow_back
@@ -217,6 +218,137 @@ fun AdvancedSearchDialog(
 }
 
 /**
+ * 智能搜索对话框 —— 由搜索栏的"🤖 智能搜索"按钮触发。
+ *
+ * 与 [AdvancedSearchDialog] 区别：用户输入**自然语言**查询（如"去年夏天的视频"、
+ * "大于 10MB 的图片"），由后端 `media-smart-search` 解析为结构化条件后查库，
+ * 无需前端逐项拼参数。对话框内就地调 [MediaService.getMediaSmartSearch]，
+ * 成功后把命中的媒体列表经 [onResults] 回传给调用方（灌入 ViewModel 替换列表），
+ * 并展示后端 [parsed_query][MediaService.SmartSearchResult.parsedQuery] 让用户确认
+ * "理解为：xxx"，增加自然语言搜索的透明度。
+ *
+ * 状态机：idle → searching → done（带结果摘要）/ error。空结果不关对话框，
+ * 留在原地提示"未找到"，便于用户改写查询重试。
+ *
+ * @param onResults 搜索成功回调：命中的媒体列表 + 总数 + 后端解析的查询描述。
+ *                  调用方据此 `applyAdvancedSearchResults(list)` 替换列表。
+ * @param onDismiss 关闭回调（取消/对话框外部 dismiss 都触发）。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+fun SmartSearchDialog(
+    onResults: (List<MediaMetadata>, Int, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var searching by remember { mutableStateOf(false) }
+    // 搜索完成后展示的摘要：parsedQuery / total / 错误提示。null 表示尚未搜索或已重置。
+    var summary by remember {
+        mutableStateOf<Triple<String, Int, String>?>(null)
+    }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("🤖 智能搜索") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "用自然语言描述你想找的媒体，如：去年夏天的视频、大于 10MB 的图片、带海边标签的照片",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("描述你要找的内容") },
+                    placeholder = { Text("例如：去年夏天的视频") },
+                    singleLine = true,
+                    enabled = !searching,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        triggerSmartSearch(query, scope, searching = { searching = it },
+                            summary = { summary = it }, onResults = { list, total, parsed ->
+                                onResults(list, total, parsed)
+                            })
+                    }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                // 搜索结果摘要区：展示后端解析说明 + 命中数量，或错误提示。
+                summary?.let { (parsed, total, error) ->
+                    if (error.isNotEmpty()) {
+                        Text(
+                            error,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else {
+                        if (parsed.isNotEmpty()) {
+                            Text(
+                                "理解为：$parsed",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            "找到 $total 项匹配媒体${if (total > 0) "（已展示）" else ""}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !searching && query.trim().isNotEmpty(),
+                onClick = {
+                    triggerSmartSearch(query, scope, searching = { searching = it },
+                        summary = { summary = it }, onResults = { list, total, parsed ->
+                            onResults(list, total, parsed)
+                        })
+                }
+            ) {
+                Text(if (searching) "搜索中…" else "搜索")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !searching, onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+/**
+ * [SmartSearchDialog] 的搜索触发逻辑：trim 校验 → 调 [MediaService.getMediaSmartSearch]
+ * → 回写 summary/onResults。提取为顶层私有函数避免 confirmButton 与 IME 回调重复。
+ */
+private fun triggerSmartSearch(
+    rawQuery: String,
+    scope: kotlinx.coroutines.CoroutineScope,
+    searching: (Boolean) -> Unit,
+    summary: (Triple<String, Int, String>?) -> Unit,
+    onResults: (List<MediaMetadata>, Int, String) -> Unit
+) {
+    val q = rawQuery.trim()
+    if (q.isEmpty()) return
+    searching(true)
+    summary(null)
+    scope.launch {
+        val result = MediaService.getMediaSmartSearch(q)
+        if (result == null) {
+            searching(false)
+            summary(Triple("", 0, "智能搜索失败，请稍后重试"))
+        } else {
+            searching(false)
+            summary(Triple(result.parsedQuery, result.total, ""))
+            if (result.results.isNotEmpty()) {
+                onResults(result.results, result.total, result.parsedQuery)
+            }
+        }
+    }
+}
+
+/**
  * 可展开搜索栏。
  *
  * 收起态：仅一个搜索图标按钮 + 灰色"搜索"提示，占用空间小，不干扰浏览。
@@ -240,6 +372,7 @@ fun SearchBar(
     onDebouncedQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit = {},
     onAdvancedSearch: () -> Unit = {},
+    onSmartSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // 输入框本地文案：即时跟随键盘输入。
@@ -384,6 +517,16 @@ fun SearchBar(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+
+                    // 智能搜索入口：用自然语言提问（如"去年夏天的视频"），后端
+                    // media-smart-search 解析后查库。用文本按钮承载，便于识别入口语义。
+                    TextButton(onClick = onSmartSearch) {
+                        Text(
+                            "🤖 智能搜索",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     // 收起态占位文案：提示可点击搜索图标开始过滤。
                     Spacer(modifier = Modifier.width(8.dp))
@@ -399,6 +542,14 @@ fun SearchBar(
                             painter = painterResource(Res.drawable.ic_sort),
                             contentDescription = "高级搜索",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // 收起态同样提供智能搜索入口，紧跟高级搜索图标，任意状态下均可进入。
+                    TextButton(onClick = onSmartSearch) {
+                        Text(
+                            "🤖",
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

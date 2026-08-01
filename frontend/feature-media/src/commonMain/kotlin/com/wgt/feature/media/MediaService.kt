@@ -729,6 +729,70 @@ object MediaService {
     }
 
     /**
+     * 智能搜索结果（与后端 `media-smart-search` JSON 对齐）。
+     *
+     * 后端返回 `{ "results": [...], "total": N, "parsed_query": "..." }`，
+     * 其中 `results` 复用 [advancedSearch] 同款 `storage.Media` 结构体序列化
+     * （`mime` / `created_at` 为 RFC3339），故 [results] 由共享 [parseMediaItem] 解析。
+     *
+     * @param results 命中的媒体列表（已解析为 [MediaMetadata]）
+     * @param total 后端报告的总命中数（可能大于 [results].size，受 limit 截断）
+     * @param parsedQuery 后端把自然语言解析后的结构化查询描述，供 UI 展示
+     *                    “理解为：xxx”，增加透明度。后端缺失时为空串。
+     */
+    data class SmartSearchResult(
+        val results: List<MediaMetadata>,
+        val total: Int,
+        val parsedQuery: String
+    )
+
+    /**
+     * 智能搜索 —— GET /api/media/media-smart-search?q=去年夏天的视频。
+     *
+     * 与 [advancedSearch] 区别：本端点接受**自然语言查询**（如“去年夏天的视频”、
+     * “大于 10MB 的图片”），由后端 LLM/规则解析为结构化条件后查库，无需前端拼参数。
+     * 响应顶层为 `results`（非 `media`），并多 `parsed_query` 字段供 UI 透明展示解析结果。
+     *
+     * 媒体项字段口径与 [advancedSearch] 一致（直接序列化 `storage.Media`），故复用
+     * [parseMediaItem]。HTTP 非 200 或网络异常返回 null，调用方按空态提示。
+     * 鉴权头由 defaultRequest 统一注入。
+     *
+     * @param query 自然语言查询串（原样 URL 编码由 Ktor 处理）
+     * @param limit 返回上限（默认 100，与 [advancedSearch] 默认一致）
+     * @return 解析后的智能搜索结果；失败返回 null
+     */
+    suspend fun getMediaSmartSearch(query: String, limit: Int = 100): SmartSearchResult? {
+        val q = query.trim()
+        if (q.isEmpty()) return SmartSearchResult(emptyList(), 0, "")
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-smart-search") {
+                parameter("q", q)
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val list = obj["results"]?.jsonArray?.map { item ->
+                    parseMediaItem(item.jsonObject)
+                } ?: emptyList()
+                val total = obj["total"]?.jsonPrimitive?.intOrNull ?: list.size
+                val parsedQuery = obj["parsed_query"]?.jsonPrimitive?.contentOrNull ?: ""
+                logger.info(
+                    "MediaService",
+                    "getMediaSmartSearch q=$q status=${response.status} parsed=${list.size} total=$total"
+                )
+                SmartSearchResult(list, total, parsedQuery)
+            } else {
+                logger.info("MediaService", "getMediaSmartSearch q=$q status=${response.status} (non-OK)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSmartSearch FAILED q=$q: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 把 `YYYY-MM-DD` 补成 RFC3339 当天起始：`YYYY-MM-DDT00:00:00Z`。
      * 非预期格式原样返回，交由后端兜底（不抛错）。
      */
@@ -762,24 +826,35 @@ object MediaService {
     private fun parseAdvancedSearchList(json: String): List<MediaMetadata> {
         val obj = Json.parseToJsonElement(json).jsonObject
         return obj["media"]?.jsonArray?.map { item ->
-            val m = item.jsonObject
-            MediaMetadata(
-                id = m["id"]?.jsonPrimitive?.content ?: "",
-                filename = m["filename"]?.jsonPrimitive?.content ?: "",
-                type = parseMediaType(m["type"]?.jsonPrimitive?.content),
-                size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
-                mime_type = m["mime"]?.jsonPrimitive?.contentOrNull
-                    ?: m["mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
-                created_at = rfc3339ToMillis(m["created_at"]?.jsonPrimitive?.contentOrNull),
-                updated_at = rfc3339ToMillis(m["updated_at"]?.jsonPrimitive?.contentOrNull),
-                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull
-                    ?: (m["type"]?.jsonPrimitive?.contentOrNull?.equals("LIVE_PHOTO", ignoreCase = true) == true),
-                live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
-                width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
-                height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
-            )
+            parseMediaItem(item.jsonObject)
         } ?: emptyList()
     }
+
+    /**
+     * 把单个媒体 JSON 对象解析为 [MediaMetadata]。
+     *
+     * `advanced-search` 与 `media-smart-search` 后端均直接序列化 `storage.Media` 结构体，
+     * 字段口径一致且**不同于** [parseMediaList] 走的 gRPC list 口径：
+     * - 顶层用 `mime`（gRPC list 用 `mime_type`）；
+     * - `created_at` / `updated_at` 为 RFC3339 字符串（gRPC list 为 epoch 毫秒）；
+     * - 多 `total` / `parsed_query` 等顶层字段。
+     * `mime_type` 兜底兼容旧口径。提取为单点以便两个搜索端点共享，避免字段漂移。
+     */
+    private fun parseMediaItem(m: JsonObject): MediaMetadata = MediaMetadata(
+        id = m["id"]?.jsonPrimitive?.content ?: "",
+        filename = m["filename"]?.jsonPrimitive?.content ?: "",
+        type = parseMediaType(m["type"]?.jsonPrimitive?.content),
+        size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+        mime_type = m["mime"]?.jsonPrimitive?.contentOrNull
+            ?: m["mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
+        created_at = rfc3339ToMillis(m["created_at"]?.jsonPrimitive?.contentOrNull),
+        updated_at = rfc3339ToMillis(m["updated_at"]?.jsonPrimitive?.contentOrNull),
+        is_live_photo = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull
+            ?: (m["type"]?.jsonPrimitive?.contentOrNull?.equals("LIVE_PHOTO", ignoreCase = true) == true),
+        live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
+        width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
+        height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
+    )
 
     /**
      * 把 RFC3339 字符串解析为 epoch 毫秒。失败/空串返回 0L。
