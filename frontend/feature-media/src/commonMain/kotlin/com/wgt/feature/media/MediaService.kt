@@ -4481,6 +4481,87 @@ object MediaService {
     )
 
     /**
+     * 媒体质量评估单条（与后端 [handleMediaQualityAssessment] 的 scored JSON 对齐）。
+     *
+     * 后端对每张参与评分的 IMAGE 计算 0~100 的 quality_score
+     * （分辨率归一化 50 + 文件大小归一化 30 + IMAGE 类型奖励 20），并附分辨率串。
+     *
+     * @param mediaId 媒体 ID
+     * @param filename 文件名
+     * @param score 质量评分 0~100
+     * @param resolution 分辨率串（如 "3840x2160"）
+     */
+    data class QualityItem(
+        val mediaId: String,
+        val filename: String,
+        val score: Double,
+        val resolution: String
+    )
+
+    /**
+     * 媒体质量评估结果（top/bottom 各 [limit] 条 + 全量平均分 + 参与评分总数）。
+     *
+     * @param top 分数最高的若干条（降序）
+     * @param bottom 分数最低的若干条（升序）
+     * @param avgScore 参与评分媒体的平均分（0~100）
+     * @param total 参与评分的 IMAGE 媒体数
+     */
+    data class QualityAssessment(
+        val top: List<QualityItem>,
+        val bottom: List<QualityItem>,
+        val avgScore: Double,
+        val total: Int
+    )
+
+    /**
+     * GET /api/media/media-quality-assessment?limit=N — 媒体质量评估（综合分辨率+大小+类型评分）。
+     *
+     * 后端对当前用户所有未软删的 IMAGE（且有非零 Width/Height）计算 quality_score（0~100）：
+     *   resolution_score = min(width*height / 4K, 1) * 50
+     *   size_score       = min(size / 10MB, 1) * 30
+     *   type_bonus       = IMAGE → 20
+     * 按分数倒序取 top、正序取 bottom，各 [limit] 条；另返回 avg_score 与 total。
+     *
+     * 响应结构（与 [handleMediaQualityAssessment] 对齐）：
+     *   `{top:[{media_id,filename,score,resolution}], bottom:[...], avg_score, total}`
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaSizePercentile] / [getMediaColorTemperature] 同语义。
+     *
+     * @param limit 每档（top/bottom）返回条数，默认 10，后端上限 100
+     */
+    suspend fun getMediaQualityAssessment(limit: Int = 10): QualityAssessment? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-quality-assessment") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // top/bottom 为对象数组；mapNotNull 跳过缺 media_id 的无效条目（与 getRelatedMedia 同款）。
+                fun parseItems(arr: JsonArray?): List<QualityItem> = arr?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val id = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    QualityItem(
+                        mediaId = id,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        score = item["score"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                        resolution = item["resolution"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                } ?: emptyList()
+                QualityAssessment(
+                    top = parseItems(obj["top"]?.jsonArray),
+                    bottom = parseItems(obj["bottom"]?.jsonArray),
+                    avgScore = obj["avg_score"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaQualityAssessment FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * GET /api/media/media-color-temperature — 媒体色温分布。
      *
      * 后端对当前用户全部未软删媒体按拍摄时段（taken_at 毫秒；缺失=0 时回退到

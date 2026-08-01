@@ -2200,6 +2200,119 @@ private fun MyTabContent(
             }
         }
 
+        // 媒体质量评估卡片（调 media-quality-assessment，显示 top/bottom + 平均分）。
+        // 后端对未软删 IMAGE（且有非零 Width/Height）计算 0~100 quality_score
+        //（分辨率归一化 50 + 大小归一化 30 + IMAGE 类型奖励 20），取 top/bottom 各 10 条 + avg_score + total。
+        // 前端展示：平均分大字 + Top 3 佳作（🏆）+ Bottom 1 待优化（⚠️）；请求失败或 total=0 静默跳过。
+        var qualityAssessment by remember { mutableStateOf<MediaService.QualityAssessment?>(null) }
+        LaunchedEffect(Unit) { qualityAssessment = MediaService.getMediaQualityAssessment(limit = 10) }
+        qualityAssessment?.let { qa ->
+            if (qa.total > 0) {
+                // 分数 → 一位小数字符串（commonMain 无 String.format，沿用 toString 截断，与大小百分位卡片同款）。
+                fun fmtScore(s: Double): String {
+                    val str = s.toString()
+                    return str.take(str.indexOf('.') + 2)
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("媒体质量", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 平均分大字 + /100 + 参与评分总数
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                fmtScore(qa.avgScore),
+                                fontSize = 32.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "/100",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Text(
+                                "平均质量 · ${qa.total} 张参与评分",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // Top 3 佳作（🏆）：取前 3 条，显示文件名 + 分数 + 分辨率。
+                        if (qa.top.isNotEmpty()) {
+                            Text(
+                                "🏆 高分佳作",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            qa.top.take(3).forEach { item ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        item.filename,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                                    )
+                                    Text(
+                                        "${fmtScore(item.score)} · ${item.resolution}",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                        // Bottom 1 待优化（⚠️）：取最低 1 条，与 Top 区分用橙色提示。
+                        if (qa.bottom.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "⚠️ 待优化",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFFFF9800)
+                            )
+                            qa.bottom.take(1).forEach { item ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        item.filename,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                                    )
+                                    Text(
+                                        "${fmtScore(item.score)} · ${item.resolution}",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFFFF9800)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 色温分布卡片（调 media-color-temperature，按拍摄时段推断暖/冷/自然三档分布）。
         // 后端按 taken_at（缺失回退 created_at）的 UTC 小时分桶：18-22h→warm(暖)、
         // 6-10h→cool(冷)、其他→natural(自然)；返回 distribution/total/dominant
