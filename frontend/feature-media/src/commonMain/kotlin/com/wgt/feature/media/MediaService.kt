@@ -8155,6 +8155,63 @@ object MediaService {
     }
 
     /**
+     * 重命名历史条目（与后端 GET /api/media/media-rename-history 的 historyItem JSON 对齐）。
+     *
+     * 后端返回 `{ "history": [{media_id, old_name, new_name, renamed_at}], "total": N }`，
+     * [renamedAt] 为 RFC3339 字符串，前端仅透传不解析（由卡片侧截取日期部分展示）。
+     *
+     * @param mediaId 媒体 ID
+     * @param oldName 重命名前文件名
+     * @param newName 重命名后文件名
+     * @param renamedAt 重命名发生时间（RFC3339 字符串）
+     */
+    data class RenameHistoryItem(
+        val mediaId: String,
+        val oldName: String,
+        val newName: String,
+        val renamedAt: String
+    )
+
+    /**
+     * GET /api/media/media-rename-history?limit=50 — 重命名历史。
+     *
+     * 返回当前用户最近 [limit] 条媒体重命名记录（按 renamed_at 倒序）。
+     * 后端响应体：`{ "history": [{media_id, old_name, new_name, renamed_at}], "total": N }`。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getAuditTimeline] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @param limit 返回上限（默认 50）
+     * @return 重命名历史列表；失败返回 null
+     */
+    suspend fun getMediaRenameHistory(limit: Int = 50): List<RenameHistoryItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-rename-history") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["history"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    RenameHistoryItem(
+                        mediaId = o["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        oldName = o["old_name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        newName = o["new_name"]?.jsonPrimitive?.contentOrNull ?: "",
+                        renamedAt = o["renamed_at"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaRenameHistory status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaRenameHistory FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V8：GET /api/media/audit-log/by-media?media_id=xxx — 单个媒体操作历史。
      *
      * 返回指定媒体的审计记录（按时间倒序）。后端约定响应体：
