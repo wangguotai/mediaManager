@@ -629,6 +629,11 @@ func (s *Server) registerRoutes() {
 	// 含完整度评分 0-100 与 A/B/C/D 等级）。一次 ListMediaByUser 拉全量 + 单次磁盘扫描，
 	// 同时检测 DB 有记录磁盘缺失（orphan）、size<=0 或大小不符（error）、SHA256 重复（duplicate）。
 	s.mux.HandleFunc("/api/media/media-integrity-report", s.handleMediaIntegrityReport)
+	// V8：媒体库健康总报告（合并 storage-health / media-storage-efficiency /
+	// media-integrity-report / media-coverage / user-activity-score 五个维度为一份综合
+	// 0-100 评分 + A/B/C/D 等级 + 汇总建议清单）。一次 ListMediaByUser 拉全量 + 单次磁盘扫描，
+	// 各子评分与对应源端点保持口径一致，仅做归一化到 0-100 后取均值。
+	s.mux.HandleFunc("/api/media/media-collection-health", s.handleMediaCollectionHealth)
 	// 按年代统计媒体分布（基于 created_at 的 UTC 年份归入 2020s/2010s/2000s/更早）。
 	// 每个年代返 count/bytes/percentage，另返 total。只读聚合端点，需认证，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-decade-distribution", s.handleMediaDecadeDistribution)
@@ -18480,4 +18485,348 @@ func formatBytes(b int64) string {
 // fmtPercent 把百分比数值格式化为保留一位小数的字符串（如 "45.2%"），用于洞察详情。
 func fmtPercent(v float64) string {
 	return fmt.Sprintf("%.1f%%", v)
+}
+
+// gradeFromScore 把 0-100 评分映射为 A/B/C/D 等级（>=85 A、>=70 B、>=50 C、否则 D），
+// 与 storage-health / media-storage-efficiency / media-integrity-report 口径一致。
+func gradeFromScore(score float64) string {
+	switch {
+	case score >= 85:
+		return "A"
+	case score >= 70:
+		return "B"
+	case score >= 50:
+		return "C"
+	}
+	return "D"
+}
+
+// handleMediaCollectionHealth V8：GET /api/media/media-collection-health — 媒体库健康总报告。
+//
+// 一次请求合并五个分析维度的评分为一份综合 0-100 评分 + A/B/C/D 等级 + 汇总建议清单，
+// 避免前端并发拉取 storage-health / media-storage-efficiency / media-integrity-report /
+// media-coverage / user-activity-score 五个端点。
+//
+// 五个维度（子评分均归一化到 0-100，与对应源端点口径一致）：
+//
+//	health      ← 存储健康度评分（重复率/孤立率/配额/冷数据，权重 30/20/30/20；同 storage-health）
+//	integrity   ← 完整度评分（磁盘扫描 orphan/zero_size/size_mismatch + SHA256 重复；同 media-integrity-report）
+//	efficiency  ← 存储效率评分（重复率/平均大小惩罚，权重 30/30；同 media-storage-efficiency）
+//	coverage    ← 覆盖率（已打标签媒体百分比，0-100；来源于 media-coverage 的 tagged.percent）
+//	activity    ← 用户活跃度评分（upload/favorite/share/tag/rename/rotate 加权原始分，归一化到 0-100；
+//	               来源于 user-activity-score，cap 100 → 满分）
+//
+// 综合评分 = 五个子评分的算术平均。建议清单合并各维度的针对性提示（新增 integrity/coverage/activity
+// 的补充建议，源端点仅 health/efficiency 原生产出 suggestions）。
+//
+// 数据源：s.store.ListMediaByUser（当前用户全部 media，含软删行，handler 内跳过 m.Deleted），
+// 与五个源端点一致；integrity 维度复用 s.userUploadsDir 做磁盘扫描，未配置 uploads 目录时跳过磁盘检查。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaCollectionHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	const defaultQuotaBytes int64 = 10 * 1024 * 1024 * 1024 // 10 GB，与 storage-health / stat-summary 一致
+	const mb int64 = 1024 * 1024
+	const baselineAvgBytes int64 = 2 * mb    // 平均大小基准 2MB（同 media-storage-efficiency）
+	const penaltyCapAvgBytes int64 = 20 * mb // 平均大小罚满阈值 20MB（同 media-storage-efficiency）
+	now := time.Now()
+
+	// ===== 单次遍历：统计 health / efficiency / integrity / coverage 共用的基础量 =====
+	//   - totalCount / usedBytes / coldCount(>180天) / shaCounts：health 与 efficiency 用
+	//   - diskCheck → orphanCount(zero_size 或磁盘缺失或 stat 失败 或 size_mismatch)：
+	//     intCount 用于 integrity 维度（与 media-integrity-report 口径一致）
+	totalCount := 0
+	coldCount := 0
+	var usedBytes int64
+	shaCounts := make(map[string]int)
+	orphanCount := 0   // 完整度维度：磁盘缺失 / stat 失败（media-integrity-report 口径）
+	errorCount := 0    // 完整度维度：zero_size / size_mismatch
+	duplicateCount := 0
+	uploadsDir := s.userUploadsDir(uid)
+	diskCheck := uploadsDir != ""
+	liveIDs := make(map[string]struct{}, len(mediaList))
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalCount++
+		usedBytes += m.Size
+		liveIDs[m.ID] = struct{}{}
+		if now.Sub(m.CreatedAt) >= 180*24*time.Hour {
+			coldCount++
+		}
+		if m.SHA256 != "" {
+			shaCounts[m.SHA256]++
+		}
+
+		// integrity: (a) zero_size 直接计 error，无需磁盘检查。
+		if m.Size <= 0 {
+			errorCount++
+			continue
+		}
+		// 未配置 uploads 目录：跳过磁盘 orphan/size_mismatch 检查（与 media-integrity-report 一致）。
+		if !diskCheck {
+			continue
+		}
+		files, _ := filepath.Glob(filepath.Join(uploadsDir, m.ID+".*"))
+		if len(files) == 0 {
+			orphanCount++ // 磁盘文件缺失
+			continue
+		}
+		info, statErr := os.Stat(files[0])
+		if statErr != nil {
+			orphanCount++ // glob 命中但 stat 失败，视为缺失
+			continue
+		}
+		if info.Size() != m.Size {
+			errorCount++ // 磁盘大小 != DB 记录 → size_mismatch
+		}
+	}
+
+	// 重复文件份（health / efficiency / integrity 三维度共用同一口径）。
+	for _, c := range shaCounts {
+		if c > 1 {
+			duplicateCount += c - 1
+		}
+	}
+
+	// ===== 维度 1：health（同 storage-health）=====
+	// score = 100 - (duplicate_rate*30 + orphan_rate*20 + quota_usage*30 + (1-age_score)*20)
+	// storage-health 的 orphan 维度需磁盘扫描，默认按 0 计（与源端点一致）。
+	// 这里用 intOrphanCount=0 保持与 storage-health 一致（storage-health 跳过磁盘扫描）。
+	duplicateRate := 0.0
+	intOrphanRate := 0.0 // storage-health 口径：孤立率按 0 计
+	quotaUsage := 0.0
+	ageScore := 1.0
+	if totalCount > 0 {
+		duplicateRate = float64(duplicateCount) / float64(totalCount)
+		ageScore = 1.0 - float64(coldCount)/float64(totalCount)
+	}
+	if defaultQuotaBytes > 0 {
+		quotaUsage = float64(usedBytes) / float64(defaultQuotaBytes)
+	}
+	healthScore := 100.0 - (min01(duplicateRate)*30 + min01(intOrphanRate)*20 + min01(quotaUsage)*30 + (1.0-min01(ageScore))*20)
+	if healthScore < 0 {
+		healthScore = 0
+	}
+	if healthScore > 100 {
+		healthScore = 100
+	}
+
+	// ===== 维度 2：efficiency（同 media-storage-efficiency）=====
+	// score = 100 - (duplicate_rate*30 + avg_size_penalty*30)
+	avgBytesPerMedia := 0.0
+	mediaPerMB := 0.0
+	if totalCount > 0 {
+		avgBytesPerMedia = float64(usedBytes) / float64(totalCount)
+		if usedBytes > 0 {
+			mediaPerMB = float64(totalCount) / (float64(usedBytes) / float64(mb))
+		}
+	}
+	avgSizePenalty := 0.0
+	if avgBytesPerMedia > float64(baselineAvgBytes) {
+		avgSizePenalty = (avgBytesPerMedia - float64(baselineAvgBytes)) / float64(penaltyCapAvgBytes-baselineAvgBytes)
+	}
+	efficiencyScore := 100.0 - (min01(duplicateRate)*30 + min01(avgSizePenalty)*30)
+	if efficiencyScore < 0 {
+		efficiencyScore = 0
+	}
+	if efficiencyScore > 100 {
+		efficiencyScore = 100
+	}
+
+	// ===== 维度 3：integrity（同 media-integrity-report）=====
+	// score = 100 - (orphan_rate*40 + error_rate*40 + duplicate_rate*20)
+	integrityOrphanRate := 0.0
+	errorRate := 0.0
+	if totalCount > 0 {
+		integrityOrphanRate = float64(orphanCount) / float64(totalCount)
+		errorRate = float64(errorCount) / float64(totalCount)
+	}
+	integrityScore := 100.0 - (min01(integrityOrphanRate)*40 + min01(errorRate)*40 + min01(duplicateRate)*20)
+	if integrityScore < 0 {
+		integrityScore = 0
+	}
+	if integrityScore > 100 {
+		integrityScore = 100
+	}
+
+	// ===== 维度 4：coverage（同 media-coverage 的 tagged.percent，归一化到 0-100）=====
+	// 已打标签媒体的占比百分比（0-100）。空库视为 0%（与 media-coverage 一致：total=0 时 percent=0）。
+	taggedSet := make(map[string]struct{})
+	if totalCount > 0 {
+		if tags, terr := s.store.ListAllTags(r.Context(), uid); terr == nil {
+			for _, tag := range tags {
+				if ids, serr := s.store.SearchMediaByTag(r.Context(), uid, tag); serr == nil {
+					for _, id := range ids {
+						taggedSet[id] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	taggedCount := 0
+	for id := range taggedSet {
+		if _, ok := liveIDs[id]; ok {
+			taggedCount++
+		}
+	}
+	coveragePercent := 0.0
+	if totalCount > 0 {
+		coveragePercent = float64(taggedCount) / float64(totalCount) * 100
+	}
+	coverageScore := coveragePercent // 已是 0-100
+	if coverageScore < 0 {
+		coverageScore = 0
+	}
+	if coverageScore > 100 {
+		coverageScore = 100
+	}
+
+	// ===== 维度 5：activity（同 user-activity-score，归一化到 0-100）=====
+	// 源端点 score 为 upload*3 + favorite*2 + share*4 + tag*1 + rename*1 + rotate*1 的原始加权分，
+	// 无上界。这里按 cap=100 归一化：score>=100 视为满分，否则线性映射。
+	stats, _ := s.store.AuditLogStats(r.Context(), uid)
+	actionCount := make(map[string]int, len(stats))
+	for _, st := range stats {
+		action, _ := st["action"].(string)
+		cnt, _ := st["count"].(int)
+		if action == "" {
+			continue
+		}
+		actionCount[action] += cnt
+	}
+	uploadCount := totalCount // upload 未埋点，以存量代表上传活跃度（同 user-activity-score）
+	favoriteCount := 0
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		favoriteCount = len(fav.ListFavorites(uid))
+	}
+	if favoriteCount == 0 {
+		favoriteCount = actionCount["favorite"]
+	}
+	shareCount := actionCount["share"] + actionCount["share_toggle"]
+	tagCount := actionCount["tag"]
+	renameCount := actionCount["rename"]
+	rotateCount := actionCount["rotate"]
+	rawActivityScore := uploadCount*3 + favoriteCount*2 + shareCount*4 + tagCount*1 + renameCount*1 + rotateCount*1
+	activityScore := float64(rawActivityScore)
+	if activityScore > 100 {
+		activityScore = 100
+	}
+	if activityScore < 0 {
+		activityScore = 0
+	}
+	activityLevel := "新手"
+	switch {
+	case rawActivityScore >= 101:
+		activityLevel = "专家"
+	case rawActivityScore >= 51:
+		activityLevel = "达人"
+	case rawActivityScore >= 11:
+		activityLevel = "活跃"
+	}
+
+	// ===== 综合评分 = 五维度均值 =====
+	overallScore := (healthScore + integrityScore + efficiencyScore + coverageScore + activityScore) / 5.0
+	if overallScore < 0 {
+		overallScore = 0
+	}
+	if overallScore > 100 {
+		overallScore = 100
+	}
+	overallGrade := gradeFromScore(overallScore)
+
+	// ===== 汇总建议清单（合并各维度针对性提示）=====
+	suggestions := make([]string, 0, 12)
+	// health（同 storage-health 口径）
+	if duplicateCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("检测到 %d 份重复文件（重复率 %.1f%%），建议用 /api/media/duplicate-cleanup 清理", duplicateCount, duplicateRate*100))
+	}
+	if quotaUsage >= 0.8 {
+		suggestions = append(suggestions, fmt.Sprintf("配额使用率 %.1f%% 接近上限，建议清理回收站或升级配额", quotaUsage*100))
+	} else if quotaUsage >= 0.5 {
+		suggestions = append(suggestions, fmt.Sprintf("配额使用率 %.1f%%，建议关注存储增长趋势", quotaUsage*100))
+	}
+	if coldCount > 0 && totalCount > 0 && float64(coldCount)/float64(totalCount) > 0.3 {
+		suggestions = append(suggestions, fmt.Sprintf("冷数据占比 %.1f%%（%d 个文件超过 180 天未访问），建议归档或清理", float64(coldCount)/float64(totalCount)*100, coldCount))
+	}
+	// efficiency（同 media-storage-efficiency 口径）
+	if avgBytesPerMedia > float64(baselineAvgBytes) {
+		suggestions = append(suggestions, fmt.Sprintf("平均每份媒体 %.2f MB 超出基准 2MB，建议检查大文件分布（/api/media/by-size-range）", avgBytesPerMedia/float64(mb)))
+	}
+	// integrity（补全：源端点无原生 suggestions）
+	if orphanCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("完整度检查发现 %d 个孤立文件（磁盘缺失），建议用 /api/media/cleanup-orphan 处理", orphanCount))
+	}
+	if errorCount > 0 {
+		suggestions = append(suggestions, fmt.Sprintf("完整度检查发现 %d 个异常文件（zero_size/size_mismatch），建议核查或重新上传", errorCount))
+	}
+	// coverage
+	if totalCount > 0 && coveragePercent < 50 {
+		suggestions = append(suggestions, fmt.Sprintf("已打标签媒体仅 %.1f%%，建议用 /api/media/tag-recommendations 或 /api/media/auto-tag 提升标注覆盖", coveragePercent))
+	}
+	// activity
+	if rawActivityScore < 11 {
+		suggestions = append(suggestions, "用户活跃度较低，建议多使用收藏/分享/打标签功能提升媒体库互动性")
+	}
+	if len(suggestions) == 0 {
+		suggestions = append(suggestions, "媒体库各项健康指标良好，建议保持当前使用习惯")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"overall_score": int(overallScore),
+		"grade":         overallGrade,
+		"subscores": map[string]any{
+			"health":     int(healthScore),
+			"integrity":  int(integrityScore),
+			"efficiency": int(efficiencyScore),
+			"coverage":   int(coverageScore),
+			"activity":   int(activityScore),
+		},
+		"subgrades": map[string]string{
+			"health":     gradeFromScore(healthScore),
+			"integrity":  gradeFromScore(integrityScore),
+			"efficiency": gradeFromScore(efficiencyScore),
+			"coverage":   gradeFromScore(coverageScore),
+			"activity":   gradeFromScore(activityScore),
+		},
+		"suggestions":       suggestions,
+		"total_suggestions": len(suggestions),
+		"breakdown": map[string]any{
+			"total_media":         totalCount,
+			"used_bytes":          usedBytes,
+			"quota_bytes":         defaultQuotaBytes,
+			"duplicate_count":     duplicateCount,
+			"orphan_count":        orphanCount,
+			"error_count":         errorCount,
+			"cold_count":          coldCount,
+			"tagged_count":        taggedCount,
+			"tagged_percent":      round2(coveragePercent),
+			"avg_bytes_per_media": int64(avgBytesPerMedia),
+			"media_per_mb":        round2(mediaPerMB),
+			"raw_activity_score":  rawActivityScore,
+			"activity_level":      activityLevel,
+			"disk_check":          diskCheck,
+		},
+		"user_id": uid,
+	})
 }
