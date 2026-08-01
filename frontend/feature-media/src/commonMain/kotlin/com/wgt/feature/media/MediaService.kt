@@ -9012,6 +9012,82 @@ object MediaService {
     }
 
     /**
+     * 收藏分析 —— 媒体库收藏率与类型分布画像。
+     *
+     * 后端 `GET /api/media/media-favorite-analysis` 统计当前用户全部未软删媒体的收藏率
+     *（[favoriteRate] = 收藏数 / 总数）、收藏项按媒体类型（图片/视频）分布（[byType]）
+     * 以及收藏媒体平均上传到收藏的间隔天数（[avgAgeDays]）。前端用于"我的"Tab "收藏分析"
+     * 卡片展示收藏率进度 + 类型分布 + 平均间隔。
+     *
+     * 后端字段约定（snake_case JSON → camelCase Kotlin，已对照 handler 核实）：
+     *   `total_favorites: Int` · `total_media: Int` · `favorite_rate: Double`(**0~100 百分比**, round2)
+     * · `by_type: {"IMAGE":Int,"VIDEO":Int,"LIVE":Int,"OTHER":Int}` (**键名大写**)
+     * · `avg_age_days: Double`（ageCount==0 时为 **JSON null** → 前端回退 0.0）
+     *（`by_hour` 后端亦返回 24 槽，前端本卡片不展示，忽略即可）。
+     *
+     * @param totalFavorites 收藏媒体总数
+     * @param totalMedia     媒体总数（未软删）
+     * @param favoriteRate   收藏率百分比 0~100（后端 round2）
+     * @param byType         收藏项按类型分布（键名大写 "IMAGE"/"VIDEO"/"LIVE"/"OTHER" → 数量）
+     * @param avgAgeDays     收藏媒体平均上传到收藏间隔天数；无有效样本时为 0.0
+     */
+    data class FavoriteAnalysis(
+        val totalFavorites: Int,
+        val totalMedia: Int,
+        val favoriteRate: Double,
+        val byType: Map<String, Int>,
+        val avgAgeDays: Double
+    )
+
+    /**
+     * GET /api/media/media-favorite-analysis — 收藏分析。
+     *
+     * 后端返回
+     * `{total_favorites, total_media, favorite_rate, by_type, by_hour, avg_age_days}`，
+     * 其中 `by_type` 为媒体类型→数量的 JSON 对象（如 `{"image":N,"video":N}`），
+     * `favorite_rate` 为 0~1 浮点，`avg_age_days` 为平均间隔天数。`by_hour` 字段本卡片不使用。
+     *
+     * 解析沿用运行时 JSON 操作（与 [getMediaAlbumCoverage] 同款）。**不附加 per-call
+     * 鉴权头**——Bearer token 由 [jsonClient] 的 `defaultRequest` 统一注入。各字段宽容回退
+     *（`?: 0` / `?: 0.0`）；`by_type` 若缺失返回空 Map。后端端点即将上线，解析层已逐字段
+     * 宽容，待后端就绪即可联调。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态处理（不展示卡片）。
+     *
+     * @return 收藏分析对象；失败返回 null
+     */
+    suspend fun getMediaFavoriteAnalysis(): FavoriteAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-favorite-analysis")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // by_type 是嵌套对象，逐键宽容读取（缺失键→0，整对象缺失→空 Map）。
+                // 后端键名大写：IMAGE / VIDEO / LIVE / OTHER。
+                val byType = mutableMapOf<String, Int>()
+                o["by_type"]?.jsonObject?.forEach { (k, v) ->
+                    byType[k] = v.jsonPrimitive?.intOrNull ?: 0
+                }
+                // favorite_rate 后端为 0~100 百分比（round2）。
+                // avg_age_days 后端 ageCount==0 时为 JSON null，需 takeIf 非 JsonNull。
+                FavoriteAnalysis(
+                    totalFavorites = o["total_favorites"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    favoriteRate = o["favorite_rate"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    byType = byType,
+                    avgAgeDays = o["avg_age_days"]?.takeIf { it !is JsonNull }?.let { it.jsonPrimitive.doubleOrNull }
+                        ?: 0.0
+                )
+            } else {
+                logger.info("MediaService", "getMediaFavoriteAnalysis status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaFavoriteAnalysis FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V21：GET /api/media/full-report?year=YYYY — 综合报告（原始 JSON 字符串）。
      *
      * 后端把 quick_stats / yearly / storage / tags / pattern / duplicates 合并为一次请求；

@@ -1150,6 +1150,88 @@ private fun MyTabContent(
             }
         }
 
+        // 收藏分析卡片 —— 调 media-favorite-analysis 展示收藏率进度 + 类型分布 + 平均间隔。
+        // 置于相册覆盖率卡片之后、用户信息卡片之前。null 或 totalFavorites==0 时静默跳过
+        //（不占位），与总览/覆盖率卡片同等空态处理。
+        var favoriteAnalysis by remember { mutableStateOf<MediaService.FavoriteAnalysis?>(null) }
+        LaunchedEffect(Unit) { favoriteAnalysis = MediaService.getMediaFavoriteAnalysis() }
+        favoriteAnalysis?.let { fa ->
+            if (fa.totalFavorites > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "收藏分析",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // ⭐ N 个收藏 / N 总媒体 (X%)
+                        // favoriteRate 后端为 0~100 百分比；ratio = favoriteRate/100 用于进度条宽度。
+                        val favPct = fa.favoriteRate
+                        val ratio = (fa.favoriteRate / 100.0).coerceIn(0.0, 1.0).toFloat()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "⭐ ${fa.totalFavorites} 个收藏 / ${fa.totalMedia} 总媒体",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Text(
+                                formatPercent(favPct),
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 13.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 收藏率进度条（与相册覆盖率卡片同款 LinearProgressIndicator 样式）。
+                        LinearProgressIndicator(
+                            progress = { ratio },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surface
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 其中: 图片 N · 视频 N（byType 键名大写 IMAGE/VIDEO，缺失则 0）。
+                        val imgCount = fa.byType["IMAGE"] ?: 0
+                        val vidCount = fa.byType["VIDEO"] ?: 0
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                "其中: 图片 $imgCount · 视频 $vidCount",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // 平均上传到收藏间隔: X 天（avgAgeDays 截断一位小数，commonMain 无 String.format）。
+                        val ageStr = fa.avgAgeDays.toString().let { s ->
+                            s.take(s.indexOf('.').coerceAtLeast(0) + 2)
+                        }
+                        Text(
+                            "平均上传到收藏间隔: $ageStr 天",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V7：用户信息卡片（头像圆 + 用户名 + ID）
         val username = AuthState.currentUsername
         Card(
