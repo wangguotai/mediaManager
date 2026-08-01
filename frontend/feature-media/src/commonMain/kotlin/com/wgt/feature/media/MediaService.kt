@@ -4030,6 +4030,60 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-timeline-events — 时间线大事件（媒体库里程碑）。
+     *
+     * 后端对当前用户全部未软删媒体按 created_at（上传时间）升序扫描，挑出 5 类重要
+     * 节点，供前端"我的"Tab 顶部时间线卡片渲染：first_upload（首次上传）/busiest_day
+     * （上传最多的一天）/longest_gap（最长上传间隔天数）/milestone_100（第 100 个上传）/
+     * milestone_500（第 500 个，若总量不足则省略）。响应结构（与后端
+     * [handleMediaTimelineEvents] 对齐）：
+     *
+     * `{events: [{type, date, detail}], total_events}`
+     *
+     * - [events] 按时间顺序排列，0~5 项。
+     * - [type] 事件类型（"first_upload"/"busiest_day"/"longest_gap"/"milestone_100"/
+     *   "milestone_500"）。
+     * - [date] 事件日期（UTC `YYYY-MM-DD` 字符串，前端仅透传展示）。
+     * - [detail] 事件详情（首次上传为文件名，其余为 "N uploads"/"N days"/"Nth upload"）。
+     * - [total_events]，无上传历史返回空 events。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaSeasonAnalysis] / [getMediaWeekdayAnalysis] / [getMediaDecadeDistribution] 同语义。
+     */
+    suspend fun getMediaTimelineEvents(): List<TimelineEvent>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-timeline-events") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                Json.parseToJsonElement(response.body<String>()).jsonObject["events"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    val type = o["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    TimelineEvent(
+                        type = type,
+                        date = o["date"]?.jsonPrimitive?.contentOrNull ?: "",
+                        detail = o["detail"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTimelineEvents FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 时间线大事件单条（事件类型 + 日期 + 详情，与后端 media-timeline-events events[] 对齐）。
+     *
+     * [type] 取值见 [getMediaTimelineEvents]；[date] 为 UTC 日期串；[detail] 为可读文案。
+     */
+    data class TimelineEvent(
+        val type: String,
+        val date: String,
+        val detail: String
+    )
+
+    /**
      * GET /api/media/media-duration-analysis — 视频时长分布分析。
      *
      * 后端对当前用户 VIDEO 类型媒体逐条 ffprobe 取时长（秒），归入 5 个时长分段：

@@ -2037,6 +2037,68 @@ private fun MyTabContent(
             }
         }
 
+        // 时间线大事件卡片（调 media-timeline-events，显示媒体库里程碑节点）。
+        // 后端按 created_at 升序扫描挑出 first_upload/busiest_day/longest_gap/
+        // milestone_100/milestone_500 五类节点，每条 {type, date, detail}。
+        // 前端按 emoji + 类型 + 日期 + 详情逐行展示，请求失败或空列表静默跳过。
+        var timelineEvents by remember { mutableStateOf<List<MediaService.TimelineEvent>?>(null) }
+        LaunchedEffect(Unit) { timelineEvents = MediaService.getMediaTimelineEvents() }
+        timelineEvents?.let { events ->
+            if (events.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("时间线大事件", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        events.forEach { ev ->
+                            // 类型 → emoji 映射（与任务约定一致），未知类型回退 📌。
+                            val emoji = when (ev.type) {
+                                "first_upload" -> "📤"
+                                "busiest_day" -> "🔥"
+                                "longest_gap" -> "⏰"
+                                "milestone_100" -> "💯"
+                                "milestone_500" -> "🏆"
+                                else -> "📌"
+                            }
+                            // type → 中文标签映射，未知类型原样展示，不崩溃。
+                            val typeLabel = when (ev.type) {
+                                "first_upload" -> "首次上传"
+                                "busiest_day" -> "最忙一天"
+                                "longest_gap" -> "最长间隔"
+                                "milestone_100" -> "第 100 个"
+                                "milestone_500" -> "第 500 个"
+                                else -> ev.type
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(emoji, fontSize = 14.sp)
+                                Text(typeLabel, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.width(64.dp))
+                                Text(ev.date, fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                                Spacer(modifier = Modifier.weight(1f))
+                                Text(ev.detail, fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "共 ${events.size} 个里程碑",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
