@@ -2313,6 +2313,104 @@ private fun MyTabContent(
             }
         }
 
+        // 上传模式卡片（调 media-upload-pattern，四维度上传习惯画像 + 主导模式）。
+        // 后端对未软删媒体按 created_at（UTC）做四维度统计：
+        //   1. 工作日 vs 周末（按 media 计）2. 白天 vs 夜晚（按 media 计）
+        //   3. 批量日(>=5) vs 单张日(<5)（按天计）4. 平均上传间隔（小时）
+        // total=0 时 dominant_pattern 为"无数据"，前端按 totalMedia==0 静默跳过，
+        // 与色温分布/拍摄地点等卡片同语义。
+        var mediaUploadPattern by remember { mutableStateOf<MediaService.MediaUploadPattern?>(null) }
+        LaunchedEffect(Unit) { mediaUploadPattern = MediaService.getMediaUploadPattern() }
+        mediaUploadPattern?.let { up ->
+            if (up.totalMedia > 0) {
+                // 平均间隔一位小数（commonMain 无 String.format，沿用 toString 截断，与大小百分位卡片同款）。
+                fun fmtHours(v: Double): String {
+                    val str = v.toString()
+                    return str.take(str.indexOf('.') + 2)
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("上传模式", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 维度1：工作日 · 周末（按 media 计数）。
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "📅 工作日 ${up.weekday} · 周末 ${up.weekend}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        // 维度2：白天 · 夜晚（按 media 计数）。
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "☀️ 白天 ${up.daytime} · 🌙 夜晚 ${up.nighttime}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        // 维度3：批量日 · 单张日（按天计数）。
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "📦 批量天 ${up.batchDays} · 📷 单张天 ${up.singleDays}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        // 维度4：平均上传间隔（小时）。
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "⏱ 平均间隔 ${fmtHours(up.avgIntervalHours)} 小时",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 主导模式：前三维度各自取较大一侧拼接。高亮 primary。
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "🏆 主模式",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                            Text(
+                                up.dominantPattern,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "基于 ${up.totalMedia} 项 · ${up.totalDays} 天上传记录（按上传时间 UTC）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+        }
+
         // 色温分布卡片（调 media-color-temperature，按拍摄时段推断暖/冷/自然三档分布）。
         // 后端按 taken_at（缺失回退 created_at）的 UTC 小时分桶：18-22h→warm(暖)、
         // 6-10h→cool(冷)、其他→natural(自然)；返回 distribution/total/dominant

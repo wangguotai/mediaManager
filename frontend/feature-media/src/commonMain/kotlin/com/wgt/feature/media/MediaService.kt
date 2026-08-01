@@ -5016,6 +5016,69 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-upload-pattern — 上传模式深度分析（四维度上传习惯画像）。
+     *
+     * 后端对当前用户全部未软删媒体（基于 created_at 上传时间，UTC）做四维度画像，
+     * 供前端一键展示用户上传模式与主导模式（dominant_pattern），避免前端并发拉
+     * weekday/by-hour/upload-velocity 再自己组合判断。四维度：
+     *   1. 工作日 vs 周末：Sun/Sat 为周末，Mon-Fri 为工作日（按 media 计数）。
+     *   2. 白天 vs 夜晚：UTC 小时 [6,18) 为白天，其余为夜晚（按 media 计数）。
+     *   3. 批量日 vs 单张日：同一 UTC 日上传 >=5 张为批量日，<5 张为单张日（按天计数）。
+     *   4. 平均上传间隔：全部媒体按 created_at 升序，相邻两条间隔小时数取平均（媒体<2 时为 0）。
+     *
+     * 响应结构（与 [handleMediaUploadPattern] 对齐，扁平标量聚合，无嵌套对象/数组）：
+     *   `{weekday, weekend, daytime, nighttime, batch_days, single_days, total_days,
+     *      avg_interval_hours, total_media, dominant_pattern}`
+     * - [dominantPattern] 由前三维度各自取较大一侧拼接（如"工作日·白天·批量上传"）；
+     *   total=0 时后端返回字面量"无数据"，前端按 [totalMedia]==0 静默跳过卡片渲染，
+     *   与 [getMediaColorTemperature] / [getMediaGpsEstimate] 同语义（UI guard total>0）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getMediaGpsEstimate] 同款），无 per-call auth 头（由 defaultRequest 统一注入）。
+     * HTTP 非 200 / 网络异常返回 null，调用方按空态处理。
+     */
+    suspend fun getMediaUploadPattern(): MediaUploadPattern? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-upload-pattern")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                MediaUploadPattern(
+                    weekday = obj["weekday"]?.jsonPrimitive?.intOrNull ?: 0,
+                    weekend = obj["weekend"]?.jsonPrimitive?.intOrNull ?: 0,
+                    daytime = obj["daytime"]?.jsonPrimitive?.intOrNull ?: 0,
+                    nighttime = obj["nighttime"]?.jsonPrimitive?.intOrNull ?: 0,
+                    batchDays = obj["batch_days"]?.jsonPrimitive?.intOrNull ?: 0,
+                    singleDays = obj["single_days"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalDays = obj["total_days"]?.jsonPrimitive?.intOrNull ?: 0,
+                    avgIntervalHours = obj["avg_interval_hours"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    totalMedia = obj["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    dominantPattern = obj["dominant_pattern"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaUploadPattern FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 上传模式画像（工作日/周末 · 白天/夜晚 · 批量日/单张日 · 平均间隔 + 主导模式）。
+     * [totalMedia] 为参与统计的未软删媒体总数；0 时主导模式为"无数据"。
+     */
+    data class MediaUploadPattern(
+        val weekday: Int,
+        val weekend: Int,
+        val daytime: Int,
+        val nighttime: Int,
+        val batchDays: Int,
+        val singleDays: Int,
+        val totalDays: Int,
+        val avgIntervalHours: Double,
+        val totalMedia: Int,
+        val dominantPattern: String
+    )
+
+    /**
      * V21：GET /api/media/media-archive-status — 媒体归档状态（热/温/冷数据温度分布）。
      *
      * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：
