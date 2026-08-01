@@ -4983,6 +4983,11 @@ private fun MyTabContent(
                             // 未铺量）或矩阵维度不足则静默跳过，不影响既有区域。
                             var tagCorrelation by remember { mutableStateOf<MediaService.TagCorrelation?>(null) }
                             LaunchedEffect(Unit) { tagCorrelation = MediaService.getMediaTagCorrelation(limit = 10) }
+                            // V23：标签演化趋势（调 GET /api/media/media-tag-evolution），用于"标签演化"区。
+                            // 后端按 total 降序返回每标签月度计数 + trend(up/down/stable)；
+                            // null（请求失败）或空则静默跳过，不影响既有区域。
+                            var tagEvolution by remember { mutableStateOf<List<MediaService.TagEvolution>?>(null) }
+                            LaunchedEffect(Unit) { tagEvolution = MediaService.getMediaTagEvolution(months = 6) }
                             val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                             AlertDialog(
                                 onDismissRequest = { showTagManage = false },
@@ -5213,6 +5218,56 @@ private fun MyTabContent(
                                                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                                                                 )
                                                             }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // V23：标签演化区——调 getMediaTagEvolution(months=6)，展示使用趋势
+                                            // 方向最鲜明的 5 个标签：每行 trend emoji + #tag + "共 N 次"。
+                                            // trend 后端为 "up"|"down"|"stable" → 前端映射 ↑增长/↓减少/→稳定。
+                                            // null（请求失败/未铺量）或空则静默跳过，不影响既有区域。
+                                            tagEvolution?.let { evo ->
+                                                if (evo.isNotEmpty()) {
+                                                    Spacer(modifier = Modifier.height(12.dp))
+                                                    Text(
+                                                        "标签演化",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        "近 6 个月共 ${evo.size} 个标签有活动",
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    evo.take(5).forEach { t ->
+                                                        val (emoji, label) = when (t.trend) {
+                                                            "up" -> "↑" to "增长"
+                                                            "down" -> "↓" to "减少"
+                                                            else -> "→" to "稳定"
+                                                        }
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 2.dp),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                "$emoji #${'$'}{t.tag}（共 ${'$'}{t.total} 次）",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.weight(1f),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                label,
+                                                                fontSize = 12.sp,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                                            )
                                                         }
                                                     }
                                                 }

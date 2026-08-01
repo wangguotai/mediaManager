@@ -5702,6 +5702,66 @@ object MediaService {
     )
 
     /**
+     * V23：GET /api/media/media-tag-evolution?months=6 — 标签演化趋势（每标签月度使用次数变化）。
+     *
+     * 后端返回 `{ tags: [ {tag, monthly_counts: [{month,count},...], trend, total} ],
+     * total_tags }`：month 形如 "2026-03"，count 为该月该标签的关联操作次数
+     * （audit_log action="tag" 口径，与 tag-trend 的 new_tags_count 同源）。月份窗口
+     * `[本月往前推 months-1 个月 .. 本月]`，升序，空月补 0。trend 为 "up"|"down"|"stable"
+     * （窗口末日 vs 首日 count 比较）。total 为窗口内该标签全部月度计数之和。后端按 total
+     * 降序、并列 tag 升序返回。
+     *
+     * 返回 `null` = 网络/HTTP 失败（UI 隐藏整区）；非 null（可能为空列表）= 成功。
+     * 调用方默认取 6 个月，最多展示 5 个标签。
+     *
+     * @param months 月份窗口大小（默认 6，后端收敛到 [1,24]）
+     */
+    suspend fun getMediaTagEvolution(months: Int = 6): List<TagEvolution>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${'$'}{backendBaseUrl()}/api/media/media-tag-evolution") {
+                parameter("months", months)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["tags"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    TagEvolution(
+                        tag = o["tag"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        monthlyCounts = o["monthly_counts"]?.jsonArray?.map { mc ->
+                            val m = mc.jsonObject
+                            TagEvolutionMonthCount(
+                                month = m["month"]?.jsonPrimitive?.contentOrNull ?: "",
+                                count = m["count"]?.jsonPrimitive?.intOrNull ?: 0
+                            )
+                        } ?: emptyList(),
+                        trend = o["trend"]?.jsonPrimitive?.contentOrNull ?: "stable",
+                        total = o["total"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaTagEvolution FAILED: ${'$'}{e.message}")
+            null
+        }
+    }
+
+    /** V23：单个标签在 N 个月窗口内的演化数据（[getMediaTagEvolution] 返回）。 */
+    data class TagEvolution(
+        val tag: String = "",
+        val monthlyCounts: List<TagEvolutionMonthCount> = emptyList(),
+        val trend: String = "stable",
+        val total: Int = 0
+    )
+
+    /** V23：标签演化单月计数点（[getMediaTagEvolution] 返回）;month 形如 "2026-03"。
+     *  不复用既有 [MonthCount]（其 month 为 Int，对应 yearly-review 的 1~12 整数月），
+     *  此处 month 为 "YYYY-MM" 字符串——类型不符，故新建专用项类型（同 [DistributionMonthCount] 约定）。 */
+    data class TagEvolutionMonthCount(
+        val month: String = "",
+        val count: Int = 0
+    )
+
+    /**
      * V9：GET /api/media/tag-network — 标签网络图数据（节点+边）。
      *
      * 与 [getTagCoOccurrence] 同源数据但输出图结构：标签作为节点（[TagNode.count]
