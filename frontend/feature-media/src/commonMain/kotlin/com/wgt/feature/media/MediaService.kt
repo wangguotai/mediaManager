@@ -5546,6 +5546,71 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-share-deep-analysis — 分享深度分析。
+     *
+     * 与 [getShareAnalytics]（聚合 6 计数）/ [getMediaShareActivity]（30 天时序趋势）
+     * 互补：本端点单次返回分享全貌的"完整统计"——聚合摘要 + 按媒体类型分布 +
+     * 平均有效期天数，供"我的"Tab"分享深度分析"卡片渲染一卡综览。
+     *
+     * 后端返回 `{summary:{total, active, expired, password_protected},
+     * by_type:{"IMAGE":N,"VIDEO":N,...}, by_month:{...}, avg_lifetime_days:float}`：
+     *   - summary         : 聚合计数对象（4 字段）；
+     *   - by_type         : 按媒体类型分桶的分享数量映射（key 为 "IMAGE"/"VIDEO"/...）；
+     *   - by_month        : 按月份分桶（前端不展示，端点附带返回，故丢弃）；
+     *   - avg_lifetime_days: 分享链接平均有效期天数（永不过期链接按其设定值或
+     *                        一个标称上限参与均值；0 表示无有效样本）。
+     *
+     * 任务 spec 注：后端端点即将上线（commit 跟进），前端解析层已逐字段宽容回退
+     * （每个 JSON key 带 `?: 0`/`?: 0.0`/`?: emptyMap()` 兜底），待后端就绪即可联调。
+     *
+     * 解析沿用 [getFileTypes] 的运行时 JSON 操作（feature-media 无 serialization
+     * 编译器插件）。失败时返回 null（HTTP 非 200 或网络异常），调用方 null-skip
+     * 静默跳过卡片，不崩溃"我的"Tab。
+     */
+    suspend fun getMediaShareDeepAnalysis(): ShareDeepAnalysis? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-share-deep-analysis")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val s = o["summary"]?.jsonObject
+                val summary = ShareSummary(
+                    total = s?.get("total")?.jsonPrimitive?.intOrNull ?: 0,
+                    active = s?.get("active")?.jsonPrimitive?.intOrNull ?: 0,
+                    expired = s?.get("expired")?.jsonPrimitive?.intOrNull ?: 0,
+                    passwordProtected = s?.get("password_protected")?.jsonPrimitive?.intOrNull ?: 0
+                )
+                val byType = mutableMapOf<String, Int>()
+                o["by_type"]?.jsonObject?.forEach { (k, v) ->
+                    byType[k] = v.jsonPrimitive.intOrNull ?: 0
+                }
+                ShareDeepAnalysis(
+                    summary = summary,
+                    byType = byType,
+                    avgLifetimeDays = o["avg_lifetime_days"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaShareDeepAnalysis FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 分享深度分析聚合摘要（[getMediaShareDeepAnalysis] 返回的 summary 字段）。 */
+    data class ShareSummary(
+        val total: Int,
+        val active: Int,
+        val expired: Int,
+        val passwordProtected: Int
+    )
+
+    /** 分享深度分析（[getMediaShareDeepAnalysis] 返回）。byType key 为媒体类型字符串。 */
+    data class ShareDeepAnalysis(
+        val summary: ShareSummary,
+        val byType: Map<String, Int>,
+        val avgLifetimeDays: Double
+    )
+
+    /**
      * GET /api/media/media-integrity-report — 媒体完整性综合报告。
      *
      * 后端单次遍历合并 orphan-check + error-check + duplicate-report，并据此计算

@@ -5357,6 +5357,65 @@ private fun MyTabContent(
             }
         }
 
+        // 分享深度分析卡片（调 /api/media/media-share-deep-analysis 显示完整统计）。
+        // 与上方分享活动趋势卡片同属分享主题分组，故紧随其后。一次请求返回
+        // {summary, by_type, by_month, avg_lifetime_days}，本卡片只渲染 summary 四计数
+        // + by_type（图片/视频分享数）+ avg_lifetime_days（平均有效期天数），by_month
+        // 端点附带返回但本卡片不展示。null-skip on fetch failure（getMediaShareDeepAnalysis
+        // 返回 null 时不渲染卡片，不崩溃"我的"Tab）；summary.total==0 也跳过（零分享
+        // 用户不需要一张全 0 的"深度分析"卡片）。
+        var shareDeepAnalysis by remember { mutableStateOf<MediaService.ShareDeepAnalysis?>(null) }
+        LaunchedEffect(Unit) { shareDeepAnalysis = MediaService.getMediaShareDeepAnalysis() }
+        shareDeepAnalysis?.let { da ->
+            if (da.summary.total > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "分享深度分析",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 汇总行：总分享 N · 活跃 N · 过期 N · 密码保护 N
+                        Text(
+                            "📤 总分享 ${da.summary.total} · ✅ 活跃 ${da.summary.active} · " +
+                                "⏰ 过期 ${da.summary.expired} · 🔒 密码保护 ${da.summary.passwordProtected}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 平均有效期天数（后端 round2；commonMain 无 String.format，用 truncate 取 1 位小数）
+                        val avgLifetimeStr = da.avgLifetimeDays.toString().let {
+                            it.take(it.indexOf('.').coerceAtLeast(0) + 2)
+                        }
+                        Text(
+                            "📅 平均有效期 $avgLifetimeStr 天",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        // 按媒体类型分布：图片分享 N · 视频分享 N（by_type 的 key 为
+                        // "IMAGE"/"VIDEO"/...；映射为中文标签，未知类型原样展示 key）。
+                        val imageCount = da.byType["IMAGE"] ?: 0
+                        val videoCount = da.byType["VIDEO"] ?: 0
+                        if (imageCount > 0 || videoCount > 0) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "🖼 图片分享 $imageCount · 🎬 视频分享 $videoCount",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V8：最近上传卡片
         var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
         LaunchedEffect(Unit) { recentUploads = MediaService.getRecentUploads() }
