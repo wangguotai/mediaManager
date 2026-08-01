@@ -236,6 +236,10 @@ func (s *Server) registerRoutes() {
 	// 媒体色温推断分析：基于拍摄时段（taken_at，缺失则回退 created_at）的小时数推断色温——
 	// 晚上(18-22h)→暖色调，早上(6-10h)→冷色调，其他→自然光。统计 warm/cool/natural 分布与主导色温。
 	s.mux.HandleFunc("/api/media/media-color-temperature", s.handleMediaColorTemperature)
+	// 媒体拍摄地点估算：基于文件名模式（Screenshot/IMG_/WXCam_ 等）+ 拍摄时间
+	// （taken_at，缺失则回退 created_at）推断地点类型，统计 indoor/outdoor/office/unknown
+	// 分布与主导类型。Media model 无 GPS 字段，故为启发式估算，非精确坐标。需认证+store。
+	s.mux.HandleFunc("/api/media/media-gps-estimate", s.handleMediaGpsEstimate)
 	// V9：一站式统计汇总（聚合多个统计端点的最常用数据，供前端"我的"Tab 一次加载）
 	s.mux.HandleFunc("/api/media/stat-summary", s.handleMediaStatSummary)
 	// V12：极简统计端点（首页快速加载，只返 6 个数字，区别于 stat-summary 的全量汇总）。
@@ -6640,6 +6644,128 @@ func (s *Server) handleMediaColorTemperature(w http.ResponseWriter, r *http.Requ
 			"warm":    warm,
 			"cool":    cool,
 			"natural": natural,
+		},
+		"total":    total,
+		"dominant": dominant,
+	})
+}
+
+// handleMediaGpsEstimate GET /api/media/media-gps-estimate — 拍摄地点估算。
+//
+// Media model 无 GPS 字段，本端点基于文件名模式 + 拍摄时间做启发式地点类型推断。
+// 对当前用户全部未软删媒体，按以下规则（首条命中即归类）推断地点类型：
+//
+//   - Screenshot（文件名含 "screenshot"）        → indoor     截屏必为室内
+//   - WXCam_（微信相机，文件名含 "wxcam"/"wx")    → indoor     微信场景多为室内社交
+//   - IMG_ 工作日核心时段 9-18h                 → office     工作时间拍摄推断办公室
+//   - IMG_ 周末（Sat/Sun）                       → outdoor    周末外拍推断户外
+//   - IMG_ 工作日非核心时段（早/晚）             → indoor     通勤/家中
+//   - 其他（无法识别的文件名模式）                → unknown
+//
+// 时间口径：优先用拍摄时间 taken_at（毫秒时间戳），缺失(=0)则回退到上传时间 created_at，
+// 统一用 UTC（与 created_at 一致，且与其他时间分布端点口径相同）。
+//
+// 响应结构：
+//
+//	{
+//	  "locations": {            // 四类地点的计数
+//	    "indoor":   N,
+//	    "outdoor":  N,
+//	    "office":   N,
+//	    "unknown":  N
+//	  },
+//	  "total":    N,            // 参与推断的未软删媒体总数
+//	  "dominant": "indoor"      // count 最大的类别；total=0 时为 null
+//	}
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。注意：此为启发式估算，非精确 GPS 坐标。
+func (s *Server) handleMediaGpsEstimate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 地点桶：indoor / outdoor / office / unknown。
+	indoor, outdoor, office, unknown := int64(0), int64(0), int64(0), int64(0)
+	var total int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		// 优先用拍摄时间 taken_at（毫秒时间戳）；缺失(=0)则回退到上传时间 created_at。
+		var t time.Time
+		if m.TakenAt != 0 {
+			t = time.UnixMilli(m.TakenAt).UTC()
+		} else {
+			t = m.CreatedAt.UTC()
+		}
+		name := strings.ToLower(strings.TrimSpace(m.Filename))
+		switch {
+		case strings.Contains(name, "screenshot"):
+			// 截屏 → 室内（手机/电脑截屏必在室内）。
+			indoor++
+		case strings.Contains(name, "wxcam") || strings.HasPrefix(name, "wx"):
+			// 微信相机拍摄 → 微信场景，多为室内社交/随手拍，归 indoor。
+			indoor++
+		case strings.HasPrefix(name, "img"):
+			// IMG_ 系列：按时间推断。周末 → outdoor，工作日 9-18h → office，其余 → indoor。
+			wd := t.Weekday()
+			isWeekend := wd == time.Saturday || wd == time.Sunday
+			hour := t.Hour()
+			switch {
+			case isWeekend:
+				outdoor++
+			case hour >= 9 && hour < 18:
+				office++
+			default: // 工作日早/晚非核心时段 → 通勤/家中 → indoor
+				indoor++
+			}
+		default:
+			// 无法识别的文件名模式 → unknown。
+			unknown++
+		}
+		total++
+	}
+
+	dominant := any(nil)
+	best := indoor
+	bestName := "indoor"
+	if outdoor > best {
+		best = outdoor
+		bestName = "outdoor"
+	}
+	if office > best {
+		best = office
+		bestName = "office"
+	}
+	if unknown > best {
+		best = unknown
+		bestName = "unknown"
+	}
+	if total > 0 {
+		dominant = bestName
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"locations": map[string]int64{
+			"indoor":  indoor,
+			"outdoor": outdoor,
+			"office":  office,
+			"unknown": unknown,
 		},
 		"total":    total,
 		"dominant": dominant,
