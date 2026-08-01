@@ -1887,6 +1887,11 @@ fun SettingsScreen(
             // 独立 @Composable，自取数据；紧跟归档建议后，作为"减少存量"系列的操作入口。
             CleanupPlanCard()
 
+            // AI 洞察报告卡片 —— 调 /api/media/media-ai-insights 显示个性化建议清单
+            // （重复/归档/标签/存储/活跃度多维度综合），按优先级排序，high=红/medium=橙/low=蓝
+            // 着色。独立 @Composable，自取数据；紧跟清理计划后，作为"智能建议"系列收尾。
+            AIInsightsCard()
+
             Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
@@ -5235,5 +5240,140 @@ private fun CleanupPlanCard() {
             modifier = Modifier.padding(top = 2.dp)
         )
     }
+}
+
+
+/**
+ * AI 洞察报告卡片 —— 调 [MediaService.getMediaAIInsights] 展示个性化建议清单。
+ *
+ * 后端 GET /api/media/media-ai-insights 综合重复/孤儿/归档/标签覆盖/活跃度等多维度，
+ * 返回优先级排序的建议列表（`{insights:[{category,text,priority,actionable,action_url}],
+ * total, generated_at}`），此处仅渲染 `insights` 数组。
+ *
+ * 每条洞察：前置 emoji（按 [MediaService.AIInsight.category] 映射）+ 分类 + 文案，
+ * 优先级以颜色区分（high=红 / medium=橙 / low=蓝）。最多展示 8 条（[take] 截断，
+ * 后端通常返回 ≤8 条，cap 以防极端库产出长列表）。四态自洽（loading / null-错误 /
+ * 空列表 / data），与 [RenameHistoryCard] / [ShareHistoryCard] 同款结构。独立顶级
+ * @Composable，自取数据（[LaunchedEffect] 拉取一次），避免主函数体过大（method size limit）。
+ *
+ * [actionable] 为 true 且 [actionUrl] 非空时，行尾附"可操作"标记（绿色对勾），提示
+ * 用户该建议可一键跟进；具体跳转动作由后端 action_url 承载，前端暂仅展示标记不发起跳转。
+ */
+@Composable
+private fun AIInsightsCard() {
+    var insights by remember { mutableStateOf<List<MediaService.AIInsight>?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        insights = MediaService.getMediaAIInsights()
+        loading = false
+    }
+    SectionTitle("🤖 AI 洞察报告", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (insights == null) {
+        Text(
+            "无法获取 AI 洞察",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val items = insights!!
+        if (items.isEmpty()) {
+            Text(
+                "暂无 AI 洞察建议",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+            )
+        } else {
+            items.take(8).forEach { insight ->
+                // 优先级颜色：high=红 / medium=橙 / low=蓝
+                val priorityColor = when (insight.priority.lowercase()) {
+                    "high" -> Color(0xFFF44336)
+                    "medium" -> Color(0xFFFF9800)
+                    "low" -> Color(0xFF2196F3)
+                    else -> MaterialTheme.colorScheme.outline
+                }
+                // 分类 emoji 映射：未知分类回退 💡
+                val categoryEmoji = when (insight.category.lowercase()) {
+                    "duplicate", "duplicates" -> "🔁"
+                    "archive" -> "📦"
+                    "orphan", "orphans" -> "🔗"
+                    "tag", "tags", "label", "labels" -> "🏷️"
+                    "storage", "disk", "space" -> "💾"
+                    "activity" -> "📊"
+                    "error", "errors" -> "⚠️"
+                    "coverage" -> "📐"
+                    else -> "💡"
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(categoryEmoji, style = MaterialTheme.typography.bodyMedium)
+                    Column(modifier = Modifier.weight(1f)) {
+                        // 第一行：分类标签（着色）+ 文案
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                insight.category,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(priorityColor)
+                                    .padding(horizontal = 6.dp, vertical = 1.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                insight.text,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        // 第二行：优先级文字 + 可操作标记
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "优先级：${insight.priority}",
+                                fontSize = 11.sp,
+                                color = priorityColor,
+                                fontWeight = FontWeight.Medium
+                            )
+                            if (insight.actionable) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "✓ 可操作",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF4CAF50),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            // 还有更多洞察时提示总数
+            if (items.size > 8) {
+                Text(
+                    "共 ${items.size} 条洞察",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
+                )
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Spacer(modifier = Modifier.height(8.dp))
 }
 

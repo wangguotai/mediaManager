@@ -10865,4 +10865,64 @@ object MediaService {
 
     /** 维度 8：上传排行条目。 */
     data class SummaryRank(val rank: Int, val name: String, val count: Int, val bytes: Long)
+
+    /**
+     * AI 洞察条目（与后端 [handleMediaAIInsights] 的 insightItem JSON 对齐）。
+     *
+     * 后端基于用户库的综合分析（重复/孤儿/归档/标签覆盖/活跃度等维度）产出个性化建议，
+     * 每条带分类、文案、优先级与"是否可操作"标记。[actionUrl] 为可选的一键跳转链接
+     * （后端 `action_url`，可空），前端展示时按 [priority] 着色，[category] 决定前置 emoji。
+     *
+     * @param category 建议分类（如 "duplicate"/"archive"/"tag"/"storage"/"activity"）
+     * @param text 建议文案（已本地化的可读字符串）
+     * @param priority 优先级（"high"/"medium"/"low"）
+     * @param actionable 是否可一键操作（true 时前端可展示 action 入口）
+     * @param actionUrl 可选的一键操作链接（后端 action_url，空串表示无）
+     */
+    data class AIInsight(
+        val category: String,
+        val text: String,
+        val priority: String,
+        val actionable: Boolean,
+        val actionUrl: String
+    )
+
+    /**
+     * GET /api/media/media-ai-insights — 获取个性化 AI 洞察建议清单。
+     *
+     * 后端综合重复/孤儿/归档/标签覆盖/活跃度等多维度分析，返回优先级排序的建议列表。
+     * 响应体：`{ "insights": [{category,text,priority,actionable,action_url}], "total": N,
+     * "generated_at": "<RFC3339>" }`，前端仅消费 `insights` 数组（`total`/`generated_at`
+     * 由卡片按需取用，此处 getter 不返回以保持结构精简）。
+     *
+     * 解析沿用运行时 JSON 操作（feature-media 无 serialization 编译器插件，与
+     * [getMediaRenameHistory] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理
+     * （不展示洞察区）。鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @return AI 洞察建议列表（按后端优先级排序）；失败返回 null
+     */
+    suspend fun getMediaAIInsights(): List<AIInsight>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-ai-insights")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["insights"]?.jsonArray?.mapNotNull { item ->
+                    val o = item.jsonObject
+                    AIInsight(
+                        category = o["category"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        text = o["text"]?.jsonPrimitive?.contentOrNull ?: "",
+                        priority = o["priority"]?.jsonPrimitive?.contentOrNull ?: "medium",
+                        actionable = o["actionable"]?.jsonPrimitive?.booleanOrNull ?: false,
+                        actionUrl = o["action_url"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getMediaAIInsights status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaAIInsights FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 }
