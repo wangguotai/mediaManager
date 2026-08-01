@@ -1271,6 +1271,11 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // 存储效率卡片 —— 调 /api/media/media-storage-efficiency 显示评分+等级+密度+建议。
+            // 与上方"存储健康度"互补：健康度关注重复/配额/冷数据，本卡片聚焦"每 MB 媒体密度"与
+            // 平均大小是否拖累空间利用率。独立 @Composable，自取数据（见文件末尾 [StorageEfficiencyCard]）。
+            StorageEfficiencyCard()
+
             // V25：媒体错误检查卡片 —— 调 /api/media/media-error-check 显示损坏文件列表。
             // 放在"存储健康度"之后、"数据概览"之前。展示检查项数 + 错误数 + 错误列表（仅
             // totalErrors>0 时显示列表），并提供"重新检查"按钮触发重新拉取。
@@ -2802,6 +2807,146 @@ private fun HealthRatioBar(
                     .background(barColor)
             )
         }
+    }
+}
+
+/**
+ * 存储效率卡片 —— 调 `/api/media/media-storage-efficiency` 显示评分+等级+密度+建议。
+ *
+ * 与"存储健康度"卡片互补：健康度关注重复/配额/冷数据四维加权，本卡片聚焦"空间利用率"——
+ * 以每 MB 媒体密度（[StorageEfficiency.mediaPerMb]）与平均大小（[StorageEfficiency.avgBytesPerMedia]）
+ * 评估是否被大文件拖累。独立 @Composable，自取数据（LaunchedEffect(Unit)），加载/失败态自洽。
+ *
+ * 渲染（与"存储健康度"同款风格，便于两卡片视觉对齐）：
+ * - SectionTitle「存储效率」
+ * - 大字号评分 + 等级徽章（A绿/B蓝/C橙/D红）
+ * - 四项指标行：平均大小、媒体密度、重复率、总媒体数
+ * - 建议列表（每条 📌 + 文本）
+ *
+ * 字段缺失（HTTP 非 200 或网络异常 → null）时显示"无法获取存储效率"错误提示，不崩溃设置页。
+ */
+@Composable
+private fun StorageEfficiencyCard() {
+    var efficiency by remember { mutableStateOf<MediaService.StorageEfficiency?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        efficiency = MediaService.getMediaStorageEfficiency()
+        loading = false
+    }
+    SectionTitle("存储效率", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (efficiency == null) {
+        Text(
+            "无法获取存储效率",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val eff = efficiency!!
+        // 等级颜色：A 绿 / B 蓝 / C 橙 / D 红（默认灰），与"存储健康度"卡片口径一致。
+        val gradeColor = when (eff.grade.firstOrNull()?.uppercaseChar()) {
+            'A' -> Color(0xFF4CAF50)
+            'B' -> Color(0xFF2196F3)
+            'C' -> Color(0xFFFF9800)
+            'D' -> Color(0xFFF44336)
+            else -> MaterialTheme.colorScheme.outline
+        }
+        // 大字号评分 + 等级徽章
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${eff.efficiencyScore}",
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Bold,
+                color = gradeColor
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(gradeColor)
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    eff.grade.ifEmpty { "-" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                "分 / 100",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        // 四项指标行：平均大小 / 媒体密度 / 重复率 / 总媒体数。
+        // 平均大小用 formatBytesToMB 转 MB（与"数据概览"同款）；密度保留 2 位小数（项/MB）；
+        // 重复率转百分比；总媒体数直出。
+        EfficiencyMetricRow(
+            label = "平均大小",
+            value = "${formatBytesToMB(eff.avgBytesPerMedia.toDouble())} MB/项"
+        )
+        EfficiencyMetricRow(
+            label = "媒体密度",
+            value = "%.2f 项/MB".format(eff.mediaPerMb)
+        )
+        EfficiencyMetricRow(
+            label = "重复率",
+            value = "%.1f%%".format(eff.duplicateRate * 100)
+        )
+        EfficiencyMetricRow(
+            label = "总媒体",
+            value = "${eff.totalMedia} 项"
+        )
+        // 建议列表：每条一行 📌 + 文字
+        if (eff.suggestions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            eff.suggestions.forEach { tip ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text("📌", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        tip,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 存储效率卡片的单行指标：左侧标签 + 右侧值，两端对齐。私有，仅供 [StorageEfficiencyCard] 复用。
+ */
+@Composable
+private fun EfficiencyMetricRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 

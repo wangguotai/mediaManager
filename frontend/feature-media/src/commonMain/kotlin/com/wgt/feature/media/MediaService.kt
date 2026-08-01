@@ -7622,6 +7622,81 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-storage-efficiency — 存储效率分析。
+     *
+     * 后端用"每 MB 媒体数（密度）"作为效率核心指标，结合重复率与平均大小惩罚
+     * （avg_bytes_per_media 相对 2MB 基准的偏离），算出 0-100 的 [StorageEfficiency.efficiencyScore]
+     * 与字母等级 [StorageEfficiency.grade]（A/B/C/D），并给出针对性优化 [StorageEfficiency.suggestions]。
+     *
+     * 与 [getStorageHealth]（健康度，关注重复/配额/冷数据四维）互补：本端点聚焦"空间利用率"，
+     * 以 [mediaPerMb]（每 MB 容纳媒体数）与 [avgBytesPerMedia] 评估是否被大文件拖累。
+     *
+     * 后端响应结构：
+     * ```
+     * { "total_media": N, "total_bytes": N, "avg_bytes_per_media": N,
+     *   "media_per_mb": 0.5,          // 0.0-...，密度（越高越高效）
+     *   "duplicate_rate": 0.12,       // 0.0-1.0
+     *   "efficiency_score": 82,       // 0-100
+     *   "grade": "B",                 // A/B/C/D
+     *   "suggestions": ["...", "..."] }
+     * ```
+     *
+     * 解析宽容：缺字段回退零值/空列表，保证 UI 永不崩。HTTP 非 200 或网络异常返回 null，
+     * 调用方按空态提示"无法获取存储效率"。鉴权头由 defaultRequest 统一注入（与 [getStorageHealth]
+     * 同款，此处不重复附加）。
+     *
+     * @return 存储效率对象；失败返回 null
+     */
+    suspend fun getMediaStorageEfficiency(): StorageEfficiency? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-storage-efficiency")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                StorageEfficiency(
+                    totalMedia = o["total_media"]?.jsonPrimitive?.intOrNull ?: 0,
+                    totalBytes = o["total_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    avgBytesPerMedia = o["avg_bytes_per_media"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    duplicateRate = o["duplicate_rate"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                    efficiencyScore = o["efficiency_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = o["grade"]?.jsonPrimitive?.contentOrNull ?: "",
+                    suggestions = o["suggestions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        ?: emptyList(),
+                    mediaPerMb = o["media_per_mb"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                )
+            } else {
+                logger.info("MediaService", "getMediaStorageEfficiency status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaStorageEfficiency FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * media-storage-efficiency 响应体。
+     *
+     * @param totalMedia 未软删媒体总数
+     * @param totalBytes 未软删媒体总字节数
+     * @param avgBytesPerMedia 平均每份媒体字节数（= total_bytes / total_media）
+     * @param duplicateRate 重复率 0.0-1.0（重复份数 / total_media）
+     * @param efficiencyScore 0-100 效率评分（越高越高效）
+     * @param grade 字母等级 A/B/C/D（后端给定，前端按首字母着色：A绿/B蓝/C橙/D红）
+     * @param suggestions 优化建议文本列表
+     * @param mediaPerMb 每 MB 容纳的媒体数（密度，越高越高效；total_bytes=0 时为 0）
+     */
+    data class StorageEfficiency(
+        val totalMedia: Int,
+        val totalBytes: Long,
+        val avgBytesPerMedia: Long,
+        val duplicateRate: Double,
+        val efficiencyScore: Int,
+        val grade: String,
+        val suggestions: List<String>,
+        val mediaPerMb: Double
+    )
+
+    /**
      * V25：GET /api/media/media-error-check — 媒体错误检查（损坏文件检测）。
      *
      * 后端逐条扫描未软删媒体，按优先级判定三种错误（单条 media 至多记录一种）：
