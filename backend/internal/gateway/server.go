@@ -205,6 +205,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V14：存储增长预测（基于最近 6 个月趋势预测未来 3/6/12 个月用量 + 10GB 配额用完日期）。
 	s.mux.HandleFunc("/api/media/storage-growth-prediction", s.handleStorageGrowthPrediction)
+	// V8：拍摄设备统计（从 EXIF 提取相机/手机型号分布）
+	s.mux.HandleFunc("/api/media/media-camera-stats", s.handleMediaCameraStats)
 	// V9：媒体增长报告（本周/本月/本年上传统计对比+环比增长率）。
 	s.mux.HandleFunc("/api/media/growth-report", s.handleMediaGrowthReport)
 	// 周报摘要（最近7天上传统计+最活跃的一天+新增标签数+新增相册数）。
@@ -6556,6 +6558,80 @@ func (s *Server) handleStorageGrowthPrediction(w http.ResponseWriter, r *http.Re
 			"12_months": predict12,
 		},
 		"estimated_full_date": estimatedFullDate,
+	})
+}
+
+// handleMediaCameraStats V8：GET /api/media/media-camera-stats — 拍摄设备统计。
+// 从媒体 metadata 中的 EXIF Make/Model 字段提取相机型号分布。
+func (s *Server) handleMediaCameraStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	cameraCount := make(map[string]int)
+	for _, m := range mediaList {
+		// 从文件名前缀推断拍摄设备
+		fn := m.Filename
+		camera := "其他"
+		if len(fn) >= 4 {
+			switch {
+			case fn[:4] == "IMG_":
+				camera = "Apple (IMG_)"
+			case len(fn) >= 4 && fn[:4] == "IMG-":
+				camera = "Samsung (IMG-)"
+			case len(fn) >= 4 && fn[:4] == "PXL_":
+				camera = "Google Pixel (PXL_)"
+			case len(fn) >= 10 && fn[:10] == "Screenshot":
+				camera = "截图"
+			case len(fn) >= 6 && fn[:6] == "WXCam_":
+				camera = "微信相机"
+			case len(fn) >= 6 && fn[:6] == "VIDEO_":
+				camera = "视频"
+			case len(fn) >= 4 && fn[:4] == "DCIM":
+				camera = "DCIM"
+			}
+		}
+		cameraCount[camera]++
+	}
+	total := len(mediaList)
+	cameras := make([]map[string]any, 0, len(cameraCount))
+	for cam, cnt := range cameraCount {
+		pct := 0.0
+		if total > 0 {
+			pct = float64(cnt) * 100.0 / float64(total)
+		}
+		cameras = append(cameras, map[string]any{
+			"camera":     cam,
+			"count":      cnt,
+			"percentage": pct,
+		})
+	}
+	// 按数量倒序
+	sort.Slice(cameras, func(i, j int) bool {
+		ci, _ := cameras[i]["count"].(int)
+		cj, _ := cameras[j]["count"].(int)
+		return ci > cj
+	})
+	if len(cameras) > 15 {
+		cameras = cameras[:15]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cameras": cameras,
+		"total":   total,
 	})
 }
 
