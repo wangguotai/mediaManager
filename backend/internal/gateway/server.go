@@ -204,6 +204,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-monthly-highlights", s.handleMediaMonthlyHighlights)
 	// 按年份统计媒体（每年的 count + bytes + 按月分布 + 按类型分布）。默认当年（UTC），?year=2026 指定。
 	s.mux.HandleFunc("/api/media/media-year-stats", s.handleMediaYearStats)
+	// 年度对比（今年 vs 去年同期：总量/类型分布/增长率）。一次 ListMediaByUser
+	// 全量拉取后按 created_at 的 UTC 年份分当年/去年两组，对比 count/bytes/by_type
+	// 并计算增长率 (今年-去年)/去年*100；去年为 0 时对应增长率返回 null（除零保护）。
+	s.mux.HandleFunc("/api/media/media-yearly-comparison", s.handleMediaYearlyComparison)
 	// V9：存储预测端点（基于最近 6 个月上传趋势预测 1/3/6 个月后的用量，并估算配额耗尽时间）。
 	s.mux.HandleFunc("/api/media/storage-forecast", s.handleStorageForecast)
 	// V14：存储增长预测（基于最近 6 个月趋势预测未来 3/6/12 个月用量 + 10GB 配额用完日期）。
@@ -8187,6 +8191,114 @@ func (s *Server) handleMediaYearStats(w http.ResponseWriter, r *http.Request) {
 			"IMAGE": imageCount,
 			"VIDEO": videoCount,
 			"LIVE":  liveCount,
+		},
+	})
+}
+
+// handleMediaYearlyComparison GET /api/media/media-yearly-comparison — 年度对比。
+//
+// 对比当年与去年同期的媒体上传统计：总量（count/bytes）+ 类型分布 + 增长率。
+// 一次 ListMediaByUser 全量拉取后按 created_at 的 UTC 年份分两组聚合：
+//
+//   - this_year：created_at 年份 == 当年的媒体
+//   - last_year：created_at 年份 == 去年的媒体
+//
+// 增长率 = (今年 - 去年) / 去年 * 100；去年对应维度为 0 时该增长率返回 null
+// （除零保护，与 growth-report 的 change_percent 同口径）。by_type 返回
+// IMAGE/VIDEO/LIVE 三类计数（与 media-year-stats 同口径）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaYearlyComparison(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	now := time.Now().UTC()
+	thisYear := now.Year()
+	lastYear := thisYear - 1
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 按年聚合 count/bytes/类型分布。
+	var tyCount, tyBytes, lyCount, lyBytes int64
+	var tyImg, tyVid, tyLive, lyImg, lyVid, lyLive int64
+	for _, m := range mediaList {
+		ca := m.CreatedAt.UTC()
+		y := ca.Year()
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			if y == thisYear {
+				tyImg++
+			} else if y == lastYear {
+				lyImg++
+			}
+		case "VIDEO":
+			if y == thisYear {
+				tyVid++
+			} else if y == lastYear {
+				lyVid++
+			}
+		case "LIVE_PHOTO", "LIVE":
+			if y == thisYear {
+				tyLive++
+			} else if y == lastYear {
+				lyLive++
+			}
+		}
+		if y == thisYear {
+			tyCount++
+			tyBytes += m.Size
+		} else if y == lastYear {
+			lyCount++
+			lyBytes += m.Size
+		}
+	}
+
+	// 增长率：去年同期为 0 时返回 null（避免除零），与 growth-report 口径一致。
+	var countPct, bytesPct any
+	if lyCount > 0 {
+		countPct = float64(tyCount-lyCount) / float64(lyCount) * 100
+	}
+	if lyBytes > 0 {
+		bytesPct = float64(tyBytes-lyBytes) / float64(lyBytes) * 100
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"this_year": map[string]any{
+			"count": tyCount,
+			"bytes": tyBytes,
+			"by_type": map[string]any{
+				"IMAGE": tyImg,
+				"VIDEO": tyVid,
+				"LIVE":  tyLive,
+			},
+		},
+		"last_year": map[string]any{
+			"count": lyCount,
+			"bytes": lyBytes,
+			"by_type": map[string]any{
+				"IMAGE": lyImg,
+				"VIDEO": lyVid,
+				"LIVE":  lyLive,
+			},
+		},
+		"growth": map[string]any{
+			"count_pct": countPct,
+			"bytes_pct": bytesPct,
 		},
 	})
 }
