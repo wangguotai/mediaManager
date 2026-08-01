@@ -7648,9 +7648,11 @@ object MediaService {
                 if (type.isNotBlank()) parameter("type", type.trim())
                 if (tag.isNotBlank()) parameter("tag", tag.trim())
                 // 日期补齐为 RFC3339：date_from 当地 00:00:00 / date_to 当地 23:59:59 + Z。
-                // 后端按 RFC3339 解析；非法值静默忽略，故补齐失败也只退化为"不加该条件"。
-                if (dateFrom.isNotBlank()) parameter("date_from", toRfc3339Start(dateFrom.trim()))
-                if (dateTo.isNotBlank()) parameter("date_to", toRfc3339End(dateTo.trim()))
+                // 复用既有的 [rfc3339StartOfDay]/[rfc3339EndOfDay]（advanced-search 同款），
+                // 后端按 RFC3339 解析；非 YYYY-MM-DD 格式原样透传，后端 Parse 失败则静默忽略
+                // 该条件（即不施加），与"空串不筛"等价。
+                if (dateFrom.isNotBlank()) parameter("date_from", rfc3339StartOfDay(dateFrom.trim()))
+                if (dateTo.isNotBlank()) parameter("date_to", rfc3339EndOfDay(dateTo.trim()))
             }
             if (response.status == HttpStatusCode.OK) {
                 val body: String = response.body()
@@ -7680,37 +7682,6 @@ object MediaService {
             )
             null
         }
-    }
-
-    /**
-     * 把 "YYYY-MM-DD" 解析为 RFC3339 起点时刻字符串（当地 00:00:00→Z，UTC 简化）。
-     *
-     * 前端 commonMain 无 java.time/kotlinx-datetime，用纯整数补齐：把"年-月-日"各段拼成
-     * "YYYY-MM-DDT00:00:00Z"，交给后端 time.Parse(time.RFC3339) 解析。非法输入（含分月天数
-     * 不合法）返回空串——调用方据此决定是否附加该 query 参数（空串则不附加）。
-     *
-     * 仅做格式拼接，不做历法校验（如 2-30）；后端 Parse 会拒绝并静默忽略，影响只是不加条件。
-     */
-    private fun toRfc3339Start(date: String): String {
-        val parts = date.split('-')
-        if (parts.size != 3) return ""
-        val y = parts[0].trim(); val m = parts[1].trim(); val d = parts[2].trim()
-        if (y.length != 4 || m.length != 2 || d.length != 2) return ""
-        if (y.any { !it.isDigit() } || m.any { !it.isDigit() } || d.any { !it.isDigit() }) return ""
-        return "${'$'}${'$'}{y}-${'$'}${'$'}{m}-${'$'}${'$'}{d}T00:00:00Z"
-    }
-
-    /**
-     * 把 "YYYY-MM-DD" 解析为 RFC3339 结束时刻字符串（当地 23:59:59→Z，UTC 简化）。
-     * 与 [toRfc3339Start] 配对，对应闭区间右端。合法性同款判定。
-     */
-    private fun toRfc3339End(date: String): String {
-        val parts = date.split('-')
-        if (parts.size != 3) return ""
-        val y = parts[0].trim(); val m = parts[1].trim(); val d = parts[2].trim()
-        if (y.length != 4 || m.length != 2 || d.length != 2) return ""
-        if (y.any { !it.isDigit() } || m.any { !it.isDigit() } || d.any { !it.isDigit() }) return ""
-        return "${'$'}${'$'}{y}-${'$'}${'$'}{m}-${'$'}${'$'}{d}T23:59:59Z"
     }
 
     /**

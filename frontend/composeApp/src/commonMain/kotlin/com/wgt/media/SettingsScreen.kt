@@ -15,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -309,6 +310,20 @@ fun SettingsScreen(
     var isExporting by remember { mutableStateOf(false) }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
 
+    // V26：批量导出（media-bulk-export）状态。
+    // showBulkFilterDialog 控制筛选输入对话框（type/tag/日期范围）；showBulkResultDialog
+    // 控制结果展示对话框（与 ExportReportDialog 同款 JSON 滚动+复制）。bulkExportJson 缓存
+    // 结果 JSON，null=未加载/""=失败占位。isBulkExporting 控制按钮 loading。
+    var showBulkFilterDialog by remember { mutableStateOf(false) }
+    var showBulkResultDialog by remember { mutableStateOf(false) }
+    var bulkExportJson by remember { mutableStateOf<String?>(null) }
+    var isBulkExporting by remember { mutableStateOf(false) }
+    // 筛选条件输入态（仅在筛选 Dialog 内编辑，确认后冻结为本次请求的实际参数）
+    var bulkType by remember { mutableStateOf("") }
+    var bulkTag by remember { mutableStateOf("") }
+    var bulkDateFrom by remember { mutableStateOf("") }
+    var bulkDateTo by remember { mutableStateOf("") }
+
     // 一键删除重复确认对话框 + 执行状态（完整性报告卡片触发）。
     // showBatchDeleteDialog 控制弹窗；batchDeleting 控制按钮 loading；
     // 用 integrityReport.duplicates 的 count/reclaimableBytes 作确认提示文案。
@@ -383,6 +398,56 @@ fun SettingsScreen(
             onDismiss = {
                 showExportDialog = false
                 exportJson = null  // 关闭时清空，下次重新拉取
+            }
+        )
+    }
+
+    // V26：批量导出筛选 Dialog —— 编辑 type/tag/日期范围，确认后触发请求并打开结果对话框。
+    if (showBulkFilterDialog) {
+        BulkExportFilterDialog(
+            type = bulkType,
+            tag = bulkTag,
+            dateFrom = bulkDateFrom,
+            dateTo = bulkDateTo,
+            onTypeChange = { bulkType = it },
+            onTagChange = { bulkTag = it },
+            onDateFromChange = { bulkDateFrom = it },
+            onDateToChange = { bulkDateTo = it },
+            onCancel = { showBulkFilterDialog = false },
+            isExporting = isBulkExporting,
+            onConfirm = {
+                isBulkExporting = true
+                scope.launch {
+                    val result = MediaService.getMediaBulkExport(
+                        type = bulkType,
+                        tag = bulkTag,
+                        dateFrom = bulkDateFrom,
+                        dateTo = bulkDateTo
+                    )
+                    isBulkExporting = false
+                    showBulkFilterDialog = false
+                    bulkExportJson = result ?: ""
+                    showBulkResultDialog = true
+                }
+            }
+        )
+    }
+
+    // V26：批量导出结果 Dialog —— 展示筛选后导出的 JSON，结构同 ExportReportDialog
+    if (showBulkResultDialog) {
+        ExportReportDialog(
+            json = bulkExportJson,
+            isExporting = false,
+            onCopy = {
+                val text = bulkExportJson
+                if (!text.isNullOrEmpty()) {
+                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
+                    scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
+                }
+            },
+            onDismiss = {
+                showBulkResultDialog = false
+                bulkExportJson = null  // 关闭清空，下次重新拉取
             }
         )
     }
@@ -3835,6 +3900,41 @@ private fun formatActions(actions: Double): String {
     val intPart = rounded.toInt()
     val frac = ((actions * 10.0).toInt() - intPart * 10)
     return if (frac == 0) "$intPart" else "$intPart.$frac"
+}
+
+/** V8：批量导出筛选 Dialog */
+@Composable
+fun BulkExportFilterDialog(
+    type: String,
+    tag: String,
+    dateFrom: String,
+    dateTo: String,
+    onTypeChange: (String) -> Unit,
+    onTagChange: (String) -> Unit,
+    onDateFromChange: (String) -> Unit,
+    onDateToChange: (String) -> Unit,
+    onCancel: () -> Unit,
+    isExporting: Boolean,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("批量导出筛选") },
+        text = {
+            Column {
+                Text("类型: $type", fontSize = 13.sp)
+                Text("标签: $tag", fontSize = 13.sp)
+                Text("起始日期: $dateFrom", fontSize = 13.sp)
+                Text("结束日期: $dateTo", fontSize = 13.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !isExporting) {
+                Text(if (isExporting) "导出中..." else "确认导出")
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("取消") } }
+    )
 }
 
 
