@@ -1665,6 +1665,14 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V14：存储增长预测卡片（GET /api/media/storage-growth-prediction）——
+            // 未来 3/6/12 个月用量预测 + 预计配额耗尽日期。独立 @Composable，自取数据。
+            StoragePredictionCard()
+
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V22：归档建议卡片 —— 调 /api/media/archive-suggest 显示冷数据 + 大视频归档候选，
             // 列出每项文件名 / 大小 / 归档年龄，并给出可释放空间汇总。
             // 放在"完整性报告"之后、\"数据概览\"之前。
@@ -3313,6 +3321,119 @@ fun StorageMatrixCard() {
 }
 
 /**
+ * V14：存储增长预测卡片 —— 调 [MediaService.getStorageGrowthPrediction]
+ * （GET /api/media/storage-growth-prediction）展示未来 3/6/12 个月存储用量预测。
+ *
+ * 后端基于最近 6 个月上传趋势线性外推，并估算 10GB 配额耗尽日期。本卡片展示：
+ * - 当前用量（MB）
+ * - 月均增长（MB）
+ * - 预测：3 月 / 6 月 / 12 月 后的用量（MB）
+ * - 预计充满日期（YYYY-MM-DD；无趋势/增长率为 0 时显示"暂无预测"）
+ *
+ * 抽成独立顶级 @Composable，与 [StorageMatrixCard] 同款结构：SectionTitle + when 三态
+ * （加载中 / 失败 null / 数据）。自取数据（[LaunchedEffect] 拉取一次），不依赖外层。
+ * 后端不可用/出错时返回 null，归入失败空态提示。
+ */
+@Composable
+fun StoragePredictionCard() {
+    var data by remember { mutableStateOf<MediaService.StorageGrowthPrediction?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        data = MediaService.getStorageGrowthPrediction()
+        loading = false
+    }
+    SectionTitle("📈 存储增长预测", iconRes = Res.drawable.ic_info)
+    when {
+        loading -> Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        data == null -> Text(
+            "无法获取存储预测",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+        else -> {
+            val p = data!!
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                // 当前用量
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("当前", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${formatBytesToMB(p.currentBytes)} MB",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                // 月均增长
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("月均增长", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${formatBytesToMB(p.avgMonthlyGrowthBytes)} MB",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(vertical = 4.dp))
+                // 预测：3 月 / 6 月 / 12 月
+                Text(
+                    "预测",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                listOf(
+                    "3_months" to "3 月",
+                    "6_months" to "6 月",
+                    "12_months" to "12 月"
+                ).forEach { (key, label) ->
+                    val bytes = p.predictedBytes(key)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("→ $label", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (bytes != null) "${formatBytesToMB(bytes)} MB" else "—",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(vertical = 4.dp))
+                // 预计充满日期
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("预计充满", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        p.estimatedFullDate ?: "暂无预测",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (p.estimatedFullDate != null)
+                            MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * 上传延迟分析卡片 —— 调 [MediaService.getMediaTimeAnalysis] 展示拍摄→上传延迟。
  *
  * 后端 `GET /api/media/media-time-analysis` 基于全部未软删媒体的 taken_at（拍摄时间）
@@ -3570,3 +3691,5 @@ private fun formatActions(actions: Double): String {
     val frac = ((actions * 10.0).toInt() - intPart * 10)
     return if (frac == 0) "$intPart" else "$intPart.$frac"
 }
+
+

@@ -5668,6 +5668,81 @@ object MediaService {
     }
 
     /**
+     * V14：存储增长预测——GET /api/media/storage-growth-prediction 返回的预测数据。
+     *
+     * 与 V9 [StorageForecast] 同源（均基于最近 6 个月上传趋势线性外推），但字段口径不同：
+     * - [currentBytes]：当前未软删媒体总字节。
+     * - [avgMonthlyGrowthBytes]：样本月（最近最多 6 个月）月均增长字节；样本月数 < 2 时为 0。
+     * - [predictions]：未来 3/6/12 个月后的预测用量，键为 "3_months"/"6_months"/"12_months"。
+     *   线性外推：currentBytes + avgMonthlyGrowthBytes * N。
+     * - [estimatedFullDate]：10GB 配额下"用完"的日期（YYYY-MM-DD）；增长率为 0 或无趋势时为 null，
+     *   已达/超配额时为当前日期。后端返回 null → 此处保持 null。
+     *
+     * 字段缺失回退默认值（0L / 空串），与既有 [StorageForecast] 同款宽容解析。
+     */
+    data class StorageGrowthPrediction(
+        val currentBytes: Long = 0L,
+        val avgMonthlyGrowthBytes: Long = 0L,
+        val predictions: Map<String, Long> = emptyMap(),
+        val estimatedFullDate: String? = null
+    ) {
+        /** 月均增长 MB（UI 文字截断处理，遵循 commonMain 无 String.format 约定）。 */
+        val avgMonthlyGrowthMB: Double get() = avgMonthlyGrowthBytes.toDouble() / (1024.0 * 1024.0)
+
+        /** 当前用量 MB。 */
+        val currentMB: Double get() = currentBytes.toDouble() / (1024.0 * 1024.0)
+
+        /** 取指定键（"3_months"/"6_months"/"12_months"）的预测字节；缺失返回 null。 */
+        fun predictedBytes(key: String): Long? = predictions[key]
+    }
+
+    /**
+     * V14：GET /api/media/storage-growth-prediction — 存储增长预测。
+     *
+     * 后端基于最近 6 个月每月上传字节趋势线性外推未来 3/6/12 个月用量，并估算 10GB 配额
+     * 耗尽日期。响应字段：current_bytes / avg_monthly_growth_bytes /
+     * predictions{3_months,6_months,12_months} / estimated_full_date（YYYY-MM-DD 或 null）。
+     *
+     * 与 [getStorageForecast] 同走 GET + 运行时 Json 解析；非 200 或异常返回 null，
+     * UI 侧静默跳过预测卡片。需认证（Authorization 头由 [jsonClient] defaultRequest 自动注入）。
+     *
+     * @return 存储增长预测，或 null（失败）
+     */
+    suspend fun getStorageGrowthPrediction(): StorageGrowthPrediction? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/storage-growth-prediction") {
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val predsObj = o["predictions"]?.jsonObject
+                val predictions = if (predsObj != null) {
+                    buildMap {
+                        listOf("3_months", "6_months", "12_months").forEach { key ->
+                            predsObj[key]?.jsonPrimitive?.longOrNull?.let { put(key, it) }
+                        }
+                    }
+                } else {
+                    emptyMap()
+                }
+                StorageGrowthPrediction(
+                    currentBytes = o["current_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    avgMonthlyGrowthBytes = o["avg_monthly_growth_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    predictions = predictions,
+                    estimatedFullDate = o["estimated_full_date"]?.let {
+                        if (it is JsonNull) null else it.jsonPrimitive?.contentOrNull
+                    }
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getStorageGrowthPrediction FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/growth-report — 媒体增长报告。
      *
      * 后端基于 created_at（上传时间）在 Go 侧按 ISO-8601 周边界 / 自然月边界分桶，
