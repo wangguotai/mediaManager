@@ -175,6 +175,10 @@ func (s *Server) registerRoutes() {
 	// 标签使用趋势（最近 N 个月每月新增标签数）。复用 audit_log 中 action="tag"
 	// 记录的 created_at 按月分组，语义与 weekly-summary 的 new_tags_count 一致。
 	s.mux.HandleFunc("/api/media/tag-trend", s.handleTagTrend)
+	// 标签演化趋势（每个标签在最近 N 个月的每月使用变化趋势）。
+	// 数据来源与 tag-trend 同口径：audit_log 中 action="tag" 的记录；按 detail
+	//（标签标识）+ 月份分组，输出每个标签的 monthly_counts / trend / total。
+	s.mux.HandleFunc("/api/media/media-tag-evolution", s.handleMediaTagEvolution)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
@@ -4428,23 +4432,23 @@ func (s *Server) handleMediaContentDiversity(w http.ResponseWriter, r *http.Requ
 		"total":           total,
 		"breakdown": map[string]any{
 			"type": map[string]any{
-				"entropy":     round2(typeEnt),
-				"categories":  len(typeCounts),
+				"entropy":      round2(typeEnt),
+				"categories":   len(typeCounts),
 				"distribution": counter(typeCounts),
 			},
 			"mime": map[string]any{
-				"entropy":     round2(mimeEnt),
-				"categories":  len(mimeCounts),
+				"entropy":      round2(mimeEnt),
+				"categories":   len(mimeCounts),
 				"distribution": counter(mimeCounts),
 			},
 			"hour": map[string]any{
-				"entropy":     round2(hourEnt),
-				"categories":  len(hourCounts),
+				"entropy":      round2(hourEnt),
+				"categories":   len(hourCounts),
 				"distribution": counter(hourCounts),
 			},
 			"tag": map[string]any{
-				"entropy":     round2(tagEnt),
-				"categories":  len(tagCounts),
+				"entropy":      round2(tagEnt),
+				"categories":   len(tagCounts),
 				"distribution": counter(tagCounts),
 			},
 		},
@@ -14073,6 +14077,170 @@ func (s *Server) handleTagTrend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"months":         trend,
 		"total_new_tags": totalNewTags,
+	})
+}
+
+// handleMediaTagEvolution GET /api/media/media-tag-evolution?months=6
+//
+// 标签演化趋势：每个标签在最近 N 个月每月的使用次数（标签关联操作数）变化，
+// 并给出整体趋势方向（up/down/stable）。
+//
+// 数据来源：audit_log 中 action="tag" 的记录（与 tag-trend / weekly-summary 的
+// new_tags_count 同口径——语义为标签关联操作次数）。ListAuditLogs 无法按时间范围
+// 或 action 过滤，取较大 limit（5000）在内存中过滤 action=="tag" 再按
+// detail（标签标识）+ UTC 月份分组。
+//
+// 月份窗口为 [本月往前推 months-1 个月 .. 本月]，含本月，共 months 个槽位，
+// 时间升序。仅落在窗口内的记录参与统计；窗口外的标签不出现。
+//
+// trend 判定：比较窗口最后一个月与第一个月的 count——
+//   - last > first  → "up"
+//   - last < first  → "down"
+//   - 相等          → "stable"
+//
+// 全程为 0 的标签不出现；total 为窗口内该标签全部月度计数之和。
+//
+// 响应:
+//
+//	{
+//	  tags: [
+//	    {
+//	      tag: "标签标识",
+//	      monthly_counts: [{month:"2026-03", count:N}, ...], // 升序，含空月 0
+//	      trend: "up" | "down" | "stable",
+//	      total: N
+//	    },
+//	    ...
+//	  ],
+//	  total_tags: N
+//	}
+//
+// 未登录 401；store 不可用 503；months<1 默认 6，>24 收敛到 24。GET only。
+func (s *Server) handleMediaTagEvolution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	months := 6
+	if v := r.URL.Query().Get("months"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			months = n
+		}
+	}
+	if months < 1 {
+		months = 6
+	}
+	if months > 24 {
+		months = 24
+	}
+
+	// 取较大 limit 拉足够记录在内存按时间窗口过滤（ListAuditLogs 无法按时间范围查询）。
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 月份窗口：[本月往前推 months-1 个月 .. 本月]，UTC，共 months 个槽位，升序。
+	now := time.Now().UTC()
+	thisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	startMonth := thisMonth.AddDate(0, -(months - 1), 0)
+	monthKeys := make([]string, months)
+	idxByMonth := make(map[string]int, months)
+	for i := 0; i < months; i++ {
+		ms := startMonth.AddDate(0, i, 0)
+		key := ms.Format("2006-01")
+		monthKeys[i] = key
+		idxByMonth[key] = i
+	}
+
+	// 按 detail（标签标识）聚合月度计数。空 detail 归为 "(default)" 便于展示。
+	type tagAgg struct {
+		Counts []int // 长度 months，按月升序
+		Total  int
+	}
+	aggs := make(map[string]*tagAgg)
+
+	for _, a := range logs {
+		if a.Action != "tag" {
+			continue
+		}
+		ca := a.CreatedAt.UTC()
+		monthStart := time.Date(ca.Year(), ca.Month(), 1, 0, 0, 0, 0, time.UTC)
+		if monthStart.Before(startMonth) {
+			continue // 超出窗口
+		}
+		key := monthStart.Format("2006-01")
+		idx, ok := idxByMonth[key]
+		if !ok {
+			continue
+		}
+		tag := a.Detail
+		if tag == "" {
+			tag = "(default)"
+		}
+		agg, exists := aggs[tag]
+		if !exists {
+			agg = &tagAgg{Counts: make([]int, months)}
+			aggs[tag] = agg
+		}
+		agg.Counts[idx]++
+		agg.Total++
+	}
+
+	// 构造响应：按 total 降序，并列按 tag 升序，保证稳定排序。
+	type monthlyCount struct {
+		Month string `json:"month"`
+		Count int    `json:"count"`
+	}
+	type tagEvolution struct {
+		Tag           string         `json:"tag"`
+		MonthlyCounts []monthlyCount `json:"monthly_counts"`
+		Trend         string         `json:"trend"`
+		Total         int            `json:"total"`
+	}
+
+	out := make([]tagEvolution, 0, len(aggs))
+	for tag, agg := range aggs {
+		mcs := make([]monthlyCount, months)
+		for i := 0; i < months; i++ {
+			mcs[i] = monthlyCount{Month: monthKeys[i], Count: agg.Counts[i]}
+		}
+		first := agg.Counts[0]
+		last := agg.Counts[months-1]
+		trend := "stable"
+		if last > first {
+			trend = "up"
+		} else if last < first {
+			trend = "down"
+		}
+		out = append(out, tagEvolution{
+			Tag:           tag,
+			MonthlyCounts: mcs,
+			Trend:         trend,
+			Total:         agg.Total,
+		})
+	}
+	// 排序：total 降序，并列按 tag 升序。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Total != out[j].Total {
+			return out[i].Total > out[j].Total
+		}
+		return out[i].Tag < out[j].Tag
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       out,
+		"total_tags": len(out),
 	})
 }
 
