@@ -451,6 +451,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-resolution-distribution", s.handleMediaResolutionDist)
 	// V8：按文件大小范围统计
 	s.mux.HandleFunc("/api/media/by-size-range", s.handleMediaBySizeRange)
+	// 媒体大小百分位分析：对未软删媒体的 Size 升序排序后取 P10/P25/P50/P75/P90，
+	// 并附 total/min/max/mean。需认证 + store，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-size-percentile", s.handleMediaSizePercentile)
 	// 媒体年龄分布（按 created_at 到 now 的时间差分组：<1天/1-7天/7-30天/30-90天/90-365天/>365天）
 	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
 	// 媒体归档状态（按上传年龄热/温/冷分类：热≤30天 / 温30-180天 / 冷>180天）
@@ -11003,6 +11006,99 @@ func (s *Server) handleMediaBySizeRange(w http.ResponseWriter, r *http.Request) 
 		"ranges":      ranges,
 		"range_bytes": rangeBytes,
 		"total":       len(mediaList),
+	})
+}
+
+// handleMediaSizePercentile GET /api/media/media-size-percentile — 媒体大小百分位分析。
+//
+// 对当前用户所有未软删媒体的 Size 升序排序，用 nearest-rank 法计算
+// P10/P25/P50(中位数)/P75/P90，并返回 total/min_size/max_size/mean_size。
+// total<2 时各百分位回退为 0（样本不足以做有意义的分位）。
+// 需认证 + store，按 user_id 隔离。
+//
+// 响应结构：
+//
+//	{
+//	  "percentiles": {"p10":N,"p25":N,"p50":N,"p75":N,"p90":N},
+//	  "total": N,
+//	  "min_size": N,
+//	  "max_size": N,
+//	  "mean_size": N
+//	}
+func (s *Server) handleMediaSizePercentile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 收集未软删媒体的 Size 并升序排序。
+	sizes := make([]int64, 0, len(mediaList))
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		sizes = append(sizes, m.Size)
+	}
+	sort.Slice(sizes, func(i, j int) bool { return sizes[i] < sizes[j] })
+
+	total := len(sizes)
+	if total == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"percentiles": map[string]int64{"p10": 0, "p25": 0, "p50": 0, "p75": 0, "p90": 0},
+			"total":       0,
+			"min_size":    0,
+			"max_size":    0,
+			"mean_size":   0,
+		})
+		return
+	}
+
+	// nearest-rank 百分位：rank = ceil(p/100 * n)，1-indexed → 切片索引 rank-1。
+	percentile := func(p int) int64 {
+		if total < 2 {
+			return 0
+		}
+		rank := (p*total + 99) / 100 // ceil(p/100 * n)，整数运算避免浮点
+		if rank < 1 {
+			rank = 1
+		}
+		if rank > total {
+			rank = total
+		}
+		return sizes[rank-1]
+	}
+
+	var sum int64
+	for _, sz := range sizes {
+		sum += sz
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"percentiles": map[string]int64{
+			"p10": percentile(10),
+			"p25": percentile(25),
+			"p50": percentile(50),
+			"p75": percentile(75),
+			"p90": percentile(90),
+		},
+		"total":     total,
+		"min_size":  sizes[0],
+		"max_size":  sizes[total-1],
+		"mean_size": sum / int64(total),
 	})
 }
 
