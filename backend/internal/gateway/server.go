@@ -440,6 +440,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
 	// 媒体归档状态（按上传年龄热/温/冷分类：热≤30天 / 温30-180天 / 冷>180天）
 	s.mux.HandleFunc("/api/media/media-archive-status", s.handleMediaArchiveStatus)
+	// 媒体宽高比分布（按 width/height 比值分类：横向/纵向/方形/全景），含 count + percentage + most_common。
+	s.mux.HandleFunc("/api/media/media-aspect-ratio", s.handleMediaAspectRatio)
 	// 智能归档建议：筛选冷数据（>180天）中的大视频（>50MB），建议移至独立"归档"相册。
 	// 与 media-archive-status（温度档统计）互补：后者只统计分布，本端点给出可操作建议清单。
 	s.mux.HandleFunc("/api/media/archive-suggest", s.handleArchiveSuggest)
@@ -10874,6 +10876,108 @@ func (s *Server) handleMediaArchiveStatus(w http.ResponseWriter, r *http.Request
 		"warm":  warm,
 		"cold":  cold,
 		"total": total,
+	})
+}
+
+// handleMediaAspectRatio GET /api/media/media-aspect-ratio — 按 width/height 比值统计媒体宽高比分布。
+// 分类口径（ratio = width/height，denominator 防 0）：
+//   - panorama : w/h > 2.0（全景/超宽幅，优先于 landscape 命中，否则会被横向档吞掉）
+//   - landscape: w/h > 1.2（横向）
+//   - portrait : h/w > 1.2（即 w/h < 1/1.2≈0.833，纵向）
+//   - square   : 其余（0.833 ≤ w/h ≤ 1.2，近似方形）
+//
+// 无尺寸信息（Width<=0 且 Height<=0）的媒体不计入任何档、也不计入 total，
+// 与 handleMediaResolutionDist 口径一致（避免 0×0 进方形档）。percentage 保留两位小数，
+// total=0 时全部档 percentage=0 且 most_common=null（无最常见类型）。
+func (s *Server) handleMediaAspectRatio(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 4 个固定宽高比档，按合理展示顺序预置 0。order 是最常见类型排序用的固定顺序，
+	// panorama→landscape→portrait→square（宽→高的视觉趋势），避免 map 遍历乱序影响 most_common。
+	type ratioStat struct {
+		Type       string  `json:"type"`
+		Count      int64   `json:"count"`
+		Percentage float64 `json:"percentage"`
+	}
+	// 用计数数组而非 map，保证 JSON 输出顺序固定。
+	counts := map[string]int64{
+		"panorama":  0,
+		"landscape": 0,
+		"portrait":  0,
+		"square":    0,
+	}
+	order := []string{"panorama", "landscape", "portrait", "square"}
+	var total int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		w, h := int64(m.Width), int64(m.Height) // storage.Media.Width/Height 为 int32，转 int64 避免溢出
+		if w <= 0 && h <= 0 {
+			continue // 无尺寸信息：跳过（不计入 total，与 resolution-dist 口径一致）
+		}
+		if w <= 0 {
+			w = 1
+		}
+		if h <= 0 {
+			h = 1
+		}
+		total++
+		whRatio := float64(w) / float64(h) // width/height
+		switch {
+		case whRatio > 2.0:
+			counts["panorama"]++
+		case whRatio > 1.2:
+			counts["landscape"]++
+		case whRatio < 1.0/1.2: // ≈0.8333，等价于 h/w > 1.2（纵向）
+			counts["portrait"]++
+		default:
+			counts["square"]++ // 1/1.2 ≤ w/h ≤ 1.2（近似方形）
+		}
+	}
+
+	ratios := make([]ratioStat, 0, len(order))
+	var mostCommonType any
+	var mostCommonCount int64
+	for _, t := range order {
+		c := counts[t]
+		var pct float64
+		if total > 0 {
+			pct = float64(c) / float64(total) * 100
+			// 保留两位小数（与本仓库固定档分布约定一致）。
+			pct = float64(int(pct*100+0.5)) / 100 // 四舍五入到 0.01
+		}
+		ratios = append(ratios, ratioStat{Type: t, Count: c, Percentage: pct})
+		if c > mostCommonCount {
+			mostCommonCount = c
+			mostCommonType = t
+		}
+	}
+	if total == 0 {
+		mostCommonType = nil // 无可统计媒体时 most_common 为 null（与 volume-report 的 mom_growth null 约定一致）
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ratios":      ratios,
+		"total":       total,
+		"most_common": mostCommonType,
 	})
 }
 
