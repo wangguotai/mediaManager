@@ -311,6 +311,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/batch-favorite-remove", s.handleMediaBatchFavoriteRemove)
 	// 收藏时间线：按收藏时间（media.updated_at 倒序）展示已收藏媒体，供前端"收藏"Tab 渲染。
 	s.mux.HandleFunc("/api/media/favorite-timeline", s.handleFavoriteTimeline)
+	// 收藏分析：收藏率+按类型/小时分布+平均收藏间隔天数。一次 ListMediaByUser +
+	// favoriteProvider.ListFavorites 拉取后在 Go 侧聚合，只读端点。
+	s.mux.HandleFunc("/api/media/media-favorite-analysis", s.handleMediaFavoriteAnalysis)
 
 	// 相册：创建、列表、加入/移除媒体、删除。
 	s.mux.HandleFunc("/api/media/album", s.handleAlbumCreate)
@@ -21676,6 +21679,130 @@ func (s *Server) handleMediaUploadPattern(w http.ResponseWriter, r *http.Request
 		"avg_interval_hours": avgIntervalHours,
 		"total_media":       totalMedia,
 		"dominant_pattern":  pattern,
+	})
+}
+
+// handleMediaFavoriteAnalysis GET /api/media/media-favorite-analysis — 收藏分析。
+//
+// 返回当前用户媒体库的收藏行为画像：收藏率、最常收藏的媒体类型、收藏时段分布
+// （按 updated_at 近似 favorited_at 的 UTC 小时）、平均收藏间隔天数（从上传到
+// 收藏）。响应：
+//
+//	{
+//	  "total_favorites": N,            // 已收藏且未软删的媒体数
+//	  "total_media":     N,            // 全部未软删媒体数
+//	  "favorite_rate":   12.34,        // total_favorites/total_media*100，保留两位小数
+//	  "by_type":         {"IMAGE":N,"VIDEO":N,"LIVE":N,"OTHER":N},
+//	  "by_hour":         [{hour:0,count:N},...,{hour:23,count:N}],  // 24 槽位
+//	  "avg_age_days":     5.67,        // 从 created_at 到 updated_at 的平均天数；
+//	                                  // 无收藏或 updated_at<=created_at 时为 null
+//	}
+//
+// 收藏集（favoriteProvider）只存 media_id，不记录收藏时间戳，故以 media.updated_at
+// 近似 favorited_at（收藏操作会刷新 updated_at，详见 service.AddFavorite），与
+// handleFavoriteTimeline 同口径。avg_age_days = mean(updated_at - created_at)，若
+// updated_at 早于或等于 created_at（零值/未刷新）则该条不计入平均，全部不满足时为 null。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503；mediaSvc 未实现 favoriteProvider 时
+// 视为无收藏（total_favorites=0，其余指标相应归零/null）。
+func (s *Server) handleMediaFavoriteAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 收藏 media_id 集合；favoriteProvider 未配置时为空集（无收藏）。
+	var favSet map[string]struct{}
+	if fav, ok := s.mediaSvc.(favoriteProvider); ok {
+		ids := fav.ListFavorites(uid)
+		favSet = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			favSet[id] = struct{}{}
+		}
+	} else {
+		favSet = map[string]struct{}{}
+	}
+
+	// 24 小时槽位。
+	hours := make([]map[string]any, 24)
+	for i := 0; i < 24; i++ {
+		hours[i] = map[string]any{"hour": i, "count": int64(0)}
+	}
+
+	var totalMedia, totalFav int
+	var imgCount, vidCount, liveCount, otherCount int64
+	var ageSum float64
+	var ageCount int
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		totalMedia++
+		if _, isFav := favSet[m.ID]; !isFav {
+			continue
+		}
+		totalFav++
+		switch strings.ToUpper(m.Type) {
+		case "IMAGE", "PHOTO":
+			imgCount++
+		case "VIDEO":
+			vidCount++
+		case "LIVE_PHOTO", "LIVE":
+			liveCount++
+		default:
+			otherCount++
+		}
+		// by_hour：以 updated_at 近似 favorited_at 的 UTC 小时。
+		h := m.UpdatedAt.UTC().Hour()
+		if h < 0 || h >= 24 {
+			continue
+		}
+		c, _ := hours[h]["count"].(int64)
+		hours[h]["count"] = c + 1
+		// avg_age_days：updated_at 晚于 created_at 才计入（零值/未刷新跳过）。
+		if !m.UpdatedAt.IsZero() && m.UpdatedAt.After(m.CreatedAt) {
+			ageSum += m.UpdatedAt.Sub(m.CreatedAt).Hours() / 24
+			ageCount++
+		}
+	}
+
+	favoriteRate := 0.0
+	if totalMedia > 0 {
+		favoriteRate = round2(float64(totalFav) / float64(totalMedia) * 100)
+	}
+
+	var avgAgeDays any
+	if ageCount > 0 {
+		avgAgeDays = round2(ageSum / float64(ageCount))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_favorites": totalFav,
+		"total_media":     totalMedia,
+		"favorite_rate":   favoriteRate,
+		"by_type": map[string]any{
+			"IMAGE": imgCount,
+			"VIDEO": vidCount,
+			"LIVE":  liveCount,
+			"OTHER": otherCount,
+		},
+		"by_hour":      hours,
+		"avg_age_days": avgAgeDays,
 	})
 }
 
