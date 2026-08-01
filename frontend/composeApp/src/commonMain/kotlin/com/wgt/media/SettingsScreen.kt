@@ -1042,6 +1042,14 @@ fun SettingsScreen(
             DashboardOverviewV2Card()
             Spacer(modifier = Modifier.height(8.dp))
 
+            // V8：媒体库总健康卡片 —— 调 /api/media/media-collection-health 一次拿五维度综合评分。
+            // 独立 @Composable（自取数据），避免主函数体过大；放在仪表盘后、智能洞察前，
+            // 作为媒体库健康的综合总览（A绿/B蓝/C橙/D红 + 五维度迷你条 + 建议前3）。
+            CollectionHealthCard()
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(8.dp))
+
             // V23：智能洞察卡片 —— 调 /api/media/insights 显示自动分析建议（重复/存储/习惯/未标签/相册/健康度）。
             // 放在"存储健康度"前，作为首屏可操作洞察汇总；后端即将提供该端点（端点未上线时按空态提示）。
             var mediaInsights by remember { mutableStateOf<List<MediaService.Insight>?>(null) }
@@ -3936,5 +3944,168 @@ fun BulkExportFilterDialog(
         dismissButton = { TextButton(onClick = onCancel) { Text("取消") } }
     )
 }
+
+
+/**
+ * V8：媒体库总健康卡片 —— 调 [MediaService.getMediaCollectionHealth] 一次拿五维度综合评分。
+ *
+ * 后端 `/api/media/media-collection-health` 合并 health/integrity/efficiency/coverage/activity
+ * 五个维度的评分为综合 0-100 评分 + A/B/C/D 等级 + 汇总建议清单。本卡片是其前端展示：
+ *
+ * 渲染（与 [StorageEfficiencyCard] 同款风格，便于卡片视觉对齐）：
+ * - SectionTitle「媒体库总健康」
+ * - 大字号综合评分 + 等级徽章（A绿/B蓝/C橙/D红）
+ * - 五维度迷你条：健康/完整性/效率/覆盖/活跃（每条标签 + LinearProgressIndicator +分数）
+ * - 建议列表前三条（每条 📌 + 文本，超出显示“共 N 条建议”汇总）
+ *
+ * 字段缺失（HTTP 非 200 或网络异常 → null）时显示“无法获取媒体库健康”错误提示，不崩溃设置页。
+ * 独立顶级 @Composable，自取数据（[LaunchedEffect] 拉取一次），三态自洽。
+ */
+@Composable
+private fun CollectionHealthCard() {
+    var health by remember { mutableStateOf<MediaService.CollectionHealth?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        health = MediaService.getMediaCollectionHealth()
+        loading = false
+    }
+    SectionTitle("媒体库总健康", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (health == null) {
+        Text(
+            "无法获取媒体库健康",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val h = health!!
+        // 等级颜色：A 绿 / B 蓝 / C 橙 / D 红（默认灰），与 StorageEfficiencyCard 口径一致。
+        val gradeColor = when (h.grade.firstOrNull()?.uppercaseChar()) {
+            'A' -> Color(0xFF4CAF50)
+            'B' -> Color(0xFF2196F3)
+            'C' -> Color(0xFFFF9800)
+            'D' -> Color(0xFFF44336)
+            else -> MaterialTheme.colorScheme.outline
+        }
+        // 大字号综合评分 + 等级徽章
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${h.overallScore}",
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Bold,
+                color = gradeColor
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(gradeColor)
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    h.grade.ifEmpty { "-" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                "分 / 100",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        // 五维度迷你条：健康/完整性/效率/覆盖/活跃。
+        // 键名与后端 subscores 对齐（health/integrity/efficiency/coverage/activity）。
+        // 缺失键按 0 渲染（minOf 保护进度条 0~1 区间）。
+        val dims = listOf(
+            "health" to "健康",
+            "integrity" to "完整性",
+            "efficiency" to "效率",
+            "coverage" to "覆盖",
+            "activity" to "活跃"
+        )
+        dims.forEach { (key, label) ->
+            val score = h.subscores[key] ?: 0
+            val ratio = (score.coerceIn(0, 100)) / 100f
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.width(56.dp)
+                )
+                LinearProgressIndicator(
+                    progress = { ratio },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    color = gradeColorFor(score),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "$score",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    modifier = Modifier.width(28.dp),
+                    textAlign = TextAlign.End
+                )
+            }
+        }
+        // 建议列表前三条（每条 📌 + 文本），超出显示“共 N 条建议”汇总。
+        if (h.suggestions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            h.suggestions.take(3).forEach { tip ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text("📌", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        tip,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                    )
+                }
+            }
+            if (h.suggestions.size > 3) {
+                Text(
+                    "共 ${h.suggestions.size} 条建议",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                    modifier = Modifier.padding(start = 22.dp, top = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 按 0-100 评分映射迷你条颜色：≥80 绿 / ≥60 蓝 / ≥40 橙 / 否则红。
+ * 与等级徽章 A/B/C/D 配色同源，使维度条与综合徽章视觉一致。私有，仅供 [CollectionHealthCard] 复用。
+ */
+private fun gradeColorFor(score: Int): Color = when {
+    score >= 80 -> Color(0xFF4CAF50)
+    score >= 60 -> Color(0xFF2196F3)
+    score >= 40 -> Color(0xFFFF9800)
+    else -> Color(0xFFF44336)
+}
+
 
 

@@ -8742,4 +8742,67 @@ object MediaService {
             val todayCount: Int = 0
         )
     }
+
+    // ============ V8：媒体库总健康（collection-health）============
+
+    /**
+     * 媒体库综合健康报告（与后端 [handleMediaCollectionHealth] JSON 对齐）。
+     *
+     * 后端一次请求合并五个分析维度评分 → 综合 0-100 评分 + A/B/C/D 等级 + 汇总建议清单，
+     * 避免前端并发拉取 storage-health / media-storage-efficiency / media-integrity-report /
+     * media-coverage / user-activity-score 五个端点。
+     *
+     * @param overallScore 综合评分 0-100（五维度算术平均）
+     * @param grade 综合等级 "A"/"B"/"C"/"D"
+     * @param subscores 五维度子评分 0-100，键固定为
+     *                 health / integrity / efficiency / coverage / activity
+     * @param suggestions 汇总建议清单（各维度针对性提示）；空库时后端给一条占位建议
+     * @param totalSuggestions 建议总数（与 subscores 列表长度一致，前端可据此判断是否有建议）
+     */
+    data class CollectionHealth(
+        val overallScore: Int = 0,
+        val grade: String = "D",
+        val subscores: Map<String, Int> = emptyMap(),
+        val suggestions: List<String> = emptyList(),
+        val totalSuggestions: Int = 0
+    )
+
+    /**
+     * GET /api/media/media-collection-health — 媒体库综合健康报告。
+     *
+     * 后端返回 `{overall_score, grade, subscores:{health,integrity,efficiency,coverage,activity},
+     * suggestions:[...], total_suggestions, ...}`，前端仅消费上述五字段。
+     *
+     * 解析沿用运行时 [Json.parseToJsonElement]（feature-media 无 serialization 编译器插件，
+     * 与 [getYearlyReview] 同款）。HTTP 非 200 或网络异常返回 null，调用方按空态处理。
+     * 鉴权头由 defaultRequest 统一注入，此处不再重复附加。
+     *
+     * @return 综合健康报告；失败返回 null
+     */
+    suspend fun getMediaCollectionHealth(): CollectionHealth? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-collection-health")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val subs = o["subscores"]?.jsonObject?.mapValues { (_, v) ->
+                    v.jsonPrimitive.intOrNull ?: 0
+                } ?: emptyMap()
+                CollectionHealth(
+                    overallScore = o["overall_score"]?.jsonPrimitive?.intOrNull ?: 0,
+                    grade = o["grade"]?.jsonPrimitive?.contentOrNull ?: "D",
+                    subscores = subs,
+                    suggestions = o["suggestions"]?.jsonArray?.mapNotNull { el ->
+                        el.jsonPrimitive.contentOrNull
+                    } ?: emptyList(),
+                    totalSuggestions = o["total_suggestions"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaCollectionHealth status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaCollectionHealth FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 }
