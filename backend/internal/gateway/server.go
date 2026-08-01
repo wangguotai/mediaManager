@@ -225,6 +225,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-calendar-year", s.handleMediaCalendarYear)
 	// 按 24 小时分布统计上传习惯（created_at 的 UTC 小时，0-23 全槽位返回）。
 	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
+	// 按星期几分析上传习惯（created_at 的 UTC Weekday，周日→周六 7 槽位 + count/percentage + 最活跃日）。
+	s.mux.HandleFunc("/api/media/media-weekday-analysis", s.handleMediaWeekdayAnalysis)
 	// 媒体时间分析：拍摄时间(exif) vs 上传时间对比，按延迟分桶统计。
 	// 仅基于 taken_at 已知（≠0）的媒体；taken_at 为毫秒时间戳，created_at 为 UTC。
 	s.mux.HandleFunc("/api/media/media-time-analysis", s.handleMediaTimeAnalysis)
@@ -6195,6 +6197,96 @@ func (s *Server) handleMediaByHour(w http.ResponseWriter, r *http.Request) {
 		"hours": hours,
 		"total": total,
 	})
+}
+
+// handleMediaWeekdayAnalysis GET /api/media/media-weekday-analysis — 按星期几分析上传习惯。
+//
+// 对当前用户全部未软删媒体，按 created_at（上传时间）的 UTC 星期几分组
+// （Go time.Weekday: 0=周日, 1=周一 ... 6=周六），统计每个 weekday 的上传量与占比，
+// 并找出最活跃的 weekday。供前端渲染"一周中哪天最爱传图"的分布图。
+//
+// 响应结构：
+//
+//	{
+//	  "weekdays": [                  // 固定 7 项，按 周日→周一→...→周六 顺序
+//	    {"weekday":"周日","count":N,"percentage":12.34},
+//	    {"weekday":"周一","count":N,"percentage":12.34},
+//	    ...
+//	    {"weekday":"周六","count":N,"percentage":12.34}
+//	  ],
+//	  "most_active": {"weekday":"周一","count":N},  // 上传量最大的 weekday；total=0 时为 null
+//	  "total":        N                              // 参与分桶的未软删媒体总数
+//	}
+//
+// 7 个 weekday 槽全部返回（count=0 的也要返回，percentage=0）。
+// percentage 保留两位小数（四舍五入），单位为百分比（如 12.34 表示 12.34%）。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaWeekdayAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// Go time.Weekday: 0=Sunday ... 6=Saturday。按"周日→周六"顺序排列。
+	weekdayNames := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+	counts := make([]int64, 7)
+	var total int64
+	for _, m := range mediaList {
+		wd := int(m.CreatedAt.UTC().Weekday())
+		if wd < 0 || wd >= 7 { // 防御性：零值 time.Time 的 Weekday()=0（周日），不会越界
+			continue
+		}
+		counts[wd]++
+		total++
+	}
+
+	weekdays := make([]map[string]any, 0, 7)
+	mostIdx := -1
+	var mostCount int64
+	for i, name := range weekdayNames {
+		pct := 0.0
+		if total > 0 {
+			pct = math.Round(float64(counts[i])/float64(total)*10000) / 100 // 保留两位小数
+		}
+		weekdays = append(weekdays, map[string]any{
+			"weekday":    name,
+			"count":      counts[i],
+			"percentage": pct,
+		})
+		if counts[i] > mostCount {
+			mostCount = counts[i]
+			mostIdx = i
+		}
+	}
+
+	resp := map[string]any{
+		"weekdays": weekdays,
+		"total":    total,
+	}
+	if mostIdx >= 0 && mostCount > 0 {
+		resp["most_active"] = map[string]any{
+			"weekday": weekdayNames[mostIdx],
+			"count":   mostCount,
+		}
+	} else {
+		resp["most_active"] = nil // total=0 时无最活跃日
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleMediaTimeAnalysis GET /api/media/media-time-analysis — 拍摄时间 vs 上传时间延迟分析。
