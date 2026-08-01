@@ -478,6 +478,10 @@ func (s *Server) registerRoutes() {
 	// 上传日排行（最活跃的上传日期 top N）：按 created_at 的 UTC 日期分组，每天
 	// count+bytes，按 count 倒序取 top N（默认 10），附 total_days 与 top_day。
 	s.mux.HandleFunc("/api/media/media-upload-ranking", s.handleMediaUploadRanking)
+	// 上传模式深度分析：工作日 vs 周末 + 白天 vs 夜晚 + 批量日 vs 单张日 + 平均上传间隔分布，
+	// 输出主导模式（dominant_pattern）供前端一键展示用户上传习惯画像。
+	// 只读聚合端点，一次 ListMediaByUser 全量拉取后在 Go 侧分维度统计，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-upload-pattern", s.handleMediaUploadPattern)
 	// V8：磁盘使用情况
 	s.mux.HandleFunc("/api/media/disk-usage", s.handleDiskUsage)
 	// V8：按分辨率统计
@@ -20848,6 +20852,159 @@ func (s *Server) handleMediaStorageAudit(w http.ResponseWriter, r *http.Request)
 		"recommendations":   recommendations,
 		"total_recommendations": len(recommendations),
 		"user_id":           uid,
+	})
+}
+
+// handleMediaUploadPattern GET /api/media/media-upload-pattern — 上传模式深度分析。
+//
+// 对当前用户全部未软删媒体（基于 created_at 上传时间，UTC）做四维度上传习惯画像，
+// 供前端一键展示用户上传模式画像与主导模式（dominant_pattern），避免前端并发拉
+// media-weekday-analysis / media-by-hour / upload-calendar / media-upload-velocity
+// 再自己组合判断。
+//
+// 四个维度：
+//  1. 工作日 vs 周末：Go time.Weekday 中 Sunday=0、Saturday=6 为周末，Mon-Fri 为工作日。
+//  2. 白天 vs 夜晚：UTC 小时 [6,18) 为白天，[18,6)（即 h>=18 或 h<6）为夜晚。
+//  3. 批量日 vs 单张日：同一 UTC 日期上传 >=5 张算批量日（batch_day），<5 张为单张日（single_day）。
+//     仅统计有上传记录的天数；total_days = batch_days + single_days。
+//  4. 上传间隔分布：全部媒体按 created_at 升序，相邻两条的间隔小时数取平均（avg_interval_hours），
+//     保留两位小数；媒体 <2 条时为 0（无间隔可算）。
+//
+// 响应结构：
+//
+//	{
+//	  "weekday":         N,   // 工作日（Mon-Fri）上传条数
+//	  "weekend":         N,   // 周末（Sun/Sat）上传条数
+//	  "daytime":         N,   // 白天（6-18h）上传条数
+//	  "nighttime":       N,   // 夜晚（18-6h）上传条数
+//	  "batch_days":      N,   // 单日上传>=5 张的天数
+//	  "single_days":     N,   // 单日上传<5 张的天数
+//	  "total_days":      N,   // 有上传记录的总天数 = batch_days + single_days
+//	  "avg_interval_hours": 12.34,  // 相邻上传的平均间隔（小时）；媒体<2 条时为 0
+//	  "total_media":     N,   // 参与统计的未软删媒体总数
+//	  "dominant_pattern": "工作日·白天·批量上传"  // 主导模式描述串；total=0 时为 "无数据"
+//	}
+//
+// dominant_pattern 由前三维度各自取较大一侧拼接（工作日/周末 · 白天/夜晚 · 批量上传/单张上传）；
+// 单张日多于批量日时第三段为"单张上传"。日期口径与 media-upload-ranking /
+// media-upload-velocity 一致（UTC），避免时区错位。需认证，按 user_id 隔离；
+// store 未注入返回 503。
+func (s *Server) handleMediaUploadPattern(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 四维度计数器。weekday/weekend/daytime/nighttime 按 media 计；batch/single 按 day 计。
+	var weekdayCount, weekendCount int64
+	var daytimeCount, nighttimeCount int64
+	dayCounts := make(map[string]int64) // UTC 日期 → 当日上传条数
+
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		ct := m.CreatedAt.UTC()
+		// 维度1：工作日 vs 周末（Sunday=0, Saturday=6 为周末）。
+		wd := ct.Weekday()
+		if wd == time.Sunday || wd == time.Saturday {
+			weekendCount++
+		} else {
+			weekdayCount++
+		}
+		// 维度2：白天（6<=h<18）vs 夜晚（其余）。
+		h := ct.Hour()
+		if h >= 6 && h < 18 {
+			daytimeCount++
+		} else {
+			nighttimeCount++
+		}
+		// 维度3预统计：按 UTC 日期累计条数。
+		dayCounts[ct.Format("2006-01-02")]++
+	}
+
+	// 维度3：批量日（>=5）vs 单张日（<5）。仅统计有上传的天。
+	var batchDays, singleDays int64
+	for _, c := range dayCounts {
+		if c >= 5 {
+			batchDays++
+		} else {
+			singleDays++
+		}
+	}
+
+	// 维度4：平均上传间隔（小时）。需要按 created_at 升序排序后两两求差。
+	// 取未软删媒体到一个新切片，避免修改原切片。
+	type mediaAt struct {
+		createdAt time.Time
+	}
+	valid := make([]mediaAt, 0, len(mediaList))
+	var totalMedia int64
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		valid = append(valid, mediaAt{createdAt: m.CreatedAt})
+		totalMedia++
+	}
+	sort.SliceStable(valid, func(i, j int) bool { return valid[i].createdAt.Before(valid[j].createdAt) })
+
+	var avgIntervalHours float64
+	if len(valid) >= 2 {
+		var totalDelta float64
+		for i := 1; i < len(valid); i++ {
+			totalDelta += valid[i].createdAt.Sub(valid[i-1].createdAt).Hours()
+		}
+		avgIntervalHours = round2(totalDelta / float64(len(valid)-1))
+	}
+
+	// 主导模式：前三维度各自取较大一侧拼接。相等时取前者（工作日/白天/批量上传）。
+	pattern := "无数据"
+	if totalMedia > 0 {
+		// 维度1
+		s1 := "工作日"
+		if weekendCount > weekdayCount {
+			s1 = "周末"
+		}
+		// 维度2
+		s2 := "白天"
+		if nighttimeCount > daytimeCount {
+			s2 = "夜晚"
+		}
+		// 维度3：按天数判断（batch_days vs single_days）；相等取批量。
+		s3 := "批量上传"
+		if singleDays > batchDays {
+			s3 = "单张上传"
+		}
+		pattern = s1 + "·" + s2 + "·" + s3
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"weekday":           weekdayCount,
+		"weekend":           weekendCount,
+		"daytime":           daytimeCount,
+		"nighttime":         nighttimeCount,
+		"batch_days":        batchDays,
+		"single_days":       singleDays,
+		"total_days":        batchDays + singleDays,
+		"avg_interval_hours": avgIntervalHours,
+		"total_media":       totalMedia,
+		"dominant_pattern":  pattern,
 	})
 }
 
