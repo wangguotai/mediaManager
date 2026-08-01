@@ -2200,6 +2200,98 @@ private fun MyTabContent(
             }
         }
 
+        // 色温分布卡片（调 media-color-temperature，按拍摄时段推断暖/冷/自然三档分布）。
+        // 后端按 taken_at（缺失回退 created_at）的 UTC 小时分桶：18-22h→warm(暖)、
+        // 6-10h→cool(冷)、其他→natural(自然)；返回 distribution/total/dominant
+        //（total=0 时 dominant 为 null）。请求失败或 total=0 静默跳过，与大小百分位卡片同款。
+        var colorTemp by remember { mutableStateOf<MediaService.ColorTemperature?>(null) }
+        LaunchedEffect(Unit) { colorTemp = MediaService.getMediaColorTemperature() }
+        colorTemp?.let { ct ->
+            if (ct.total > 0) {
+                // 三档固定顺序 warm→cool→natural；emoji 与标签随任务要求逐字映射。
+                val rows = listOf(
+                    "warm" to "🔥 暖色调",
+                    "cool" to "❄️ 冷色调",
+                    "natural" to "🌿 自然光"
+                )
+                // 进度条按各档计数相对最大档归一化（coerceAtLeast(1) 避免除零）。
+                val maxCount = ct.distribution.values.max().coerceAtLeast(1)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("色温分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        rows.forEach { (key, label) ->
+                            val count = ct.distribution[key] ?: 0
+                            // 主调（dominant）高亮 primary + bold，其余 onSurfaceVariant。
+                            val isDominant = ct.dominant != null && key == ct.dominant
+                            val rowColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            val barColor = if (isDominant) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            val ratio = (count.toFloat() / maxCount).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(label, fontSize = 12.sp,
+                                    fontWeight = if (isDominant) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor)
+                                Text("$count 个 · ${formatPercent(count.toDouble() / ct.total * 100.0)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                            }
+                            // 比例条：主调档着色更深（与大小百分位卡片同款 Box 比例条）。
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(ratio)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(barColor)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：主调高亮 + 总数。
+                        val dominantLabel = ct.dominant?.let { d ->
+                            rows.firstOrNull { it.first == d }?.second ?: d
+                        }
+                        if (dominantLabel != null) {
+                            Text(
+                                "🏆 主调 $dominantLabel · 共 ${ct.total} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        } else {
+                            Text(
+                                "共 ${ct.total} 项",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                        Text(
+                            "按拍摄时段（taken_at / created_at UTC 小时）推断色温基调",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /

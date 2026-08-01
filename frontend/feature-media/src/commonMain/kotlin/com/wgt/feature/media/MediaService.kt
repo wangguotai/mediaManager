@@ -4371,6 +4371,58 @@ object MediaService {
     )
 
     /**
+     * GET /api/media/media-color-temperature — 媒体色温分布。
+     *
+     * 后端对当前用户全部未软删媒体按拍摄时段（taken_at 毫秒；缺失=0 时回退到
+     * created_at 上传时间）的 UTC 小时数推断色温基调，分三类：
+     *   - warm    （暖色调）  → 晚上 18-22h 拍摄，低色温光源（室内灯/日落）主导
+     *   - cool    （冷色调）  → 早上 6-10h 拍摄，高色温日光主导
+     *   - natural （自然光）  → 其他时段，日光/混合光难以判定
+     *
+     * 响应结构（与 [handleMediaColorTemperature] 对齐）：
+     *   `{distribution:{warm, cool, natural}, total, dominant}`
+     * - [distribution] 三类色温的计数（Int）。
+     * - [total] 参与分桶的未软删媒体总数。
+     * - [dominant] count 最大的类别（"warm"/"cool"/"natural"）；total=0 时后端返回
+     *   JSON null，前端 [dominant] 为 null。
+     *
+     * 失败（非 200 / 网络异常）返回 null，调用方按 null 静默跳过卡片渲染，
+     * 与 [getMediaSizePercentile] / [getMediaSeasonAnalysis] 同语义。
+     */
+    suspend fun getMediaColorTemperature(): ColorTemperature? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-color-temperature")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // distribution 嵌套对象 → 三个计数；缺失或字段非数时回退 0。
+                val dist = obj["distribution"]?.jsonObject
+                val warm = dist?.get("warm")?.jsonPrimitive?.intOrNull ?: 0
+                val cool = dist?.get("cool")?.jsonPrimitive?.intOrNull ?: 0
+                val natural = dist?.get("natural")?.jsonPrimitive?.intOrNull ?: 0
+                // dominant 为字符串或 JSON null（total=0 时）；takeIf 排除 JsonNull。
+                val dominant = obj["dominant"]?.takeIf { it !is JsonNull }?.let { el ->
+                    el.jsonPrimitive.contentOrNull
+                }
+                ColorTemperature(
+                    distribution = mapOf("warm" to warm, "cool" to cool, "natural" to natural),
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    dominant = dominant
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaColorTemperature FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** 媒体色温分布（暖/冷/自然三档计数 + 总数 + 主导色调）。 */
+    data class ColorTemperature(
+        val distribution: Map<String, Int>,
+        val total: Int,
+        val dominant: String?
+    )
+
+    /**
      * V21：GET /api/media/media-archive-status — 媒体归档状态（热/温/冷数据温度分布）。
      *
      * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：
