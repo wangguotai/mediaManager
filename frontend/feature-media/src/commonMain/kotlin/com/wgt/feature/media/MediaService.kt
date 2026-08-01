@@ -4784,6 +4784,78 @@ object MediaService {
     }
 
     /**
+     * GET /api/media/media-upload-ranking?limit=N — 上传日排行 top N。
+     *
+     * 后端按 created_at 的 UTC 日期分组，统计每日上传 count/bytes，按 count 倒序
+     * （并列按 date 升序）取 top N（默认 10，钳制 [1,100]）。响应（与
+     * [handleMediaUploadRanking] 对齐）：
+     *   `{ranking: [{rank, date, count, bytes}], total_days, top_day: {date, count}}`
+     *
+     * [ranking] 已按 count 降序带 rank（1-based）；[totalDays] 为有上传记录的总天数；
+     * [topDay] 为冠军日（无数据时 date="" count=0）。前端"上传排行"卡片取 top 5 渲染。
+     *
+     * @param limit 返回上限，默认 10，透传 query（?limit=N），后端钳制 [1,100]。
+     * @return 上传排行聚合，或 null（非 200/异常，调用方静默跳过卡片）。
+     */
+    suspend fun getMediaUploadRanking(limit: Int = 10): UploadRanking? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-upload-ranking") {
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val ranking = obj["ranking"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    RankItem(
+                        date = date,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        bytes = o["bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        rank = o["rank"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                val topDayObj = obj["top_day"]?.jsonObject
+                UploadRanking(
+                    ranking = ranking,
+                    totalDays = obj["total_days"]?.jsonPrimitive?.intOrNull ?: 0,
+                    topDay = TopDay(
+                        date = topDayObj?.get("date")?.jsonPrimitive?.contentOrNull ?: "",
+                        count = topDayObj?.get("count")?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                )
+            } else {
+                logger.info("MediaService", "getMediaUploadRanking status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaUploadRanking FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 上传日排行聚合：排行榜 + 总天数 + 冠军日。复用既有 [TopDay]（date+count，与年度 topDay 同构）。 */
+    data class UploadRanking(
+        val ranking: List<RankItem>,
+        val totalDays: Int,
+        val topDay: TopDay
+    )
+
+    /** 排行单项：日期 + 上传数 + 字节数 + 名次（1-based）。 */
+    data class RankItem(
+        val date: String,
+        val count: Int,
+        val bytes: Long,
+        val rank: Int
+    ) {
+        /** 字节数转 MB 字符串（一位小数，commonMain 无 String.format，沿用 take 截断）。 */
+        val bytesMB: String
+            get() {
+                val s = (bytes.toDouble() / (1024.0 * 1024.0)).toString()
+                return s.take(s.indexOf('.') + 2)
+            }
+    }
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：

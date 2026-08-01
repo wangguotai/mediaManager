@@ -2664,6 +2664,63 @@ private fun MyTabContent(
             }
         }
 
+        // 上传排行卡片（调 media-upload-ranking，显示 top 5 最忙上传日 + 奖牌 emoji）。
+        // 后端按 created_at 的 UTC 日期分组、count 倒序取 top N。此处取前 5 渲染：
+        // 🥇🥈🥉 前三名，4./5. 数字序号；每行 date · N 项 · X MB。列表空或请求失败时静默跳过
+        // 整张卡（与月度亮点等统计卡同款降级策略）。
+        var uploadRanking by remember { mutableStateOf<MediaService.UploadRanking?>(null) }
+        LaunchedEffect(Unit) { uploadRanking = MediaService.getMediaUploadRanking(limit = 10) }
+        uploadRanking?.let { ur ->
+            val rows = ur.ranking.take(5)
+            if (rows.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "上传排行",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        rows.forEach { item ->
+                            // 奖牌 emoji：rank 1/2/3 用 🥇🥈🥉，其余用"N."序号。
+                            val medal = when (item.rank) {
+                                1 -> "🥇"
+                                2 -> "🥈"
+                                3 -> "🥉"
+                                else -> "${item.rank}."
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text(medal, fontSize = 13.sp)
+                                Text(
+                                    "${item.date} · ${item.count} 项 · ${item.bytesMB} MB",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        // 总天数 footnote（冠军日已在 rank 1 展示，此处补总活跃天数）。
+                        if (ur.totalDays > 0) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "共 ${ur.totalDays} 天有上传记录",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
