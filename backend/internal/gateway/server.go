@@ -184,6 +184,10 @@ func (s *Server) registerRoutes() {
 	// 数据来源与 tag-trend 同口径：audit_log 中 action="tag" 的记录；按 detail
 	//（标签标识）+ 月份分组，输出每个标签的 monthly_counts / trend / total。
 	s.mux.HandleFunc("/api/media/media-tag-evolution", s.handleMediaTagEvolution)
+	// 标签使用频率分析（每个标签每月被操作的频率，反映标签活跃度）。
+	// 数据来源与 tag-trend / media-tag-evolution 同口径：audit_log 中 action="tag"
+	// 的记录；按 detail（标签标识）分组统计 total_uses / monthly_avg / last_used / trend。
+	s.mux.HandleFunc("/api/media/media-tag-usage-frequency", s.handleMediaTagUsageFrequency)
 	// V8：标签智能语义分组
 	s.mux.HandleFunc("/api/media/media-tag-smart-group", s.handleMediaTagSmartGroup)
 	// V7：重命名媒体文件
@@ -16059,6 +16063,166 @@ func (s *Server) handleMediaTagEvolution(w http.ResponseWriter, r *http.Request)
 			return out[i].Total > out[j].Total
 		}
 		return out[i].Tag < out[j].Tag
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":       out,
+		"total_tags": len(out),
+	})
+}
+
+// handleMediaTagUsageFrequency GET /api/media/media-tag-usage-frequency?months=6
+//
+// 标签使用频率分析：每个标签每月被操作的频率（次/月），反映标签活跃度。
+//
+// 数据来源：audit_log 中 action="tag" 的记录（与 tag-trend / media-tag-evolution /
+// weekly-summary 的 new_tags_count 同口径——语义为标签关联操作次数，每次给媒体
+// 打标签即写一条 action="tag" 的 audit log，detail 存标签标识）。ListAuditLogs
+// 无法按时间范围或 action 过滤，取较大 limit（5000）在内存中过滤 action=="tag"
+// 再按 detail（标签标识）+ UTC 月份分组。
+//
+// 月份窗口为 [本月往前推 months-1 个月 .. 本月]，含本月，共 months 个槽位，
+// 时间升序。仅落在窗口内的记录参与统计；窗口外的标签不出现。
+//
+// 每个标签输出：
+//   - tag_name:    标签标识（detail，空 detail 归为 "(default)"）
+//   - total_uses:  窗口内该标签全部操作次数之和
+//   - monthly_avg: 平均每月操作次数（total_uses / months，保留两位小数）
+//   - last_used:   窗口内最近一次操作的 RFC3339 时间（UTC）
+//   - trend:       "up" | "down" | "stable"（比较窗口最后一个月与第一个月的 count）
+//
+// 全程为 0 的标签不出现。响应按 total_uses 降序、并列按 tag_name 升序稳定排序。
+//
+// 响应:
+//
+//	{
+//	  tags: [
+//	    {tag_name, total_uses, monthly_avg, last_used, trend}, ...
+//	  ],
+//	  total_tags: N
+//	}
+//
+// 未登录 401；store 不可用 503；months<1 默认 6，>24 收敛到 24。GET only。
+func (s *Server) handleMediaTagUsageFrequency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	months := 6
+	if v := r.URL.Query().Get("months"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			months = n
+		}
+	}
+	if months < 1 {
+		months = 6
+	}
+	if months > 24 {
+		months = 24
+	}
+
+	// 取较大 limit 拉足够记录在内存按时间窗口过滤（ListAuditLogs 无法按时间范围查询）。
+	logs, err := s.store.ListAuditLogs(r.Context(), uid, 5000)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 月份窗口：[本月往前推 months-1 个月 .. 本月]，UTC，共 months 个槽位，升序。
+	now := time.Now().UTC()
+	thisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	startMonth := thisMonth.AddDate(0, -(months - 1), 0)
+	idxByMonth := make(map[string]int, months)
+	for i := 0; i < months; i++ {
+		ms := startMonth.AddDate(0, i, 0)
+		idxByMonth[ms.Format("2006-01")] = i
+	}
+
+	// 按 detail（标签标识）聚合月度计数 + 最近使用时间。
+	type tagAgg struct {
+		Counts   []int     // 长度 months，按月升序
+		Total    int       // 窗口内合计
+		LastUsed time.Time // 窗口内最近一次操作时间（UTC）
+	}
+	aggs := make(map[string]*tagAgg)
+
+	for _, a := range logs {
+		if a.Action != "tag" {
+			continue
+		}
+		ca := a.CreatedAt.UTC()
+		monthStart := time.Date(ca.Year(), ca.Month(), 1, 0, 0, 0, 0, time.UTC)
+		if monthStart.Before(startMonth) {
+			continue // 超出窗口
+		}
+		key := monthStart.Format("2006-01")
+		idx, ok := idxByMonth[key]
+		if !ok {
+			continue
+		}
+		tag := a.Detail
+		if tag == "" {
+			tag = "(default)"
+		}
+		agg, exists := aggs[tag]
+		if !exists {
+			agg = &tagAgg{Counts: make([]int, months)}
+			aggs[tag] = agg
+		}
+		agg.Counts[idx]++
+		agg.Total++
+		if ca.After(agg.LastUsed) {
+			agg.LastUsed = ca
+		}
+	}
+
+	// 构造响应：按 total_uses 降序，并列按 tag_name 升序，保证稳定排序。
+	type tagUsageFreq struct {
+		TagName    string `json:"tag_name"`
+		TotalUses  int    `json:"total_uses"`
+		MonthlyAvg string `json:"monthly_avg"`
+		LastUsed   string `json:"last_used"`
+		Trend      string `json:"trend"`
+	}
+
+	out := make([]tagUsageFreq, 0, len(aggs))
+	for tag, agg := range aggs {
+		first := agg.Counts[0]
+		last := agg.Counts[months-1]
+		trend := "stable"
+		if last > first {
+			trend = "up"
+		} else if last < first {
+			trend = "down"
+		}
+		// 月均：保留两位小数（strconv.FormatFloat f=-1 会省略尾零，显式 .2f 更稳定）。
+		monthlyAvg := strconv.FormatFloat(float64(agg.Total)/float64(months), 'f', 2, 64)
+		lastUsed := ""
+		if !agg.LastUsed.IsZero() {
+			lastUsed = agg.LastUsed.Format(time.RFC3339)
+		}
+		out = append(out, tagUsageFreq{
+			TagName:    tag,
+			TotalUses:  agg.Total,
+			MonthlyAvg: monthlyAvg,
+			LastUsed:   lastUsed,
+			Trend:      trend,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalUses != out[j].TotalUses {
+			return out[i].TotalUses > out[j].TotalUses
+		}
+		return out[i].TagName < out[j].TagName
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
