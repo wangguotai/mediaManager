@@ -179,6 +179,8 @@ func (s *Server) registerRoutes() {
 	// 数据来源与 tag-trend 同口径：audit_log 中 action="tag" 的记录；按 detail
 	//（标签标识）+ 月份分组，输出每个标签的 monthly_counts / trend / total。
 	s.mux.HandleFunc("/api/media/media-tag-evolution", s.handleMediaTagEvolution)
+	// V8：标签智能语义分组
+	s.mux.HandleFunc("/api/media/media-tag-smart-group", s.handleMediaTagSmartGroup)
 	// V7：重命名媒体文件
 	s.mux.HandleFunc("/api/media/rename", s.handleMediaRename)
 	// V8：批量重命名
@@ -10539,6 +10541,142 @@ func (s *Server) handleTagHierarchy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMediaTagSmartGroup V8：GET /api/media/media-tag-smart-group — 标签智能语义分组。
+// 自动将用户全部标签按预设语义映射归入若干组（旅行/美食/人物/风景/其他），
+// 如"旅行"/"旅游"/"trip"/"travel"→旅行组。每组统计该组标签数量 count 与关联媒体数
+// total_media（去重媒体）。未命中任何预设组的标签归入"其他组"。
+//
+// 返回 {groups: [{group_name, tags: [...], count, total_media}], total_groups, ungrouped_count}。
+// - groups：按预设顺序（旅行/美食/人物/风景/其他）输出，仅包含命中的组（其他组若
+//   有未归类标签才出现）；count 为该组内标签数，total_media 为该组所有标签关联的
+//   去重未软删 media 数。
+// - total_groups：实际有标签的组数（含其他组，若非空）。
+// - ungrouped_count：未归入任何预设语义组的标签数（即"其他组"内的标签数）。
+//
+// 实现存储口径与 handleMediaTagStatDetailed 一致：TagStats 取标签计数，
+// SearchMediaByTag 取每个标签关联 media_id，按组求并集去重得 total_media。
+func (s *Server) handleMediaTagSmartGroup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// tag→count 映射。TagStats 返回 []map{tag,count}（按 count DESC）。
+	stats, err := s.store.TagStats(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	countOf := make(map[string]int, len(stats))
+	for _, st := range stats {
+		name, _ := st["tag"].(string)
+		cnt, _ := st["count"].(int)
+		countOf[name] = cnt
+	}
+	// 预设语义分组：每组一组关键词（小写匹配）。标签命中任一关键词即归入该组。
+	// 关键词为语义簇的核心词，包含中英常见写法。
+	groupDefs := []struct {
+		name     string
+		keywords []string
+	}{
+		{"旅行组", []string{"旅行", "travel", "trip", "旅游", "出游"}},
+		{"美食组", []string{"美食", "food", "餐", "吃"}},
+		{"人物组", []string{"人物", "people", "人", "宝宝", "孩子"}},
+		{"风景组", []string{"风景", "scenery", "自然", "山水"}},
+	}
+	// matchGroup 返回标签所属组名，未命中返回 ""。
+	// 匹配规则：标签（小写）包含任一关键词即命中。子串匹配以覆盖"旅行-国内"等复合标签。
+	matchGroup := func(tag string) string {
+		lt := strings.ToLower(tag)
+		for _, g := range groupDefs {
+			for _, kw := range g.keywords {
+				if strings.Contains(lt, strings.ToLower(kw)) {
+					return g.name
+				}
+			}
+		}
+		return ""
+	}
+	// 按组聚合标签 + 计算每组关联去重 media 数。
+	type groupResult struct {
+		GroupName  string   `json:"group_name"`
+		Tags       []string `json:"tags"`
+		Count      int      `json:"count"`
+		TotalMedia int      `json:"total_media"`
+	}
+	groupTags := make(map[string][]string, len(groupDefs)+1)
+	groupMedia := make(map[string]map[string]struct{}, len(groupDefs)+1)
+	groupOrder := make([]string, 0, len(groupDefs)+1)
+	for _, g := range groupDefs {
+		groupOrder = append(groupOrder, g.name)
+	}
+	groupOrder = append(groupOrder, "其他组")
+	for _, g := range groupOrder {
+		groupMedia[g] = make(map[string]struct{})
+	}
+	for _, t := range tags {
+		gn := matchGroup(t)
+		if gn == "" {
+			gn = "其他组"
+		}
+		groupTags[gn] = append(groupTags[gn], t)
+		// 取该标签关联 media_id 累加到组级去重集合。
+		ids, err := s.store.SearchMediaByTag(r.Context(), uid, t)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		for _, id := range ids {
+			groupMedia[gn][id] = struct{}{}
+		}
+	}
+	groups := make([]groupResult, 0, len(groupOrder))
+	totalGroups := 0
+	ungroupedCount := 0
+	for _, gn := range groupOrder {
+		ts := groupTags[gn]
+		// 预设四组仅在有标签时输出；其他组始终输出（即使空也保留，便于前端稳定渲染）。
+		if len(ts) == 0 && gn != "其他组" {
+			continue
+		}
+		if len(ts) == 0 {
+			// 其他组无标签时跳过，避免输出空组。
+			continue
+		}
+		totalGroups++
+		if gn == "其他组" {
+			ungroupedCount = len(ts)
+		}
+		if ts == nil {
+			ts = []string{}
+		}
+		groups = append(groups, groupResult{
+			GroupName:  gn,
+			Tags:       ts,
+			Count:      len(ts),
+			TotalMedia: len(groupMedia[gn]),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"groups":          groups,
+		"total_groups":    totalGroups,
+		"ungrouped_count": ungroupedCount,
+	})
+}
+
 // handleMediaTagRename V8：POST /api/media/tag/rename — 重命名标签。
 // 请求体: { old_name, new_name }
 func (s *Server) handleMediaTagRename(w http.ResponseWriter, r *http.Request) {
@@ -20211,5 +20349,77 @@ func (s *Server) handleMediaCollectionHealth(w http.ResponseWriter, r *http.Requ
 			"disk_check":          diskCheck,
 		},
 		"user_id": uid,
+	})
+}
+
+// handleMediaTagSmartGroup V8：GET /api/media/media-tag-smart-group — 标签智能语义分组。
+func (s *Server) handleMediaTagSmartGroup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	tags, err := s.store.ListAllTags(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	groups := map[string][]string{
+		"旅行": {"旅行", "travel", "trip", "旅游", "出游", "vacation", "journey"},
+		"美食": {"美食", "food", "餐", "吃", "restaurant", "dinner", "lunch"},
+		"人物": {"人物", "people", "人", "宝宝", "孩子", "baby", "family", "朋友", "portrait"},
+		"风景": {"风景", "scenery", "自然", "山水", "nature", "landscape", "sunset", "sky"},
+		"活动": {"活动", "event", "聚会", "party", "birthday", "wedding", "holiday", "festival"},
+	}
+	tagToGroup := make(map[string]string)
+	for group, keywords := range groups {
+		for _, kw := range keywords {
+			tagToGroup[strings.ToLower(kw)] = group
+		}
+	}
+	result := make(map[string][]string)
+	ungrouped := []string{}
+	for _, t := range tags {
+		tagLower := strings.ToLower(t)
+		matched := false
+		for kw, grp := range tagToGroup {
+			if strings.Contains(tagLower, kw) {
+				result[grp] = append(result[grp], t)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			ungrouped = append(ungrouped, t)
+		}
+	}
+	out := make([]map[string]any, 0, len(result)+1)
+	for grp, grpTags := range result {
+		out = append(out, map[string]any{
+			"group_name": grp,
+			"tags":       grpTags,
+			"total_tags": len(grpTags),
+		})
+	}
+	if len(ungrouped) > 0 {
+		out = append(out, map[string]any{
+			"group_name": "其他",
+			"tags":       ungrouped,
+			"total_tags": len(ungrouped),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"groups":          out,
+		"total_groups":    len(out),
+		"ungrouped_count": len(ungrouped),
+		"total_tags":      len(tags),
 	})
 }
