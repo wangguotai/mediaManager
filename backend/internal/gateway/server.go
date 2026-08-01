@@ -250,6 +250,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/quick-stats", s.handleMediaQuickStats)
 	// 媒体覆盖率报告：已标记标签/已收藏/已分享/在相册中的媒体占比，供前端展示媒体整理完成度。
 	s.mux.HandleFunc("/api/media/media-coverage", s.handleMediaCoverage)
+	// 媒体内容多样性评分：类型/MIME/时段/标签四维度 Shannon 熵归一化后综合（0-1）+ A/B/C/D 等级。
+	// 用于排查媒体库单一性，供前端"多样性指数"卡片一次加载。
+	s.mux.HandleFunc("/api/media/media-content-diversity", s.handleMediaContentDiversity)
 	// 媒体量报告：总量+总字节+本月增量+上月增量+环比增长率+日均上传统量+年底预测量。
 	// 与 growth-report 区别：growth-report 返周/月/年三档对比快照；本端点聚焦"全年汇总"
 	// （总量+趋势+预测），供前端"媒体量报告"卡片一次加载。
@@ -4278,6 +4281,163 @@ func (s *Server) handleMediaCoverage(w http.ResponseWriter, r *http.Request) {
 		"shared":    coverage{Count: sharedCount, Percent: pct(sharedCount)},
 		"in_album":  coverage{Count: inAlbumCount, Percent: pct(inAlbumCount)},
 		"untagged":  coverage{Count: untaggedCount, Percent: pct(untaggedCount)},
+	})
+}
+
+// handleMediaContentDiversity GET /api/media/media-content-diversity — 媒体内容多样性评分。
+// 对当前用户未软删媒体库，按四维度计算 Shannon 熵并归一化为 0-1 多样性指数：
+//   - type_entropy：IMAGE / VIDEO / LIVE_PHOTO 分布的熵
+//   - mime_entropy：各 MIME 类型分布的熵（如 image/jpeg、video/mp4）
+//   - hour_entropy：按 created_at 所在小时（0-23）分布的熵
+//   - tag_entropy：各标签关联媒体数分布的熵（来自 TagStats，贡献维度而非零向量）
+//
+// 综合多样性 = average(各维度归一化熵)，归一化 = entropy / ln(k)（k 为该维度类别数），
+// 单一类别时熵为 0、归一化为 0；所有类别均匀时归一化为 1。
+// 等级：A(>=0.8) / B(>=0.6) / C(>=0.4) / D(<0.4)；total=0 时 score=0 grade=D 各维度 0。
+//
+// 数据源：一次 ListMediaByUser 全量拉取 + 单次 TagStats，只读端点，无副作用。
+func (s *Server) handleMediaContentDiversity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 跳过软删行（ListMediaByUser 已过滤 deleted，再次防御式跳过）。
+	var live []*storage.Media
+	for _, m := range mediaList {
+		if !m.Deleted {
+			live = append(live, m)
+		}
+	}
+	total := len(live)
+
+	// shannon / ln(k) 归一化熵：counts 为各类别计数，countEmpty=true 表示无媒体时该维度判 0 多样性。
+	typeDiv := func(counts map[string]int) float64 {
+		if len(counts) <= 1 {
+			return 0
+		}
+		n := 0
+		for _, c := range counts {
+			n += c
+		}
+		if n == 0 {
+			return 0
+		}
+		var h float64
+		for _, c := range counts {
+			if c <= 0 {
+				continue
+			}
+			p := float64(c) / float64(n)
+			h -= p * math.Log(p)
+		}
+		return h / math.Log(float64(len(counts)))
+	}
+
+	typeCounts := make(map[string]int)
+	mimeCounts := make(map[string]int)
+	hourCounts := make(map[string]int, 24)
+	for _, m := range live {
+		typeCounts[m.Type]++
+		if m.Mime != "" {
+			mimeCounts[m.Mime]++
+		}
+		hourCounts[strconv.Itoa(m.CreatedAt.Hour())]++
+	}
+
+	// tag 分布：用 TagStats 直接拿到 (tag,count)，避免逐标签 SearchMediaByTag 的 N 次查询。
+	tagCounts := make(map[string]int)
+	if total > 0 {
+		if stats, serr := s.store.TagStats(r.Context(), uid); serr == nil {
+			for _, st := range stats {
+				name, _ := st["tag"].(string)
+				cnt, _ := st["count"].(int)
+				tagCounts[name] = cnt
+			}
+		}
+	}
+
+	typeEnt := typeDiv(typeCounts)
+	mimeEnt := typeDiv(mimeCounts)
+	hourEnt := typeDiv(hourCounts)
+	tagEnt := typeDiv(tagCounts)
+
+	var score float64
+	{
+		dims := 0
+		sum := 0.0
+		for _, e := range []float64{typeEnt, mimeEnt, hourEnt, tagEnt} {
+			sum += e
+			dims++
+		}
+		if dims > 0 {
+			score = sum / float64(dims)
+		}
+	}
+	score = round2(score)
+
+	grade := "D"
+	switch {
+	case score >= 0.8:
+		grade = "A"
+	case score >= 0.6:
+		grade = "B"
+	case score >= 0.4:
+		grade = "C"
+	}
+	if total == 0 {
+		grade = "D"
+	}
+
+	counter := func(c map[string]int) map[string]int {
+		out := make(map[string]int, len(c))
+		for k, v := range c {
+			out[k] = v
+		}
+		return out
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"diversity_score": score,
+		"grade":           grade,
+		"total":           total,
+		"breakdown": map[string]any{
+			"type": map[string]any{
+				"entropy":     round2(typeEnt),
+				"categories":  len(typeCounts),
+				"distribution": counter(typeCounts),
+			},
+			"mime": map[string]any{
+				"entropy":     round2(mimeEnt),
+				"categories":  len(mimeCounts),
+				"distribution": counter(mimeCounts),
+			},
+			"hour": map[string]any{
+				"entropy":     round2(hourEnt),
+				"categories":  len(hourCounts),
+				"distribution": counter(hourCounts),
+			},
+			"tag": map[string]any{
+				"entropy":     round2(tagEnt),
+				"categories":  len(tagCounts),
+				"distribution": counter(tagCounts),
+			},
+		},
 	})
 }
 
