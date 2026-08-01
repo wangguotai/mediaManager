@@ -493,6 +493,10 @@ func (s *Server) registerRoutes() {
 	// 与 share-analytics（只返聚合数字）互补：本端点返每条即将过期分享的 token/
 	// expires_at/days_left/media_id，供前端"即将过期"提醒列表渲染并引导用户续期。
 	s.mux.HandleFunc("/api/media/share-expiring", s.handleShareExpiring)
+	// 分享活动统计：按天聚合分享创建趋势（最近 N 天，默认 30），并汇总活跃/过期数与
+	// 整体趋势方向（up/down/stable）。只读端点，与 share-analytics（汇总数字）互补——
+	// 本端点聚焦时序趋势，供前端"分享活动"折线图渲染。
+	s.mux.HandleFunc("/api/media/media-share-activity", s.handleMediaShareActivity)
 	// V8：按文件名自动打标签
 	s.mux.HandleFunc("/api/media/auto-tag", s.handleMediaAutoTag)
 	// V8：审计日志——列表/统计/记录
@@ -11889,6 +11893,140 @@ func (s *Server) handleShareExpiring(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"expiring": items,
 		"total":    len(items),
+	})
+}
+
+// handleMediaShareActivity GET /api/media/media-share-activity — 分享活动统计。
+//
+// 聚合当前用户所有分享链接的创建时序，供前端"分享活动"折线图渲染：
+//   - activity      : 最近 N 天（默认 30，可经 ?days= 调整，钳制 [1, 365]）每天
+//                     新建的分享数，按日期升序；窗口内无创建的日期 count=0。
+//   - total_shares  : 分享链接总数。
+//   - active_shares : 未过期的分享数（含永不过期 + 过期时间晚于 now）。
+//   - expired_shares: 已过期的分享数（过期时间早于 now，永不过期不计入）。
+//   - trend         : "up" | "down" | "stable"。后半窗口日均创建数对比前半窗口：
+//     * 后 > 前 10%  → up
+//     * 后 < 前 10%  → down
+//     * 其余（含前后均 0、单日窗口）→ stable
+//
+// 数据来源：store.ListShareTokensByUser。ExpiresAt 零值表示永不过期（计为 active，
+// 不计为 expired）。窗口按 CreatedAt 的 UTC 日期分桶；落在窗口之外的较早分享仍计入
+// total_shares/active_shares/expired_shares 汇总，但不进入 activity 序列。查询/扫描
+// 失败回 500。鉴权：/api/media/ 前缀由 authMiddleware 自动注入 user_id。
+func (s *Server) handleMediaShareActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// 窗口天数：默认 30，钳制 [1, 365]。
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil {
+			if n < 1 {
+				n = 1
+			} else if n > 365 {
+				n = 365
+			}
+			days = n
+		}
+	}
+
+	tokens, err := s.store.ListShareTokensByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 时间窗口：[today-(days-1), today]（含今天，共 days 个槽位，UTC 日期升序）。
+	now := time.Now().UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	windowStart := todayStart.AddDate(0, 0, -(days - 1))
+
+	type activityEntry struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	activity := make([]activityEntry, 0, days)
+	for i := 0; i < days; i++ {
+		ds := windowStart.AddDate(0, 0, i)
+		activity = append(activity, activityEntry{Date: ds.Format("2006-01-02"), Count: 0})
+	}
+	// activity[i] 对应 [windowStart+i, windowStart+i+1)。
+
+	total := len(tokens)
+	active := 0
+	expired := 0
+	for _, st := range tokens {
+		// 过期统计（口径与 share-analytics 一致）。
+		if st.ExpiresAt.IsZero() {
+			active++
+		} else if !st.ExpiresAt.UTC().Before(now) {
+			active++
+		} else {
+			expired++
+		}
+
+		// 创建趋势：按 UTC 日期分桶，仅计入窗口内。
+		if st.CreatedAt.IsZero() {
+			continue
+		}
+		c := st.CreatedAt.UTC()
+		ds := time.Date(c.Year(), c.Month(), c.Day(), 0, 0, 0, 0, time.UTC)
+		if ds.Before(windowStart) {
+			continue
+		}
+		idx := int(ds.Sub(windowStart).Hours() / 24)
+		if idx < 0 || idx >= len(activity) {
+			continue
+		}
+		activity[idx].Count++
+	}
+
+	// 趋势方向：后半窗口日均 vs 前半窗口日均。
+	trend := "stable"
+	if days >= 2 {
+		half := days / 2
+		var firstSum, secondSum int
+		for i := 0; i < half && i < len(activity); i++ {
+			firstSum += activity[i].Count
+		}
+		for i := half; i < len(activity); i++ {
+			secondSum += activity[i].Count
+		}
+		// 日均避免除零（half>=1 保证分母>0；后段长度 days-half>0 因 days>=2）。
+		firstAvg := float64(firstSum) / float64(half)
+		secondLen := days - half
+		secondAvg := float64(secondSum) / float64(secondLen)
+		if firstAvg > 0 {
+			ratio := (secondAvg - firstAvg) / firstAvg
+			if ratio > 0.1 {
+				trend = "up"
+			} else if ratio < -0.1 {
+				trend = "down"
+			}
+		} else if secondSum > 0 {
+			// 前半全零、后半有创建 → 视为上升。
+			trend = "up"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity":       activity,
+		"total_shares":   total,
+		"active_shares":  active,
+		"expired_shares": expired,
+		"trend":          trend,
+		"days":           days,
 	})
 }
 
