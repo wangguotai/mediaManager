@@ -227,6 +227,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-by-hour", s.handleMediaByHour)
 	// 按星期几分析上传习惯（created_at 的 UTC Weekday，周日→周六 7 槽位 + count/percentage + 最活跃日）。
 	s.mux.HandleFunc("/api/media/media-weekday-analysis", s.handleMediaWeekdayAnalysis)
+	// 按季节分析上传统计：created_at 的月份分到春(3-5)/夏(6-8)/秋(9-11)/冬(12-2)，
+	// 每季 count+bytes+percentage，并给 most_active_season。供前端渲染季节分布。
+	s.mux.HandleFunc("/api/media/media-season-analysis", s.handleMediaSeasonAnalysis)
 	// 媒体时间分析：拍摄时间(exif) vs 上传时间对比，按延迟分桶统计。
 	// 仅基于 taken_at 已知（≠0）的媒体；taken_at 为毫秒时间戳，created_at 为 UTC。
 	s.mux.HandleFunc("/api/media/media-time-analysis", s.handleMediaTimeAnalysis)
@@ -6313,6 +6316,115 @@ func (s *Server) handleMediaWeekdayAnalysis(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleMediaSeasonAnalysis GET /api/media/media-season-analysis — 按季节分析上传统计。
+//
+// 对当前用户全部未软删媒体，按 created_at（上传时间，基于拍摄月份语义）的 UTC 月份
+// 分到四季：
+//
+//	春(3-5月), 夏(6-8月), 秋(9-11月), 冬(12-2月)
+//
+// 统计每季节 count + bytes + percentage，并给出 most_active_season（按 count 取最大）。
+// 供前端渲染"一年四季哪季最爱上传"的分布图。
+//
+// 响应结构：
+//
+//	{
+//	  "seasons": [                         // 固定 4 项，按 春→夏→秋→冬 顺序
+//	    {"season":"春","count":N,"bytes":B,"percentage":12.34},
+//	    ...
+//	  ],
+//	  "total": N,                          // 参与分桶的未软删媒体总数
+//	  "most_active_season": "夏"           // count 最大的季节；total=0 时为 null
+//	}
+//
+// 4 个季节槽全部返回（count=0 也要返回，percentage=0，bytes=0）。
+// percentage 保留两位小数（四舍五入），单位为百分比（如 12.34 表示 12.34%）。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+func (s *Server) handleMediaSeasonAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 季节桶：0=春(3-5),1=夏(6-8),2=秋(9-11),3=冬(12-2)。
+	seasonNames := []string{"春", "夏", "秋", "冬"}
+	counts := make([]int64, 4)
+	byteSums := make([]int64, 4)
+	var total int64
+	for _, m := range mediaList {
+		month := int(m.CreatedAt.UTC().Month()) // 1..12
+		idx := seasonIndex(month)
+		if idx < 0 || idx >= 4 { // 防御性：零值 time.Time 的 Month()=1（一月）→ 冬，不会越界
+			continue
+		}
+		counts[idx]++
+		byteSums[idx] += m.Size
+		total++
+	}
+
+	seasons := make([]map[string]any, 0, 4)
+	mostIdx := -1
+	var mostCount int64
+	for i, name := range seasonNames {
+		pct := 0.0
+		if total > 0 {
+			pct = math.Round(float64(counts[i])/float64(total)*10000) / 100 // 保留两位小数
+		}
+		seasons = append(seasons, map[string]any{
+			"season":     name,
+			"count":      counts[i],
+			"bytes":      byteSums[i],
+			"percentage": pct,
+		})
+		if counts[i] > mostCount {
+			mostCount = counts[i]
+			mostIdx = i
+		}
+	}
+
+	resp := map[string]any{
+		"seasons": seasons,
+		"total":   total,
+	}
+	if mostIdx >= 0 && mostCount > 0 {
+		resp["most_active_season"] = seasonNames[mostIdx]
+	} else {
+		resp["most_active_season"] = nil // total=0 时无最活跃季节
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// seasonIndex 把 1..12 的月份映射到季节桶下标：0=春(3-5),1=夏(6-8),2=秋(9-11),3=冬(12,1,2)。
+// 越界返回 -1（正常月份恒为 0..3，仅防御非法输入）。
+func seasonIndex(month int) int {
+	switch {
+	case month >= 3 && month <= 5:
+		return 0 // 春
+	case month >= 6 && month <= 8:
+		return 1 // 夏
+	case month >= 9 && month <= 11:
+		return 2 // 秋
+	case month == 12 || month == 1 || month == 2:
+		return 3 // 冬
+	}
+	return -1
 }
 
 // handleMediaTimeAnalysis GET /api/media/media-time-analysis — 拍摄时间 vs 上传时间延迟分析。
