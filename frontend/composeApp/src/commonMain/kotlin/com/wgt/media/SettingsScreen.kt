@@ -2300,6 +2300,10 @@ fun SettingsScreen(
             // 展示最近媒体重命名记录，每行 ✏️ old → new (date)，最多 10 条。
             // 独立 [RenameHistoryCard] @Composable，自取数据，见文件末尾定义。
             RenameHistoryCard()
+            // 分享历史卡片（GET /api/media/media-share-history?limit=50）
+            // 展示最近媒体分享记录，每行 🔗 detail (date)，最多 10 条。
+            // 独立 [ShareHistoryCard] @Composable，自取数据，见文件末尾定义。
+            ShareHistoryCard()
             // 上传延迟分析卡片（GET /api/media/media-time-analysis）—— 拍摄→上传延迟分布。
             // 抽成独立 [UploadDelayCard] @Composable，避免主函数体过大（见文件末尾定义）。
             UploadDelayCard()
@@ -4784,6 +4788,94 @@ private fun RenameHistoryCard() {
                     )
                     // renamedAt 形如 "2026-07-31T12:34:56Z"，取前 10 字符作日期
                     val dateStr = entry.renamedAt.take(10)
+                    Text(
+                        if (dateStr.isNotEmpty()) "($dateStr)" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        maxLines = 1
+                    )
+                }
+            }
+            // 还有更多记录时提示总数
+            if (items.size > 10) {
+                Text(
+                    "共 ${items.size} 条记录",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
+                )
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+
+/**
+ * 分享历史卡片 —— 调 [MediaService.getMediaShareHistory] 展示最近媒体分享记录。
+ *
+ * 每行：🔗 detail (date)。最多渲染 10 条（后端默认返回 50 条，前端 take(10)）。
+ * 四态自洽（loading / null-错误 / 空列表 / data）。独立顶级 @Composable，自取数据
+ * （[LaunchedEffect] 拉取一次），与 [RenameHistoryCard] / [StorageAuditCard] 同款结构，
+ * 避免主函数体过大（method size limit）。
+ *
+ * [sharedAt] 为后端 RFC3339 字符串；此处取前 10 字符（"2026-07-31"）作日期展示，
+ * 解析失败或空串时回退原值，保证宽容。
+ */
+@Composable
+private fun ShareHistoryCard() {
+    var history by remember { mutableStateOf<List<MediaService.ShareHistoryItem>?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        history = MediaService.getMediaShareHistory(50)
+        loading = false
+    }
+    SectionTitle("🔗 分享历史", iconRes = Res.drawable.ic_info)
+    if (loading) {
+        Text(
+            "加载中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (history == null) {
+        Text(
+            "无法获取分享历史",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val items = history!!
+        if (items.isEmpty()) {
+            Text(
+                "暂无分享记录",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+            )
+        } else {
+            items.take(10).forEach { entry ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("🔗", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        entry.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // sharedAt 形如 "2026-07-31T12:34:56Z"，取前 10 字符作日期
+                    val dateStr = entry.sharedAt.take(10)
                     Text(
                         if (dateStr.isNotEmpty()) "($dateStr)" else "",
                         style = MaterialTheme.typography.bodySmall,
