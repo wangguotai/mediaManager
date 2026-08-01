@@ -407,6 +407,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/extreme-media", s.handleMediaExtremeMedia)
 	// V8：按 MIME 类型统计
 	s.mux.HandleFunc("/api/media/file-types", s.handleMediaFileTypes)
+	// 文件名模式分析：按文件名前缀分组（IMG_/VID_/Screenshot 等），统计 count/percentage/example。
+	s.mux.HandleFunc("/api/media/media-filename-pattern", s.handleMediaFilenamePattern)
 	// 按 MIME 类型详细统计（比 file-types 更细粒度：每种 MIME 的 count/total_bytes/avg_bytes/最早+最晚上传时间）。
 	s.mux.HandleFunc("/api/media/mime-type-stats", s.handleMimeTypeStats)
 	// V8：孤立文件检查（DB 有记录但磁盘文件缺失）
@@ -9321,6 +9323,97 @@ func (s *Server) handleMediaFileTypes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"types": stats,
 		"total": len(stats),
+	})
+}
+
+// handleMediaFilenamePattern GET /api/media/media-filename-pattern — 文件名模式分析。
+// 按文件名前缀分组（取前 4 字符或首个分隔符 _/-/空格/点 之前的部分作为前缀），
+// 统计每种前缀的 count / percentage / example，返回 {patterns:[...], total}。
+// 仅统计未软删（deleted=0）记录。patterns 按 count 倒序。
+func (s *Server) handleMediaFilenamePattern(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage not configured"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type patternStat struct {
+		Prefix     string  `json:"prefix"`
+		Count      int     `json:"count"`
+		Percentage float64 `json:"percentage"`
+		Example    string  `json:"example"`
+	}
+
+	// filenamePrefix 提取文件名前缀：取首个分隔符（_ - 空格 .）之前部分；
+	// 无分隔符则取前 4 字符；空文件名归为 "unknown"。
+	filenamePrefix := func(name string) string {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return "unknown"
+		}
+		// 去掉可能的前导路径（取 basename，防御性处理）。
+		if i := strings.LastIndexAny(name, "/\\"); i >= 0 {
+			name = name[i+1:]
+		}
+		idx := strings.IndexAny(name, "_-. ")
+		if idx > 0 {
+			return name[:idx]
+		}
+		// 无分隔符：取前 4 个字节（ASCII 友好；对多字节 UTF-8 取前 4 rune 更安全）。
+		rs := []rune(name)
+		if len(rs) <= 4 {
+			return name
+		}
+		return string(rs[:4])
+	}
+
+	byPrefix := make(map[string]*patternStat)
+	total := 0
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		total++
+		prefix := filenamePrefix(m.Filename)
+		st, ok := byPrefix[prefix]
+		if !ok {
+			st = &patternStat{Prefix: prefix, Example: m.Filename}
+			byPrefix[prefix] = st
+		}
+		st.Count++
+	}
+
+	stats := make([]patternStat, 0, len(byPrefix))
+	for _, v := range byPrefix {
+		if total > 0 {
+			v.Percentage = math.Round(float64(v.Count)/float64(total)*1000) / 10
+		}
+		stats = append(stats, *v)
+	}
+	// 按 count 倒序，count 相同按 prefix 升序保证输出稳定。
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Count != stats[j].Count {
+			return stats[i].Count > stats[j].Count
+		}
+		return stats[i].Prefix < stats[j].Prefix
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"patterns": stats,
+		"total":    total,
 	})
 }
 
