@@ -2721,6 +2721,78 @@ private fun MyTabContent(
             }
         }
 
+        // 年度对比卡片（调 media-yearly-comparison，今年 vs 去年同期 + 增长率）。
+        // 后端对 created_at 的 UTC 年份分两组聚合：今年 count/bytes/by_type +
+        // 去年同口径，增长率 = (今年-去年)/去年*100（去年同期为 0 返回 null → NaN，
+        // 不显示箭头）。今年/去年均为 0 时视为"无数据"跳过整张卡。
+        // 增长率展示沿用 GrowthReportRow / 媒体量报告的 ↑/↓ + 绿红口径。
+        var yearlyComparison by remember { mutableStateOf<MediaService.YearlyComparison?>(null) }
+        LaunchedEffect(Unit) { yearlyComparison = MediaService.getMediaYearlyComparison() }
+        yearlyComparison?.let { yc ->
+            // 今年+去年都为 0 → 无年度数据，静默跳过卡片。
+            if (yc.thisYear.count > 0 || yc.lastYear.count > 0) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "年度对比",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // 今年：N 项 · X MB
+                        Text(
+                            "今年 ${yc.thisYear.count} 项 · ${formatBytesToMB(yc.thisYear.bytes)}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // 去年：N 项 · X MB
+                        Text(
+                            "去年 ${yc.lastYear.count} 项 · ${formatBytesToMB(yc.lastYear.bytes)}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 增长：↑/↓ X% 项 · ↑/↓ X% MB（去年同期为 0 → NaN → 该维度不显箭头，显"—"占位）
+                        if (!yc.growth.countPct.isNaN() || !yc.growth.bytesPct.isNaN()) {
+                            Text(
+                                buildAnnotatedString {
+                                    append("增长  ")
+                                    // 项数增长
+                                    if (yc.growth.countPct.isNaN()) {
+                                        withStyle(SpanStyle(color = Color(0xFF9E9E9E))) { append("— 项") }
+                                    } else {
+                                        val isUp = yc.growth.countPct >= 0
+                                        val raw = yc.growth.countPct.toString()
+                                        val pct1 = if (raw.indexOf('.') >= 0) raw.take(raw.indexOf('.') + 2) else raw
+                                        withStyle(SpanStyle(color = if (isUp) Color(0xFF2E7D32) else Color(0xFFC62828))) {
+                                            append("${if (isUp) "↑+" else "↓"}${pct1}% 项")
+                                        }
+                                    }
+                                    append("  ·  ")
+                                    // 字节量增长
+                                    if (yc.growth.bytesPct.isNaN()) {
+                                        withStyle(SpanStyle(color = Color(0xFF9E9E9E))) { append("— MB") }
+                                    } else {
+                                        val isUp = yc.growth.bytesPct >= 0
+                                        val raw = yc.growth.bytesPct.toString()
+                                        val pct1 = if (raw.indexOf('.') >= 0) raw.take(raw.indexOf('.') + 2) else raw
+                                        withStyle(SpanStyle(color = if (isUp) Color(0xFF2E7D32) else Color(0xFFC62828))) {
+                                            append("${if (isUp) "↑+" else "↓"}${pct1}% MB")
+                                        }
+                                    }
+                                },
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /

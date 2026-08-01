@@ -7212,6 +7212,83 @@ object MediaService {
     /** media-year-stats 单月统计（含 bytes，区别于 [MonthCount]）。 */
     data class MonthStat(val month: Int, val count: Int, val bytes: Long)
 
+    /**
+     * GET /api/media/media-yearly-comparison — 年度对比（今年 vs 去年同期 + 增长率）。
+     *
+     * 与 [getMediaYearStats]（单年按月分布）互补：本端点对比当年与去年同期的
+     * 上传统计总量（count/bytes）+ 类型分布 + 增长率，供"我的"Tab 年度对比卡片。
+     *
+     * 后端响应结构：
+     * ```
+     * { this_year: {count, bytes, by_type:{IMAGE,VIDEO,LIVE}},
+     *   last_year: {count, bytes, by_type:{...}},
+     *   growth: {count_pct, bytes_pct} }   // pct 可为 null（去年同期为 0 的除零保护）
+     * ```
+     *
+     * 增长率字段（[GrowthInfo.countPct]/[GrowthInfo.bytesPct]）在后端去年同期为 0 时
+     * 返回 JSON null（除零保护，与 growth-report / media-volume-report 同口径）；前端
+     * 解析为 [Double.NaN]（"无对比数据"），UI 侧不展示箭头（与 [GrowthReportRow] 同款）。
+     *
+     * 非 200 或异常返回 null，UI 侧静默降级（不渲染卡片）。
+     */
+    suspend fun getMediaYearlyComparison(): YearlyComparison? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-yearly-comparison")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                YearlyComparison(
+                    thisYear = parseYearStat(o["this_year"]?.jsonObject),
+                    lastYear = parseYearStat(o["last_year"]?.jsonObject),
+                    growth = GrowthInfo(
+                        countPct = parseNullablePercent(o["growth"]?.jsonObject?.get("count_pct")),
+                        bytesPct = parseNullablePercent(o["growth"]?.jsonObject?.get("bytes_pct"))
+                    )
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaYearlyComparison FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 解析 media-yearly-comparison 的年度统计子对象 {count, bytes, by_type}。 */
+    private fun parseYearStat(obj: JsonObject?): YearStat {
+        if (obj == null) return YearStat()
+        val typeObj = obj["by_type"]?.jsonObject
+        return YearStat(
+            count = obj["count"]?.jsonPrimitive?.intOrNull ?: 0,
+            bytes = obj["bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+            byType = mapOf(
+                "IMAGE" to (typeObj?.get("IMAGE")?.jsonPrimitive?.intOrNull ?: 0),
+                "VIDEO" to (typeObj?.get("VIDEO")?.jsonPrimitive?.intOrNull ?: 0),
+                "LIVE" to (typeObj?.get("LIVE")?.jsonPrimitive?.intOrNull ?: 0)
+            )
+        )
+    }
+
+    // parseNullablePercent 复用 growth-report / media-volume-report 既有同名私有方法
+    // （JSON null/缺失 → Double.NaN，数字 → Double），此处不再重复定义。
+
+    /** 年度对比响应体（今年 + 去年 + 增长率）。 */
+    data class YearlyComparison(
+        val thisYear: YearStat,
+        val lastYear: YearStat,
+        val growth: GrowthInfo
+    )
+
+    /** 单年统计（count / bytes / 类型分布，by_type 键为大写 IMAGE/VIDEO/LIVE）。 */
+    data class YearStat(
+        val count: Int = 0,
+        val bytes: Long = 0L,
+        val byType: Map<String, Int> = emptyMap()
+    )
+
+    /** 增长率（百分比）；去年同期为 0 时后端返回 null，前端映射为 [Double.NaN]。 */
+    data class GrowthInfo(
+        val countPct: Double = Double.NaN,
+        val bytesPct: Double = Double.NaN
+    )
+
     // ---- 解析 ----
 
     /**
