@@ -3396,6 +3396,184 @@ private fun MyTabContent(
             }
         }
 
+        // 上传热力图卡片（调 media-upload-heatmap，显示最近 7 天 × 4 时段的 mini 网格）。
+        // 后端按 created_at 的 UTC 日期 × 时段(slot 0~3: 深夜/上午/下午/晚上)二维分桶，
+        // 只返非空格。此处取最近 7 天（以数据中最新日期为锚回推 6 天）渲染 7×4 网格：
+        // 每格用 primary 色透明度深浅(= count / maxCount)表示活跃度，格内居中显示数字。
+        // 全 0 / 请求失败时静默跳过整张卡（与上传排行等统计卡同款降级策略）。
+        var uploadHeatmap by remember { mutableStateOf<MediaService.UploadHeatmap?>(null) }
+        LaunchedEffect(Unit) { uploadHeatmap = MediaService.getMediaUploadHeatmap(days = 90) }
+        uploadHeatmap?.let { hm ->
+            if (hm.totalSlots > 0 && hm.maxCount > 0) {
+                // 以 heatmap 中最晚日期为锚，生成最近 7 天日期列表（YYYY-MM-DD 升序）。
+                val latestDate = hm.heatmap.maxByOrNull { it.date }?.date ?: ""
+                if (latestDate.isNotEmpty()) {
+                    // 用 heatmap 单元按 "date|slot" 建 O(1) 查询表，空格补 0。
+                    val cellMap = remember(hm) {
+                        hm.heatmap.associateBy { "${it.date}|${it.slot}" }
+                    }
+                    // 7 天日期序列：解析 latestDate 的年/月/日，回推构建（commonMain 无
+                    // java.time；用字符串切片 + 闰年手算 + padStart，避免引入 kotlinx-datetime 依赖）。
+                    val last7Dates = remember(latestDate) {
+                        // 各月天数（含闰年判断）。
+                        fun dInMonth(y: Int, m: Int): Int = when (m) {
+                            1, 3, 5, 7, 8, 10, 12 -> 31
+                            4, 6, 9, 11 -> 30
+                            2 -> if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) 29 else 28
+                            else -> 30
+                        }
+                        buildList {
+                            // 解析 YYYY-MM-DD
+                            val parts = latestDate.split("-")
+                            if (parts.size == 3) {
+                                val y = parts[0].toIntOrNull() ?: return@buildList
+                                val m = parts[1].toIntOrNull() ?: return@buildList
+                                val d = parts[2].toIntOrNull() ?: return@buildList
+                                // 回推 6 天（含锚日共 7 天），手算减法处理跨月/跨年。
+                                var cy = y; var cm = m; var cd = d
+                                val seq = ArrayDeque<String>()
+                                repeat(7) {
+                                    seq.addFirst(
+                                        "${cy.toString().padStart(4, '0')}-" +
+                                            "${cm.toString().padStart(2, '0')}-" +
+                                            "${cd.toString().padStart(2, '0')}"
+                                    )
+                                    // 前一天
+                                    cd -= 1
+                                    if (cd < 1) {
+                                        cm -= 1
+                                        if (cm < 1) { cm = 12; cy -= 1 }
+                                        cd = dInMonth(cy, cm)
+                                    }
+                                }
+                                addAll(seq)
+                            }
+                        }
+                    }
+                    if (last7Dates.isNotEmpty()) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    "上传热力图",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                // 时段表头：左上角空 + 4 列标签（凌晨/上午/下午/晚上）。
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    // 日期列宽占位（与下方日期标签对齐）。
+                                    Text(
+                                        "",
+                                        modifier = Modifier.width(44.dp),
+                                        fontSize = 10.sp
+                                    )
+                                    val slotLabels = listOf("凌晨", "上午", "下午", "晚上")
+                                    slotLabels.forEach { label ->
+                                        Text(
+                                            label,
+                                            modifier = Modifier.weight(1f),
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                // 7 天 × 4 时段网格。
+                                last7Dates.forEach { dateStr ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                    ) {
+                                        // 日期标签：MM-DD（取末 5 字符）。
+                                        Text(
+                                            dateStr.takeLast(5),
+                                            modifier = Modifier.width(44.dp),
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        // 4 时段格。
+                                        for (slot in 0..3) {
+                                            val count = cellMap["$dateStr|$slot"]?.count ?: 0
+                                            // 透明度 = count / maxCount，0 → 几乎透明（用极淡底色占位），
+                                            // 满 → 0.9 最高活跃。
+                                            val alpha = if (count > 0) {
+                                                (0.25f + 0.65f * (count.toFloat() / hm.maxCount.toFloat())).coerceIn(0.1f, 0.9f)
+                                            } else {
+                                                0.08f
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(22.dp)
+                                                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                                                    .background(
+                                                        if (count > 0) MaterialTheme.colorScheme.primary.copy(alpha = alpha)
+                                                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
+                                                    ),
+                                                contentAlignment = androidx.compose.ui.Alignment.Center
+                                            ) {
+                                                if (count > 0) {
+                                                    Text(
+                                                        "$count",
+                                                        fontSize = 10.sp,
+                                                        color = MaterialTheme.colorScheme.onSurface,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                // 色阶图例：淡→深 = 低→高活跃。
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "少",
+                                        fontSize = 9.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    for (i in 0..4) {
+                                        val a = 0.25f + 0.65f * (i.toFloat() / 4f)
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = a))
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                    }
+                                    Text(
+                                        "多",
+                                        fontSize = 9.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "最近 7 天 · 覆盖 ${hm.daysCovered} 天 · 单格峰值 ${hm.maxCount} 项（按上传时间 UTC 时段）",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 年度对比卡片（调 media-yearly-comparison，今年 vs 去年同期 + 增长率）。
         // 后端对 created_at 的 UTC 年份分两组聚合：今年 count/bytes/by_type +
         // 去年同口径，增长率 = (今年-去年)/去年*100（去年同期为 0 返回 null → NaN，

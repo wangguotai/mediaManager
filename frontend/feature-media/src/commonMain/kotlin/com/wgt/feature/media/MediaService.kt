@@ -4937,6 +4937,72 @@ object MediaService {
     }
 
     /**
+     * GET /api/media/media-upload-heatmap?days=N — 上传热力图（日期 × 时段二维）。
+     *
+     * 后端按 created_at（上传时间）的 UTC 日期(YYYY-MM-DD) × 时段二维分桶，返回最近
+     * [days] 天（默认 90，钳制 [1,365]）内每个非空格的上传数量。响应（与
+     * [handleMediaUploadHeatmap] 对齐）：
+     *   `{heatmap: [{date, slot, count}], total_slots, max_count, days_covered}`
+     *
+     * 时段定义（slot 为 0~3 的整数索引，按 UTC 小时段划分）：0→0-5 深夜 / 1→6-11 上午 /
+     * 2→12-17 下午 / 3→18-23 晚上。后端只返回有数据的格（count>0），按 date 升序、
+     * slot 升序排列；空格前端按需补 0。
+     *
+     * [heatmap] 为非空格列表（可能为空）；[totalSlots] = heatmap 长度；
+     * [maxCount] 为单格最大上传数（全空时为 0）；[daysCovered] 为至少有一条上传的独立日期数。
+     * 窗口内无上传时 [heatmap] 为空，[totalSlots]/[maxCount]/[daysCovered] 同步为 0。
+     *
+     * @param days 时间窗口天数，默认 90，透传 query（?days=N），后端钳制 [1,365]。
+     * @return 上传热力图聚合，或 null（非 200/异常，调用方静默跳过卡片）。
+     */
+    suspend fun getMediaUploadHeatmap(days: Int = 90): UploadHeatmap? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-upload-heatmap") {
+                parameter("days", days)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val heatmap = obj["heatmap"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    val date = o["date"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    HeatCell(
+                        date = date,
+                        slot = o["slot"]?.jsonPrimitive?.intOrNull ?: 0,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    )
+                } ?: emptyList()
+                UploadHeatmap(
+                    heatmap = heatmap,
+                    totalSlots = obj["total_slots"]?.jsonPrimitive?.intOrNull ?: 0,
+                    maxCount = obj["max_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    daysCovered = obj["days_covered"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getMediaUploadHeatmap status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaUploadHeatmap FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 上传热力图聚合：非空格列表 + 非空格数 + 单格最大上传数 + 覆盖独立日期数。 */
+    data class UploadHeatmap(
+        val heatmap: List<HeatCell>,
+        val totalSlots: Int,
+        val maxCount: Int,
+        val daysCovered: Int
+    )
+
+    /** 热力图单格：日期(YYYY-MM-DD) + 时段索引(0~3) + 上传数量。 */
+    data class HeatCell(
+        val date: String,
+        val slot: Int,
+        val count: Int
+    )
+
+    /**
      * GET /api/media/media-upload-velocity — 最近 N 天的上传速度分析。
      *
      * 后端对窗口内未软删媒体按 UTC 日期分桶，返回：
