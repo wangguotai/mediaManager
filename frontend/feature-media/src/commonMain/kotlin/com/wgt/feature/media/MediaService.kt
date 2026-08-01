@@ -4325,6 +4325,52 @@ object MediaService {
     data class AgeRange(val range: String, val count: Int, val bytes: Long)
 
     /**
+     * V21：GET /api/media/media-size-percentile — 媒体大小百分位分析。
+     *
+     * 后端对当前用户所有未软删媒体的 Size 升序排序，用 nearest-rank 法计算
+     * P10/P25/P50(中位数)/P75/P90，并返回 total/min_size/max_size/mean_size。
+     * total<2 时各百分位回退为 0（样本不足以做有意义的分位）。
+     *
+     * 响应结构（与 [handleMediaSizePercentile] 对齐）：
+     *   `{percentiles:{p10,p25,p50,p75,p90}, total, min_size, max_size, mean_size}`
+     * percentiles 为嵌套 map；各值为后端 int64（永不为 JSON null），
+     * 用 `?: 0L` 安全默认。失败返回 null，调用方按 null 静默跳过不渲染占位
+     * （与 [getMediaAgeDistribution] / [getMediaArchiveStatus] 同款）。
+     */
+    suspend fun getMediaSizePercentile(): SizePercentile? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-size-percentile")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                // percentiles 嵌套对象 → Map<String, Long>；缺失或字段非数时回退 0L。
+                val pMap = mutableMapOf<String, Long>()
+                obj["percentiles"]?.jsonObject?.forEach { (k, v) ->
+                    pMap[k] = v.jsonPrimitive.longOrNull ?: 0L
+                }
+                SizePercentile(
+                    percentiles = pMap,
+                    total = obj["total"]?.jsonPrimitive?.intOrNull ?: 0,
+                    minSize = obj["min_size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    maxSize = obj["max_size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    meanSize = obj["mean_size"]?.jsonPrimitive?.longOrNull ?: 0L
+                )
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaSizePercentile FAILED: ${e.message}")
+            null
+        }
+    }
+
+    /** V21：媒体大小百分位（P10-P90 五档 + 总数 + 最小/最大/平均字节）。 */
+    data class SizePercentile(
+        val percentiles: Map<String, Long>,
+        val total: Int,
+        val minSize: Long,
+        val maxSize: Long,
+        val meanSize: Long
+    )
+
+    /**
      * V21：GET /api/media/media-archive-status — 媒体归档状态（热/温/冷数据温度分布）。
      *
      * 后端按 created_at（上传时间）到 now 的时间差将所有未软删媒体分入 3 个归档温度档：

@@ -2099,6 +2099,107 @@ private fun MyTabContent(
             }
         }
 
+        // V21：媒体大小百分位卡片（调 media-size-percentile，显示 P10-P90 分布）。
+        // 后端 nearest-rank 法对未软删媒体 Size 升序计算 P10/P25/P50(中位数)/P75/P90，
+        // 另返回 total/min_size/max_size/mean_size。total<2 时各百分位回退 0。
+        // 前端展示 5 行百分位 + 底部最小/平均/最大 MB 摘要；请求失败或 total=0 静默跳过。
+        var sizePercentile by remember { mutableStateOf<MediaService.SizePercentile?>(null) }
+        LaunchedEffect(Unit) { sizePercentile = MediaService.getMediaSizePercentile() }
+        sizePercentile?.let { sp ->
+            if (sp.total > 0) {
+                // bytes → MB 可读串：<1MB 用 KB，否则 MB 一位小数。
+                // commonMain 无 String.format，沿用 toString().take 截断一位小数（与媒体年龄卡片同款）。
+                fun fmtBytes(bytes: Long): String {
+                    if (bytes <= 0L) return "0"
+                    if (bytes < 1024L * 1024L) {
+                        val kb = (bytes.toDouble() / 1024.0).toString()
+                        return "${kb.take(kb.indexOf('.') + 2)} KB"
+                    }
+                    val mb = (bytes.toDouble() / (1024.0 * 1024.0)).toString()
+                    return "${mb.take(mb.indexOf('.') + 2)} MB"
+                }
+                // 5 档固定顺序：P10/P25/P50(中位数)/P75/P90。后端 key 与此对齐；
+                // 缺失 key 回退 0L（百分位为 0 时显示 0，仍渲染行，保持卡片稳定）。
+                val rows = listOf(
+                    "p10" to "P10",
+                    "p25" to "P25",
+                    "p50" to "P50 · 中位数",
+                    "p75" to "P75",
+                    "p90" to "P90"
+                )
+                // 进度条按各百分位相对 P90 归一化（maxSize 兜底避免除零）。
+                val refMax = (sp.percentiles["p90"] ?: 0L).coerceAtLeast(1L).toFloat()
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("大小分布", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        rows.forEach { (key, label) ->
+                            val value = sp.percentiles[key] ?: 0L
+                            // 中位数行高亮 primary，其余 onSurfaceVariant。
+                            val isMedian = key == "p50"
+                            val rowColor = if (isMedian) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            val barColor = if (isMedian) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(label, fontSize = 12.sp,
+                                    fontWeight = if (isMedian) FontWeight.Bold else FontWeight.Normal,
+                                    color = rowColor)
+                                Text(fmtBytes(value), fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f))
+                            }
+                            // 比例条：各百分位相对 P90 的占比，中位数档着色更深。
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth((value.toFloat() / refMax).coerceIn(0f, 1f))
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(barColor)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // 底部摘要：最小 · 平均 · 最大（三段式，与视频时长卡片底部摘要同款布局）。
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("⬇ 最小 ${fmtBytes(sp.minSize)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                            Text("Ø 平均 ${fmtBytes(sp.meanSize)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                            Text("⬆ 最大 ${fmtBytes(sp.maxSize)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
+                        }
+                        Text(
+                            "基于 ${sp.total} 项（按文件大小 nearest-rank 百分位）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+        }
+
         // V9：视频时长分析卡片（调 media-duration-analysis，按视频时长分 5 档统计）。
         // 后端对 VIDEO 类型媒体逐条 ffprobe 取时长，归入 <30s / 30s-2min / 2-5min /
         // 5-15min / >15min 五档，每档 count/percentage，另返回 total_videos /
