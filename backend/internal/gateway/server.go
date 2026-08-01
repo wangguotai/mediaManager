@@ -489,6 +489,10 @@ func (s *Server) registerRoutes() {
 	// 访问次数）及已分享/未分享总数。只读端点，前端用于相册管理页展示分享概况。
 	// 精确匹配优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
 	s.mux.HandleFunc("/api/media/album-sharing-summary", s.handleAlbumSharingSummary)
+	// 相册关系分析：遍历用户所有相册两两计算共享媒体数与 Jaccard 相似度，
+	// 标记建议合并的相册对，供前端展示"哪些相册适合合并"。只读端点，精确匹配
+	// 优先于 /api/media/album/ 前缀，不会被 handleAlbumResource 误捕获。
+	s.mux.HandleFunc("/api/media/album-relationship-analysis", s.handleAlbumRelationshipAnalysis)
 	// 综合：合并 album/stats-summary + album-sharing-summary + album/count-ranking 为一个端点，
 	// 返回 {summary, sharing, ranking}，供相册管理页首屏一次渲染（summary/sharing 全量、ranking 取 top 3）。
 	// 路径为 /api/media/album-stats-comprehensive（带连字符），不会落入 /api/media/album/ 前缀匹配。
@@ -10592,7 +10596,7 @@ func (s *Server) handleMediaTimelineEvents(w http.ResponseWriter, r *http.Reques
 	}
 	if len(usable) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"events":      []any{},
+			"events":       []any{},
 			"total_events": 0,
 		})
 		return
@@ -12606,14 +12610,14 @@ func (s *Server) handleShareExpiring(w http.ResponseWriter, r *http.Request) {
 //
 // 聚合当前用户所有分享链接的创建时序，供前端"分享活动"折线图渲染：
 //   - activity      : 最近 N 天（默认 30，可经 ?days= 调整，钳制 [1, 365]）每天
-//                     新建的分享数，按日期升序；窗口内无创建的日期 count=0。
+//     新建的分享数，按日期升序；窗口内无创建的日期 count=0。
 //   - total_shares  : 分享链接总数。
 //   - active_shares : 未过期的分享数（含永不过期 + 过期时间晚于 now）。
 //   - expired_shares: 已过期的分享数（过期时间早于 now，永不过期不计入）。
 //   - trend         : "up" | "down" | "stable"。后半窗口日均创建数对比前半窗口：
-//     * 后 > 前 10%  → up
-//     * 后 < 前 10%  → down
-//     * 其余（含前后均 0、单日窗口）→ stable
+//   - 后 > 前 10%  → up
+//   - 后 < 前 10%  → down
+//   - 其余（含前后均 0、单日窗口）→ stable
 //
 // 数据来源：store.ListShareTokensByUser。ExpiresAt 零值表示永不过期（计为 active，
 // 不计为 expired）。窗口按 CreatedAt 的 UTC 日期分桶；落在窗口之外的较早分享仍计入
@@ -14513,6 +14517,158 @@ func (s *Server) handleAlbumSharingSummary(w http.ResponseWriter, r *http.Reques
 		"albums":         infos,
 		"shared_total":   sharedTotal,
 		"unshared_total": unsharedTotal,
+	})
+}
+
+// handleAlbumRelationshipAnalysis 处理 GET /api/media/album-relationship-analysis ——
+// 相册关系分析：遍历当前用户所有相册两两配对，计算共享媒体数与 Jaccard 相似度，
+// 标记建议合并的相册对，供前端展示"哪些相册共享最多媒体 / 哪些相册适合合并"。
+//
+// 返回结构：
+//
+//	{
+//	  "pairs": [
+//	    {
+//	      "album_a":          {"id","name","media_count"},
+//	      "album_b":          {"id","name","media_count"},
+//	      "shared_count":     int,   // 同时存在于两个相册的媒体数
+//	      "union_count":      int,   // 两相册媒体并集大小
+//	      "similarity":       float, // Jaccard = shared / union（0~1），union 为 0 时为 0
+//	      "recommend_merge":  bool   // 建议合并：shared_count≥2 且 similarity≥0.3
+//	    }
+//	  ],
+//	  "total_pairs":            int, // 参与分析的相册对总数（C(n,2)）
+//	  "high_similarity_count":  int  // recommend_merge 为 true 的相册对数
+//	}
+//
+// 设计取舍：
+//   - 仅利用相册已有 MediaIDs（albumStoreProvider.ListAlbums 返回），不落库、不扩展存储。
+//   - 以相册 MediaIDs 直接做集合运算；重复 media_id 在同一相册内按去重处理。
+//   - pairs 按 shared_count 降序、再按 similarity 降序排序，便于前端优先展示高重叠对。
+//   - 相册数 < 2 时直接返回空 pairs 与 0 计数，避免空集合运算。
+//   - 建议合并阈值（shared_count≥2 且 similarity≥0.3）为启发式：既要求绝对重叠量、
+//     又要求相对重叠率，过滤掉"大相册仅偶然重叠 2 张"的低价值场景。
+func (s *Server) handleAlbumRelationshipAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	provider, ok := s.mediaSvc.(albumStoreProvider)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "album not supported"})
+		return
+	}
+	albums := provider.ListAlbums(uid)
+
+	// 相册数不足 2 时，无可分析的配对。
+	if len(albums) < 2 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pairs":                 []struct{}{},
+			"total_pairs":           0,
+			"high_similarity_count": 0,
+		})
+		return
+	}
+
+	// 预处理：为每个相册构造去重的媒体集合（map[string]struct{}）与可选媒体计数。
+	type albumBrief struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		MediaCount int    `json:"media_count"`
+	}
+	type mediaSet struct {
+		brief albumBrief
+		set   map[string]struct{}
+	}
+	sets := make([]mediaSet, 0, len(albums))
+	for _, a := range albums {
+		// 去重构造集合：同一 media_id 在相册内重复出现只记一次。
+		s := make(map[string]struct{}, len(a.MediaIDs))
+		for _, mid := range a.MediaIDs {
+			s[mid] = struct{}{}
+		}
+		name := a.Name
+		if name == "" {
+			name = a.ID
+		}
+		sets = append(sets, mediaSet{
+			brief: albumBrief{ID: a.ID, Name: name, MediaCount: len(s)},
+			set:   s,
+		})
+	}
+
+	// Jaccard 相似度 = |A ∩ B| / |A ∪ B|；集合大小为去重后计数。
+	type relationshipPair struct {
+		AlbumA         albumBrief `json:"album_a"`
+		AlbumB         albumBrief `json:"album_b"`
+		SharedCount    int        `json:"shared_count"`
+		UnionCount     int        `json:"union_count"`
+		Similarity     float64    `json:"similarity"`
+		RecommendMerge bool       `json:"recommend_merge"`
+	}
+
+	pairs := make([]relationshipPair, 0, len(sets)*(len(sets)-1)/2)
+	highSimilarity := 0
+	// 建议合并阈值：绝对共享≥2 且 Jaccard≥0.3（见函数注释设计取舍）。
+	const (
+		minSharedForMerge = 2
+		minSimForMerge    = 0.3
+	)
+	for i := 0; i < len(sets); i++ {
+		for j := i + 1; j < len(sets); j++ {
+			a := sets[i]
+			b := sets[j]
+
+			// 计算 |A ∩ B|：遍历较小集合，到较大集合里查存在性。
+			small, large := a.set, b.set
+			if len(b.set) < len(a.set) {
+				small, large = b.set, a.set
+			}
+			shared := 0
+			for mid := range small {
+				if _, ok := large[mid]; ok {
+					shared++
+				}
+			}
+			// |A ∪ B| = |A| + |B| − |A ∩ B|
+			union := len(a.set) + len(b.set) - shared
+
+			var sim float64
+			if union > 0 {
+				sim = float64(shared) / float64(union)
+			}
+			recommend := shared >= minSharedForMerge && sim >= minSimForMerge
+			if recommend {
+				highSimilarity++
+			}
+			pairs = append(pairs, relationshipPair{
+				AlbumA:         a.brief,
+				AlbumB:         b.brief,
+				SharedCount:    shared,
+				UnionCount:     union,
+				Similarity:     sim,
+				RecommendMerge: recommend,
+			})
+		}
+	}
+
+	// 排序：按 shared_count 降序，再按 similarity 降序，让高重叠对排在前面。
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].SharedCount != pairs[j].SharedCount {
+			return pairs[i].SharedCount > pairs[j].SharedCount
+		}
+		return pairs[i].Similarity > pairs[j].Similarity
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pairs":                 pairs,
+		"total_pairs":           len(pairs),
+		"high_similarity_count": highSimilarity,
 	})
 }
 
@@ -18557,8 +18713,8 @@ func (s *Server) handleMediaCollectionHealth(w http.ResponseWriter, r *http.Requ
 	coldCount := 0
 	var usedBytes int64
 	shaCounts := make(map[string]int)
-	orphanCount := 0   // 完整度维度：磁盘缺失 / stat 失败（media-integrity-report 口径）
-	errorCount := 0    // 完整度维度：zero_size / size_mismatch
+	orphanCount := 0 // 完整度维度：磁盘缺失 / stat 失败（media-integrity-report 口径）
+	errorCount := 0  // 完整度维度：zero_size / size_mismatch
 	duplicateCount := 0
 	uploadsDir := s.userUploadsDir(uid)
 	diskCheck := uploadsDir != ""
