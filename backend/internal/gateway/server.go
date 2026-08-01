@@ -721,6 +721,12 @@ func (s *Server) registerRoutes() {
 	// 含审计评分 0-100 与 A/B/C/D 等级 + 详细清单 + 建议）。一次 ListMediaByUser 拉全量 +
 	// 单次磁盘扫描同时完成四类检查，避免四个端点各自重扫磁盘的 IO 放大。
 	s.mux.HandleFunc("/api/media/media-storage-audit", s.handleMediaStorageAudit)
+	// 清理计划（合并 exact_duplicates + orphan_files + near_duplicates + error_files +
+	// archive_candidates 五类来源为一份按优先级（score 100/90/70/60/40）倒序排序的执行清单，
+	// 每项含 type/media_id/filename/score/action/reclaimable_bytes，并给出总可回收字节与
+	// 预估耗时。一次 ListMediaByUser 拉全量 + 单次磁盘扫描同时完成五类检测，避免前端并发
+	// 拉五个端点各自重扫磁盘的 IO 放大。只读端点。?limit=20 控制返回条数。
+	s.mux.HandleFunc("/api/media/media-cleanup-plan", s.handleMediaCleanupPlan)
 	// 重命名历史：从 audit_log 中过滤 action="rename" 的记录，解析 detail 提取旧名→新名映射，
 	// 返回 [{media_id, old_name, new_name, renamed_at}]。单条重命名 detail 格式为 "oldName => newName"，
 	// 批量重命名（media_id 为空、detail 为汇总）按整条计入但 old/new_name 置空。
@@ -22663,6 +22669,407 @@ func (s *Server) handleMediaStorageAudit(w http.ResponseWriter, r *http.Request)
 		"recommendations":       recommendations,
 		"total_recommendations": len(recommendations),
 		"user_id":               uid,
+	})
+}
+
+// handleMediaCleanupPlan GET /api/media/media-cleanup-plan — 清理计划。
+//
+// 合并五大清理来源为一份按优先级（score 倒序）排序的执行清单，供前端"一键清理"
+// 页面展示优先级排序后的可操作项：
+//
+//   - exact_duplicates   : 相同 SHA256 的完全重复（score=100，高优先级）
+//     每组保留一份，其余 (count-1) 份计入清单；reclaimable = (count-1)*size。
+//     action="delete_duplicate"（建议删除冗余副本，可配合 duplicate-cleanup 自动落库）。
+//   - orphan_files       : DB 有记录但磁盘文件缺失（score=90，高优先级）
+//     磁盘文件已丢，元数据留在库中无意义，reclaimable=0（文件本就不存在，无字节可回收，
+//     但保留 DB 行会污染计数/统计，故仍列清理项）。action="cleanup_orphan"。
+//   - near_duplicates     : SHA256 不同但同类型 + 同分辨率(总像素) + 文件大小 ±5%
+//     的近似重复对（score=70，中优先级）。一对两端各计一项，每项 reclaimable=对端
+//     文件 size（用户人工确认后可删其一）。action="review_near_duplicate"。
+//   - error_files         : size<=0（zero_size）或磁盘大小与 DB 记录不符（size_mismatch）
+//     （score=60，中优先级）。数据损坏，建议重新上传或删除，reclaimable=m.Size
+//     （size_mismatch 时以 DB 记录为准，实际可回收取决于磁盘现状，此处给出元数据层
+//     的名义可回收量供汇总）。action="fix_error_file"。
+//   - archive_candidates  : created_at 距今 >180 天且 size>=50MB 的旧大文件
+//     （score=40，低优先级）。这类文件长期占用大量空间、近期大概率不再访问，
+//     适合离线归档/压缩外迁以释放主存储，reclaimable=m.Size*0.5（归档压缩按 50%
+//     压缩率估算可释放量，保守估算避免过度承诺）。action="archive_old_large"。
+//
+// 排序：按 score 倒序；同分按 reclaimable_bytes 倒序（可回收多的优先）；再按 media_id
+// 升序稳定 tie-break。limit 截断后返回 plan，但 total_items/total_reclaimable_bytes
+// 为截断前的全量汇总（便于前端判断是否还有更多）。
+//
+// estimated_time_min：按每项平均 0.5 分钟（30 秒）人工/脚本处理耗时估算，
+// 至少 1 分钟（空计划为 0）。该估算粗糙，仅用于前端展示"预计耗时"提示，不作为 SLA。
+//
+// 查询参数：?limit=20（默认 20，范围 [0,500]，0 返回空清单只看汇总）。
+//
+// 需认证，按 user_id 隔离；store 未注入返回 503。uploads 目录未配置时 orphan/error
+// 的磁盘检查跳过（仅能统计 zero_size 类 error 与其它不依赖磁盘的维度），并在响应中
+// 标注 disk_check=false。
+//
+// 响应：
+//
+//	{
+//	  "plan": [
+//	    {type, media_id, filename, score, action, reclaimable_bytes, ...}
+//	  ],
+//	  "total_items": N,                 // 截断前全量条数
+//	  "total_reclaimable_bytes": N,     // 截断前全量可回收字节
+//	  "estimated_time_min": N,          // 预估处理耗时（分钟）
+//	  "source_counts": {                // 各来源原始条数（截断前）
+//	      "exact_duplicates": N, "orphan_files": N, "near_duplicates": N,
+//	      "error_files": N, "archive_candidates": N
+//	  },
+//	  "disk_check": bool,
+//	  "user_id": "..."
+//	}
+func (s *Server) handleMediaCleanupPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	// limit：默认 20，上限 500，下限 0（允许只看汇总）。
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	uploadsDir := s.userUploadsDir(uid)
+	diskCheck := uploadsDir != ""
+
+	// cleanupItem 为 plan 中的单条执行项。额外字段（sha256/resolution 等）以 xxx_json
+	// 形式按需带上，便于前端展示来源细节；核心字段 type/media_id/filename/score/action/
+	// reclaimable_bytes 对所有来源统一。
+	type cleanupItem struct {
+		Type             string `json:"type"`              // exact_duplicates|orphan_files|near_duplicates|error_files|archive_candidates
+		MediaID          string `json:"media_id"`          // 主涉媒体 ID（near_duplicates 取对端 ID 填此处，对端即建议可删的那一份）
+		Filename         string `json:"filename"`          // 主涉媒体文件名
+		Score            int    `json:"score"`             // 优先级分数 100/90/70/60/40
+		Action           string `json:"action"`            // 建议执行动作
+		ReclaimableBytes int64  `json:"reclaimable_bytes"` // 该项可回收字节
+		// 可选来源细节（不同 type 携带不同字段，omitempty 保持响应精简）。
+		SHA256      string `json:"sha256,omitempty"`
+		Resolution  string `json:"resolution,omitempty"`
+		PeerMediaID string `json:"peer_media_id,omitempty"`  // near_duplicates 对端 ID
+		ErrorType   string `json:"error_type,omitempty"`     // error_files 的子类型
+		AgeDays     int    `json:"age_days,omitempty"`       // archive_candidates 的文件年龄（天）
+	}
+
+	plan := make([]cleanupItem, 0, len(mediaList))
+	sourceCounts := map[string]int{
+		"exact_duplicates":   0,
+		"orphan_files":       0,
+		"near_duplicates":    0,
+		"error_files":        0,
+		"archive_candidates": 0,
+	}
+
+	// ---- 单次遍历：SHA256 分组 + error + orphan + 部分细节收集 ----
+	shaGroups := make(map[string][]*storage.Media)
+	type ndCand struct {
+		id       string
+		filename string
+		size     int64
+		sha      string
+		typ      string
+		width    int32
+		height   int32
+	}
+	cands := make([]ndCand, 0, len(mediaList))
+	now := time.Now()
+	const archiveAgeDays = 180        // 超过 180 天视为旧文件
+	const archiveSizeBytes = int64(50 * 1024 * 1024) // >=50MB 视为大文件
+
+	for _, m := range mediaList {
+		if m == nil {
+			continue
+		}
+		if m.SHA256 != "" {
+			shaGroups[m.SHA256] = append(shaGroups[m.SHA256], m)
+		}
+
+		// (d) error_files：zero_size（无需磁盘检查即可判定）。
+		if m.Size <= 0 {
+			sourceCounts["error_files"]++
+			plan = append(plan, cleanupItem{
+				Type:             "error_files",
+				MediaID:          m.ID,
+				Filename:         m.Filename,
+				Score:            60,
+				Action:           "fix_error_file",
+				ReclaimableBytes: m.Size, // <=0，名义可回收量（负数语义：数据损坏需修复）
+				ErrorType:        "zero_size",
+			})
+			continue
+		}
+
+		// near_duplicates 候选收集：size>0 且有 SHA256 + 分辨率。
+		if m.SHA256 != "" && m.Width > 0 && m.Height > 0 && !m.Deleted {
+			cands = append(cands, ndCand{
+				id:       m.ID,
+				filename: m.Filename,
+				size:     m.Size,
+				sha:      m.SHA256,
+				typ:      m.Type,
+				width:    m.Width,
+				height:   m.Height,
+			})
+		}
+
+		// (b) orphan_files + (d) error_files:size_mismatch 的磁盘检查。
+		if diskCheck {
+			files, _ := filepath.Glob(filepath.Join(uploadsDir, m.ID+".*"))
+			if len(files) == 0 {
+				sourceCounts["orphan_files"]++
+				plan = append(plan, cleanupItem{
+					Type:             "orphan_files",
+					MediaID:          m.ID,
+					Filename:         m.Filename,
+					Score:            90,
+					Action:           "cleanup_orphan",
+					ReclaimableBytes: 0, // 磁盘文件已缺失，无字节可回收
+				})
+				continue
+			}
+			info, statErr := os.Stat(files[0])
+			if statErr != nil {
+				sourceCounts["orphan_files"]++
+				plan = append(plan, cleanupItem{
+					Type:             "orphan_files",
+					MediaID:          m.ID,
+					Filename:         m.Filename,
+					Score:            90,
+					Action:           "cleanup_orphan",
+					ReclaimableBytes: 0,
+				})
+				continue
+			}
+			if info.Size() != m.Size {
+				sourceCounts["error_files"]++
+				plan = append(plan, cleanupItem{
+					Type:             "error_files",
+					MediaID:          m.ID,
+					Filename:         m.Filename,
+					Score:            60,
+					Action:           "fix_error_file",
+					ReclaimableBytes: m.Size,
+					ErrorType:        "size_mismatch",
+				})
+			}
+		}
+
+		// (e) archive_candidates：旧大文件。在磁盘检查之后独立判定，不与
+		// orphan/error 互斥（一个旧大文件即便健康也可归档）。size>0 已由上面的
+		// zero_size 分支跳过保证。created_at 距今 >180 天且 size>=50MB。
+		if m.Size >= archiveSizeBytes {
+			ageDays := int(now.Sub(m.CreatedAt).Hours() / 24)
+			if ageDays > archiveAgeDays {
+				sourceCounts["archive_candidates"]++
+				plan = append(plan, cleanupItem{
+					Type:             "archive_candidates",
+					MediaID:          m.ID,
+					Filename:         m.Filename,
+					Score:            40,
+					Action:           "archive_old_large",
+					ReclaimableBytes: m.Size / 2, // 按 50% 压缩率估算可释放量
+					AgeDays:          ageDays,
+				})
+			}
+		}
+	}
+
+	// (a) exact_duplicates：每个 SHA256 组 count>1，保留最早一份（与 batch-delete 口径一致：
+	// 保留最早上传的原始件），其余 (count-1) 份计入清单。reclaimable=(count-1)*size。
+	// 排序组内成员以保证结果稳定（按 created_at 升序，[0] 为保留项）。
+	for sha, items := range shaGroups {
+		if len(items) < 2 {
+			continue
+		}
+		sorted := make([]*storage.Media, len(items))
+		copy(sorted, items)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
+		})
+		keepID := sorted[0].ID
+		// size 取首份（同 SHA256 应一致），用于 action 提示与 reclaimable 计算。
+		bytesPerFile := sorted[0].Size
+		for _, m := range sorted[1:] {
+			sourceCounts["exact_duplicates"]++
+			plan = append(plan, cleanupItem{
+				Type:             "exact_duplicates",
+				MediaID:          m.ID,
+				Filename:         m.Filename,
+				Score:            100,
+				Action:           "delete_duplicate",
+				ReclaimableBytes: bytesPerFile,
+				SHA256:           sha,
+			})
+		}
+		_ = keepID // keepID 仅用于语义说明，未在响应中暴露（避免与 batch-delete 决策耦合）
+	}
+
+	// (c) near_duplicates：两两比对，O(n^2)，离线清理计划可接受。一对两端各计一项，
+	// media_id 取对端 ID（即"建议可删的那一份"），peer_media_id 取当前端。两端各出现
+	// 一次，由前端在用户确认后决定删哪一份。reclaimable = 对端文件 size。
+	type ndPair struct {
+		MediaAID   string
+		MediaBID   string
+		FilenameA  string
+		FilenameB  string
+		Size       int64
+		Width      int32
+		Height     int32
+		Type       string
+		SizeDiff   int64
+		SHA256A    string
+		SHA256B    string
+	}
+	nearPairs := make([]ndPair, 0)
+	for i := 0; i < len(cands); i++ {
+		for j := i + 1; j < len(cands); j++ {
+			a, b := cands[i], cands[j]
+			if a.typ != b.typ {
+				continue
+			}
+			if a.sha == b.sha {
+				continue // 精确重复由 exact_duplicates 负责
+			}
+			if int64(a.width)*int64(a.height) != int64(b.width)*int64(b.height) {
+				continue
+			}
+			var maxSize, minSize int64
+			if a.size >= b.size {
+				maxSize, minSize = a.size, b.size
+			} else {
+				maxSize, minSize = b.size, a.size
+			}
+			if maxSize <= 0 {
+				continue
+			}
+			diffRatio := float64(maxSize-minSize) / float64(maxSize)
+			if diffRatio >= 0.05 {
+				continue
+			}
+			nearPairs = append(nearPairs, ndPair{
+				MediaAID:  a.id,
+				MediaBID:  b.id,
+				FilenameA: a.filename,
+				FilenameB: b.filename,
+				Size:      maxSize,
+				Width:     a.width,
+				Height:    a.height,
+				Type:      a.typ,
+				SizeDiff:  maxSize - minSize,
+				SHA256A:   a.sha,
+				SHA256B:   b.sha,
+			})
+		}
+	}
+	// 按 size_diff 升序（差距越小越可疑）+ id 稳定 tie-break。
+	sort.Slice(nearPairs, func(i, j int) bool {
+		if nearPairs[i].SizeDiff != nearPairs[j].SizeDiff {
+			return nearPairs[i].SizeDiff < nearPairs[j].SizeDiff
+		}
+		return nearPairs[i].MediaAID < nearPairs[j].MediaAID
+	})
+	resolutionStr := func(w, h int32) string { return fmt.Sprintf("%dx%d", w, h) }
+	for _, p := range nearPairs {
+		// 一对两端各计一项：A 端视 B 为可删副本，B 端视 A 为可删副本。
+		sourceCounts["near_duplicates"]++
+		plan = append(plan, cleanupItem{
+			Type:             "near_duplicates",
+			MediaID:          p.MediaBID,
+			Filename:         p.FilenameB,
+			Score:            70,
+			Action:           "review_near_duplicate",
+			ReclaimableBytes: p.Size,
+			SHA256:           p.SHA256B,
+			Resolution:       resolutionStr(p.Width, p.Height),
+			PeerMediaID:      p.MediaAID,
+		})
+		sourceCounts["near_duplicates"]++
+		plan = append(plan, cleanupItem{
+			Type:             "near_duplicates",
+			MediaID:          p.MediaAID,
+			Filename:         p.FilenameA,
+			Score:            70,
+			Action:           "review_near_duplicate",
+			ReclaimableBytes: p.Size,
+			SHA256:           p.SHA256A,
+			Resolution:       resolutionStr(p.Width, p.Height),
+			PeerMediaID:      p.MediaBID,
+		})
+	}
+
+	// 排序：score 倒序 → reclaimable_bytes 倒序 → media_id 升序（稳定 tie-break）。
+	sort.Slice(plan, func(i, j int) bool {
+		if plan[i].Score != plan[j].Score {
+			return plan[i].Score > plan[j].Score
+		}
+		if plan[i].ReclaimableBytes != plan[j].ReclaimableBytes {
+			return plan[i].ReclaimableBytes > plan[j].ReclaimableBytes
+		}
+		return plan[i].MediaID < plan[j].MediaID
+	})
+
+	// 全量汇总（截断前）。
+	totalItems := len(plan)
+	var totalReclaimable int64
+	for _, it := range plan {
+		// orphan_files / error_files(zero_size) 的 reclaimable 可能为 0 或负，
+		// 汇总时只累加正值，避免负数污染总量（这些项本身无可回收字节）。
+		if it.ReclaimableBytes > 0 {
+			totalReclaimable += it.ReclaimableBytes
+		}
+	}
+
+	// limit 截断。
+	if len(plan) > limit {
+		plan = plan[:limit]
+	}
+	if plan == nil {
+		plan = []cleanupItem{}
+	}
+
+	// 预估耗时：每项 0.5 分钟，至少 1 分钟（空计划为 0）。
+	estimatedTimeMin := 0
+	if totalItems > 0 {
+		estimatedTimeMin = totalItems * 30 / 60 // 30 秒/项 → 分钟
+		if estimatedTimeMin < 1 {
+			estimatedTimeMin = 1
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan":                     plan,
+		"total_items":              totalItems,
+		"total_reclaimable_bytes":  totalReclaimable,
+		"estimated_time_min":       estimatedTimeMin,
+		"source_counts":            sourceCounts,
+		"disk_check":               diskCheck,
+		"user_id":                  uid,
 	})
 }
 
