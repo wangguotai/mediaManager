@@ -175,3 +175,11 @@ temp/
 .agents/state/
 .agents/*.lock
 frontend/rn-js/node_modules/
+
+# iOS RN integration (Phase 2)
+frontend/iosApp/Vendor/React.xcframework/
+frontend/iosApp/Pods/
+frontend/iosApp/Podfile.lock
+frontend/iosApp/iosApp/main.jsbundle
+frontend/iosApp/Vendor/React.xcframework/
+frontend/iosApp/iosApp.xcworkspace/

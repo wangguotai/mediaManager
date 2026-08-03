@@ -7,9 +7,11 @@ import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSURL
 import platform.Foundation.NSTemporaryDirectory
-import platform.Foundation.createDirectoryAtURL
+// NOTE: `createDirectoryAtURL`, `fileExistsAtPath`, `dataWithBytes`, `writeToFile` are
+// *member* methods of NSFileManager / NSData in Kotlin/Native 2.3.0 — they are NOT
+// top-level imports. Importing them as `platform.Foundation.<member>` produces
+// "Unresolved reference". Call them on the instance directly (no import needed).
 import platform.Foundation.dataWithBytes
-import platform.Foundation.fileExistsAtPath
 import platform.Foundation.writeToFile
 
 /**
