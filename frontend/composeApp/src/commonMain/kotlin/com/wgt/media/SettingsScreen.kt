@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,21 +14,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,51 +34,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wgt.platform.logger.logger
-import com.wgt.common.util.formatBytesToMB
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.longOrNull
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.material3.Surface
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
-import com.wgt.media.BackendImageLoader
-import com.wgt.feature.media.MediaService
 import mediamanager.composeapp.generated.resources.Res
-import mediamanager.composeapp.generated.resources.ic_close
-import mediamanager.composeapp.generated.resources.ic_delete
 import mediamanager.composeapp.generated.resources.ic_check_circle
+import mediamanager.composeapp.generated.resources.ic_close
 import mediamanager.composeapp.generated.resources.ic_cloud
 import mediamanager.composeapp.generated.resources.ic_cloud_upload
 import mediamanager.composeapp.generated.resources.ic_info
 import mediamanager.composeapp.generated.resources.ic_openclaw
 import mediamanager.composeapp.generated.resources.ic_palette
-import mediamanager.composeapp.generated.resources.ic_photo
 import mediamanager.composeapp.generated.resources.ic_settings
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
@@ -92,16 +54,11 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 
 private const val TAG = "SettingsScreen"
 
-/** 应用版本号 —— 与“关于”区展示一致。暂不接入 Gradle versionName 以避免跨模块依赖。 */
-private const val APP_VERSION = "v0.4.0 (V7+V8)"
-
-/** 构建时间戳 —— 手动维护，发布时更新。 */
-private const val BUILD_TIME = "2026-07-31"
-
 /**
  * 设置项的跨屏幕共享状态。单例，进程内唯一：
  * - [App.kt] 读取 [themeMode] 决定浅色/暗色色板（SYSTEM 时跟随系统）。
  * - [SettingsScreen] 读写 [themeMode] 与后端地址，落地到 [SettingsStorage]。
+ * - 各子页（[BackupSettingsScreen]/[AppearanceScreen]/…）也读写各自相关字段。
  *
  * 用 `mutableStateOf` 暴露，保证 Compose 观察能在设置页修改后即时驱动 App 主题切换。
  * 初始化时从 [SettingsStorage] 读回已持久化的值，确保冷启动后主题/地址不丢失。
@@ -275,26 +232,38 @@ object SettingsState {
 }
 
 /**
- * 设置屏幕。
+ * 设置枢纽页（L1 任务 C：纯设置枢纽，仅保留"后端地址/账号"+ 子页入口）。
  *
- * 三个区块：
- * 1. 后端地址：输入框 + 保存按钮 + 测试连通性按钮。保存写入 [SettingsState.saveBackendUrl]；
- *    测试走 [pingBackend]（平台原生 HTTP HEAD）。结果以 Snackbar 反馈，连通显示绿色对勾提示。
- * 2. 主题：三选一单选（SYSTEM/LIGHT/DARK），点选即落地，无需额外保存按钮——
- *    主题切换应即时生效，符合系统设置页一般语义。
- * 3. 关于：版本号 [APP_VERSION]。
+ * 瘦身后的职责：
+ * 1. 后端地址：输入框 + 保存按钮 + 测试连通性按钮。保存写入
+ *    [SettingsState.saveBackendUrl]；测试走 [pingBackend]。
+ * 2. 账号：当前用户展示 + 退出登录。
+ * 3. 五个子页入口行（点击跳转）：
+ *    - 云相册备份 → [BackupSettingsScreen]
+ *    - 外观 → [AppearanceScreen]
+ *    - 媒体工具 → [MediaToolsScreen]
+ *    - 关于 → [AboutScreen]
+ *    - 开发者 → [DeveloperScreen]
  *
- * [onBack] 由 [App.kt] 提供，返回媒体列表；TopAppBar 左侧放返回（关闭）按钮。
+ * 原云相册/主题/回收站/孤立/自动打标签/RN更新/缓存清理/OpenClaw 等区已迁入对应子页。
+ *
+ * @param onBack 返回媒体列表
+ * @param onNavigateToBackup 跳转云相册备份页
+ * @param onNavigateToAppearance 跳转外观页
+ * @param onNavigateToMediaTools 跳转媒体工具页
+ * @param onNavigateToAbout 跳转关于页
+ * @param onNavigateToDeveloper 跳转开发者页
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
 @Composable
 fun SettingsScreen(
     viewModel: MediaViewModel,
     onBack: () -> Unit,
-    onNavigateToTrash: () -> Unit = {},
-    onNavigateToRnActivity: () -> Unit = {},
-    onNavigateToCleanup: () -> Unit = {},
-    onNavigateToInsights: () -> Unit = {}
+    onNavigateToBackup: () -> Unit = {},
+    onNavigateToAppearance: () -> Unit = {},
+    onNavigateToMediaTools: () -> Unit = {},
+    onNavigateToAbout: () -> Unit = {},
+    onNavigateToDeveloper: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -307,10 +276,6 @@ fun SettingsScreen(
     var isPinging by remember { mutableStateOf(false) }
     var pingResult by remember { mutableStateOf<String?>(null) } // null=未测, ""=成功, 非空=失败描述
 
-    // OpenClaw 桥梁对话框状态 + 视图模型
-    var showOpenClawDialog by remember { mutableStateOf(false) }
-    val openClawViewModel = remember { OpenClawViewModel() }
-
     // 监听 Snackbar 触发（pingResult 改变后）
     LaunchedEffect(pingResult) {
         val r = pingResult ?: return@LaunchedEffect
@@ -318,13 +283,6 @@ fun SettingsScreen(
         else snackbarHostState.showSnackbar("连通失败：$r")
     }
 
-    // OpenClaw 桥梁命令对话框
-    if (showOpenClawDialog) {
-        OpenClawCommandDialog(
-            viewModel = openClawViewModel,
-            onDismiss = { showOpenClawDialog = false }
-        )
-    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -459,519 +417,90 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
 
-            // ---- 云相册自动备份 ----
-            SectionTitle("云相册", iconRes = Res.drawable.ic_cloud_upload)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .padding(vertical = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("自动备份新增图片", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "本地新增图片后台增量上传到云端（自动去重）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Switch(
-                    checked = SettingsState.autoBackupEnabled,
-                    onCheckedChange = { enabled ->
-                        SettingsState.saveAutoBackup(enabled)
-                        // 开关切换即启停后台备份轮询（登录态下）。开启时 startAutoBackup
-                        // 内部按需注册设备+建立快照+起轮询；关闭时 stopAutoBackup 取消轮询清队列。
-                        if (enabled) viewModel.startAutoBackup() else viewModel.stopAutoBackup()
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                if (enabled) "已开启自动备份" else "已关闭自动备份"
-                            )
-                        }
-                    },
-                    enabled = AuthState.isLoggedIn
-                )
-            }
-            // V6 §2.1：备份策略开关——仅在自动备份开启时展示。
-            // 仅 WiFi：移动数据下暂停备份（默认开，对标小米）。仅充电：电池供电时暂停。
-            if (SettingsState.autoBackupEnabled) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("仅 WiFi 备份", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "移动数据下暂停备份，避免消耗流量",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = SettingsState.backupWifiOnly,
-                        onCheckedChange = { SettingsState.saveBackupWifiOnly(it) },
-                        enabled = AuthState.isLoggedIn
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("仅充电备份", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "电池供电时暂停备份，省电",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = SettingsState.backupChargingOnly,
-                        onCheckedChange = { SettingsState.saveBackupChargingOnly(it) },
-                        enabled = AuthState.isLoggedIn
-                    )
-                }
-            }
-            // 设备登记状态：供用户确认本机已被云同步纳入。
-            if (SettingsState.autoBackupEnabled) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("本机设备", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        SettingsState.deviceId.ifEmpty { "未登记" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-            }
-            // 云端用量 + 待备份/离线队列 + 上次备份时间：登录态展示。
-            // 用量来自 /api/sync/usage（viewModel.cloudUsage），待备份来自 uploadQueue.size，
-            // 上次备份时间来自 SettingsState.lastBackupTime（持久化 ms）。
-            if (AuthState.isLoggedIn) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("云端用量", style = MaterialTheme.typography.bodyMedium)
-                    val usage = viewModel.cloudUsage
-                    Text(
-                        if (usage != null) "${usage.fileCount} 项 / ${formatBytesToMB(usage.totalBytes)}"
-                        else "—",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-                // 待备份项数：离线队列大小即待备份条数（PRD-v7 §1.5）。
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("待备份", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "${viewModel.uploadQueue.size} 项",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-                // 上次备份完成时间（PRD-v7 §1.5）：从未备份显示"未备份"。
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("上次备份时间", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        formatBackupTime(SettingsState.lastBackupTime),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-            }
+            // ---- 子页入口 ----
+            SectionTitle("更多设置", iconRes = Res.drawable.ic_info)
 
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- 2. 主题 ----
-            SectionTitle("主题", iconRes = Res.drawable.ic_palette)
-            ThemeMode.values().forEach { mode ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = SettingsState.themeMode == mode,
-                        onClick = {
-                            SettingsState.saveThemeMode(mode)
-                            scope.launch { snackbarHostState.showSnackbar("主题：${modeLabel(mode)}") }
-                        }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(modeLabel(mode), style = MaterialTheme.typography.bodyLarge)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- RN 活动中心入口（V7 §3.1）----
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("活动中心", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = onNavigateToRnActivity) {
-                    Text("打开 React Native 模块")
-                }
-            }
-
-            // ---- 存储清理入口（V7 §2.4）----
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("存储清理", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = onNavigateToCleanup) {
-                    Text("查看清理建议")
-                }
-            }
-
-            // V8：孤立文件检查
-            var orphanResult by remember { mutableStateOf<MediaService.OrphanCheckResult?>(null) }
-            var orphanChecking by remember { mutableStateOf(false) }
-            val orphanScope = rememberCoroutineScope()
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("孤立文件检查", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = {
-                    orphanChecking = true
-                    orphanScope.launch {
-                        orphanResult = MediaService.orphanCheck()
-                        orphanChecking = false
-                    }
-                }) {
-                    if (orphanChecking) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text("检查")
-                    }
-                }
-            }
-            orphanResult?.let { r ->
-                Text(
-                    "检查 ${r.checked} 个文件，发现 ${r.orphanCount} 个孤立文件",
-                    fontSize = 12.sp,
-                    color = if (r.orphanCount > 0) MaterialTheme.colorScheme.error
-                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
-                )
-                if (r.orphanCount > 0) {
-                    Row(
-                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TextButton(onClick = {
-                            orphanScope.launch {
-                                val result = MediaService.cleanupOrphan()
-                                if (result != null) {
-                                    orphanResult = MediaService.orphanCheck()
-                                }
-                            }
-                        }) { Text("一键清理", color = MaterialTheme.colorScheme.error) }
-                    }
-                }
-            }
-
-            // V8：自动打标签
-            var autoTagResult by remember { mutableStateOf<String?>(null) }
-            var autoTagging by remember { mutableStateOf(false) }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("自动打标签", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = {
-                    autoTagging = true
-                    orphanScope.launch {
-                        val count = MediaService.autoTag()
-                        autoTagResult = "已为 $count 个媒体添加标签"
-                        autoTagging = false
-                    }
-                }) {
-                    if (autoTagging) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text("执行")
-                    }
-                }
-            }
-            autoTagResult?.let { msg ->
-                Text(msg, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp))
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- 回收站入口（V7 §1.1）----
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("回收站", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = onNavigateToTrash) {
-                    Text("查看已删除文件")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- 3. 关于 ----
-            SectionTitle("关于", iconRes = Res.drawable.ic_info)
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("版本", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    APP_VERSION,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("构建时间", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    BUILD_TIME,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-            // V7：后端版本（从 /api/healthz 获取）
-            var backendVersion by remember { mutableStateOf("加载中...") }
-            LaunchedEffect(Unit) {
-                backendVersion = MediaService.getBackendInfo() ?: "未知"
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("后端版本", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    backendVersion,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-            // V8：服务器磁盘使用
-            var diskUsage by remember { mutableStateOf<MediaService.DiskUsage?>(null) }
-            LaunchedEffect(Unit) { diskUsage = MediaService.getDiskUsage() }
-            diskUsage?.let { d ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("服务器磁盘", style = MaterialTheme.typography.bodyLarge)
-                    val usedStr = d.usedGB.toString().let { it.take(it.indexOf('.') + 2) }
-                    val totalStr = d.totalGB.toString().let { it.take(it.indexOf('.') + 2) }
-                    val pctStr = d.usagePercent.toString().let { it.take(it.indexOf('.') + 2) }
-                    Text(
-                        "$usedStr / $totalStr GB ($pctStr%)",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = if (d.usagePercent > 90) MaterialTheme.colorScheme.error
-                               else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-            }
-            // V8：同步状态
-            var syncStatus by remember { mutableStateOf<MediaService.SyncStatus?>(null) }
-            LaunchedEffect(Unit) { syncStatus = MediaService.getSyncStatus() }
-            syncStatus?.let { ss ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("媒体同步", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "${ss.totalMedia} 项 (回收站 ${ss.deletedMedia})",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-                if (ss.lastUpdate.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("最后更新", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(ss.lastUpdate.take(19), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ---- 数据看板入口 ----
-            // V33：所有数据洞察卡片（仪表盘/健康度/智能洞察/活跃度/存储健康/错误检查/完整性/
-            // 重复检测/深度存储/归档/组织/数据概览/生命周期/时间线/覆盖率/存储分析/清理建议/年度报告）
-            // 抽离到 [InsightsDashboardScreen]，SettingsScreen 仅保留入口按钮跳转过去。
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .clickable { onNavigateToInsights() }
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("数据看板", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "仪表盘 · 健康度 · 智能洞察 · 存储分析 · 年度报告",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-                    )
-                }
-                Icon(
-                    painter = painterResource(Res.drawable.ic_info),
-                    contentDescription = "查看数据看板",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            // V7：检查 RN 热更新
-            var updateStatus by remember { mutableStateOf("") }
-            var checkingUpdate by remember { mutableStateOf(false) }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .clickable {
-                        if (checkingUpdate) return@clickable
-                        checkingUpdate = true
-                        updateStatus = "检查中..."
-                        scope.launch {
-                            try {
-                                val manifest = MediaService.getRNManifest()
-                                if (manifest == null || manifest.bundles.isEmpty()) {
-                                    updateStatus = "无法获取更新信息"
-                                } else {
-                                    updateStatus = "最新版本: ${manifest.bundles[0].version}"
-                                }
-                            } catch (e: Exception) {
-                                updateStatus = "检查失败: ${e.message ?: "未知错误"}"
-                            }
-                            checkingUpdate = false
-                        }
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("检查 RN 更新", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    if (checkingUpdate) "检查中..." else updateStatus.ifEmpty { "点击检查" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("后端地址", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    SettingsState.backendUrl.ifBlank { "未设置" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    maxLines = 1
-                )
-            }
-            // V7：清除缩略图缓存
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .padding(vertical = 4.dp)
-                    .clickable {
-                        BackendImageLoader.clearCaches()
-                        scope.launch { snackbarHostState.showSnackbar("缓存已清除") }
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("清除缩略图缓存", style = MaterialTheme.typography.bodyLarge)
-                Icon(
-                    painterResource(Res.drawable.ic_delete),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(modifier = Modifier.height(16.dp))
-            SectionTitle("OpenClaw", iconRes = Res.drawable.ic_openclaw)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("OpenClaw 命令桥梁", style = MaterialTheme.typography.bodyLarge)
-                OutlinedButton(onClick = { showOpenClawDialog = true }) {
-                    Text("打开")
-                }
-            }
+            // 云相册备份
+            EntryRow(
+                iconRes = Res.drawable.ic_cloud_upload,
+                title = "云相册备份",
+                subtitle = "自动备份 · 仅 WiFi · 设备登记",
+                onClick = onNavigateToBackup
+            )
+            // 外观
+            EntryRow(
+                iconRes = Res.drawable.ic_palette,
+                title = "外观",
+                subtitle = "主题模式 · 浅色 / 暗色 / AMOLED",
+                onClick = onNavigateToAppearance
+            )
+            // 媒体工具
+            EntryRow(
+                iconRes = Res.drawable.ic_settings,
+                title = "媒体工具",
+                subtitle = "回收站 · 孤立文件 · 自动打标签 · 存储清理",
+                onClick = onNavigateToMediaTools
+            )
+            // 关于
+            EntryRow(
+                iconRes = Res.drawable.ic_info,
+                title = "关于",
+                subtitle = "版本 · 后端信息 · 更新检查 · 缓存清理",
+                onClick = onNavigateToAbout
+            )
+            // 开发者
+            EntryRow(
+                iconRes = Res.drawable.ic_openclaw,
+                title = "开发者",
+                subtitle = "OpenClaw 命令桥梁",
+                onClick = onNavigateToDeveloper
+            )
         }
     }
 }
 
-
+/**
+ * 子页入口行：左侧图标 + 标题/副标题 + 右侧箭头「›」。
+ * 用 [DrawableResource] 图标（与原 SectionTitle 同源 painter），保持设置页视觉口径。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun EntryRow(
+    iconRes: DrawableResource,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            painter = painterResource(iconRes),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            "›",
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
 
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -997,64 +526,3 @@ internal fun SectionTitle(text: String, iconRes: DrawableResource? = null) {
         )
     }
 }
-
-
-
-
-private fun modeLabel(mode: ThemeMode): String = when (mode) {
-    ThemeMode.SYSTEM -> "跟随系统"
-    ThemeMode.LIGHT -> "浅色"
-    ThemeMode.DARK -> "暗色"
-    ThemeMode.AMOLED -> "AMOLED 纯黑"
-}
-
-
-
-/** 一天对应的毫秒数（UTC）。 */
-private const val MILLIS_PER_DAY = 86_400_000L
-
-/**
- * 把上次备份时间（epoch 毫秒）格式化为 "YYYY-MM-DD HH:MM" 本地时间（PRD-v7 §1.5）。
- *
- * commonMain 无 java.time / kotlinx-datetime，用 Howard Hinnant civil_from_days 纯整数
- * 算法分解年月日（与 MediaViewModel.groupMediaByDate 同源做法），时分由当日剩余毫秒折算。
- * 时区偏移由 [systemTimeZoneOffsetMillis] 提供以对齐本地午夜。0L/无效显示"未备份"。
- */
-private fun formatBackupTime(timeMs: Long): String {
-    if (timeMs <= 0L) return "未备份"
-    val tzOffset = systemTimeZoneOffsetMillis()
-    // 本地日历日 + 当日内毫秒
-    val shifted = timeMs + tzOffset
-    val day = if (shifted >= 0) shifted / MILLIS_PER_DAY
-    else (shifted - MILLIS_PER_DAY + 1) / MILLIS_PER_DAY
-    val millisInDay = (shifted - day * MILLIS_PER_DAY).let { if (it < 0) it + MILLIS_PER_DAY else it }
-    val (y, m, d) = civilFromDays(day)
-    val totalMinutes = (millisInDay / 60_000L).toInt()
-    val hour = totalMinutes / 60
-    val minute = totalMinutes % 60
-    return "$y-${m.pad2()}-${d.pad2()} ${hour.pad2()}:${minute.pad2()}"
-}
-
-
-/** 十进制两位补零（1 → "01"）。commonMain 无 `String.format`，纯 Kotlin 实现。 */
-private fun Int.pad2(): String = if (this < 10) "0$this" else this.toString()
-
-
-/**
- * Howard Hinnant civil_from_days：自 1970-01-01 起的天数 → (年, 月, 日)。
- * 纯整数运算，无平台依赖。详见 http://howardhinnant.github.io/date_algorithms.html
- */
-private fun civilFromDays(z: Long): Triple<Int, Int, Int> {
-    val z0 = z + 719468L
-    val era = if (z0 >= 0) z0 / 146097 else (z0 - 146096) / 146097
-    val doe = z0 - era * 146097                       // [0, 146096]
-    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365  // [0, 399]
-    val y = yoe + era * 400
-    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)  // [0, 365]
-    val mp = (5 * doy + 2) / 153                       // [0, 11]
-    val d = (doy - (153 * mp + 2) / 5 + 1).toInt()      // [1, 31]
-    val m = (if (mp < 10) mp + 3 else mp - 9).toInt()   // [1, 12]
-    val year = if (m <= 2) y + 1 else y
-    return Triple(year.toInt(), m, d)
-}
-
