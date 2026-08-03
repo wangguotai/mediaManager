@@ -335,6 +335,14 @@ func (s *Server) registerRoutes() {
 	// 前缀匹配，{mediaId} 取路径尾段；走 authMiddleware（/api/media/ 前缀整体鉴权），
 	// handler 用 userIDFromContext 取 uid 并按用户隔离落盘目录。
 	s.mux.HandleFunc("/api/media/media-edit-save/", s.handleMediaEditSave)
+	// V8 §1.1 视频裁剪：POST /api/media/media-video-trim/{mediaId} 把前端选择起止点
+	// 导出的裁剪后视频片段上传保存为新媒体（保留原视频不动），文件名
+	// {mediaId}_trimmed_{unix秒}.{ext}，sidecar JSON 记录 trimmed=true + source_media_id
+	// + trim_timestamp。前缀匹配，{mediaId} 取路径尾段；走 authMiddleware（/api/media/
+	// 前缀整体鉴权），handler 用 userIDFromContext 取 uid 并按用户隔离落盘目录。
+	// 与 handleMediaEditSave 区别：body 上限 500MB（视频远大于编辑图），不固定扩展名
+	// （由原视频文件名推断，默认 mp4），magic bytes 校验视频容器格式。
+	s.mux.HandleFunc("/api/media/media-video-trim/", s.handleMediaVideoTrim)
 	s.mux.HandleFunc("/api/media/metadata/", s.handleMediaMetadata)
 
 	// 媒体收藏：POST 设置/取消收藏，DELETE 取消收藏，GET 返回收藏列表。
@@ -1772,6 +1780,166 @@ func (s *Server) handleMediaEditSave(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleMediaVideoTrim 处理 POST /api/media/media-video-trim/{mediaId}，把前端
+// 视频裁剪器选择起止点后导出的视频片段字节流保存为新媒体（保留原视频不动）。
+// 裁剪产物落到同一用户的 uploads 目录，文件名为 {mediaId}_trimmed_{unix秒}.{ext}
+// （ext 从可选的 query 参数 ext 推断，默认 .mp4），并在该用户的 metadata 目录写一份
+// sidecar JSON 记录 trimmed=true + source_media_id + trim_timestamp，供前端/同步层
+// 区分裁剪片段与原始上传。
+//
+// 与 handleMediaEditSave 的区别：
+//   - body 上限 500MB（视频片段远大于编辑导出图），用 io.LimitReader 限制；
+//   - 扩展名不固定为 jpg，由 query 参数 ext（或默认 .mp4）决定，须为视频容器白名单成员；
+//   - magic bytes 校验复用 isAllowedMediaType（涵盖 mp4/mov/avi/mkv/webm 等视频签名）；
+//   - 生成新的 uuid media_id（作为独立新媒体，非原视频版本副本）；
+//   - 不写 storage media 表（与 edit-save 一致，仅落盘 + sidecar，避免侵入存储层）。
+//
+// 用户隔离与认证复用 handleMediaUpload 同套机制：authMiddleware 注入 uid，
+// userUploadsDir(uid) 解析到该用户的 uploads 目录；uid 缺失或目录解析失败即 401。
+func (s *Server) handleMediaVideoTrim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		// 未认证或 userDirs 未配置：拒绝落盘，与 handleMediaUpload 一致。
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	// {mediaId} 取路径尾段：/api/media/media-video-trim/{mediaId} → TrimPrefix 后取剩余。
+	// 不允许包含 "/" 或 ".."（防越权目录穿越到他人 uploads 或上层目录）。
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/media-video-trim/")
+	if mediaID == "" || strings.Contains(mediaID, "/") || strings.Contains(mediaID, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	// 扩展名：优先取 query 参数 ext（前端按原视频格式传递），默认 .mp4。
+	// 规范化为小写并确保前导点；须在视频白名单内，否则 400。
+	ext := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("ext")))
+	if ext != "" && !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	if ext == "" {
+		ext = ".mp4"
+	}
+	if !videoTrimAllowedExt[ext] {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported video extension"})
+		return
+	}
+
+	// 流式落盘 + 同步收 header 做内容校验：先用临时文件接收 body（LimitReader 500MB，
+	// 视频片段远大于编辑图），再读头 512 字节做 isAllowedMediaType 校验，通过后 rename
+	// 到最终路径。与 handleMediaEditSave 同构，但上限放宽到 500MB。
+	tmpFile, err := os.CreateTemp(uploadsDir, "trim-*"+ext)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create temp file"})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+
+	// 500MB 上限：裁剪后视频片段通常远小于原片，但保留充裕余量兼容长片段。
+	limited := io.LimitReader(r.Body, 500<<20)
+	written, err := io.Copy(tmpFile, limited)
+	tmpFile.Close()
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read body"})
+		return
+	}
+	if written == 0 {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "empty body"})
+		return
+	}
+
+	// 内容层校验：读临时文件头前 512 字节，复用 isAllowedMediaType 做 magic bytes +
+	// MIME 双重校验，拒绝伪造扩展名/非视频内容。用 trimFilename 作为 filename 参数
+	// （其扩展名即上面的 ext，走 isAllowedMediaType 对应视频容器分支）。
+	ts := time.Now().Unix()
+	trimFilename := fmt.Sprintf("%s_trimmed_%d%s", mediaID, ts, ext)
+	header := make([]byte, 512)
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to inspect upload"})
+		return
+	}
+	n, _ := f.Read(header)
+	_ = f.Close()
+	if !isAllowedMediaType(trimFilename, header[:n]) {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file type not allowed"})
+		return
+	}
+
+	// 生成新的 uuid media_id（裁剪片段作为独立新媒体，非原视频版本副本）。
+	newID := uuid.New().String()
+	trimPath := filepath.Join(uploadsDir, newID+ext)
+	// 原子 rename 到最终路径（同目录 rename 不跨设备，O(1)）。uuid 撞名概率极低，
+	// 兜底处理文件已存在：若已存在则改用带 _trimmed_{ts} 后缀的文件名。
+	if _, statErr := os.Stat(trimPath); statErr == nil {
+		trimPath = filepath.Join(uploadsDir, trimFilename)
+	}
+	if err := os.Rename(tmpPath, trimPath); err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 写 metadata sidecar：在该用户的 metadata 目录写 {newID}.json，记录 trimmed=true
+	// + source_media_id + trim_timestamp，供前端/同步层识别裁剪片段来源。
+	// 复用 handleMediaUpload 的 writeUploadMetadata 同目录写法，额外追加裁剪专属字段。
+	mimeType := detectMimeType(trimFilename)
+	metaWarn := ""
+	if s.userDirs != nil {
+		metaDir, err := s.userDirs.MetadataDir(uid)
+		if err == nil {
+			meta := map[string]any{
+				"filename":       trimFilename,
+				"size":           written,
+				"created_at":     ts,
+				"mime_type":      mimeType,
+				"trimmed":        true,
+				"source_media_id": mediaID,
+				"trim_timestamp": ts,
+			}
+			data, mErr := json.Marshal(meta)
+			if mErr == nil {
+				metaPath := filepath.Join(metaDir, newID+".json")
+				if wErr := os.WriteFile(metaPath, data, 0644); wErr != nil {
+					metaWarn = wErr.Error()
+				}
+			} else {
+				metaWarn = mErr.Error()
+			}
+		} else {
+			metaWarn = err.Error()
+		}
+	} else {
+		metaWarn = "user dirs not configured"
+	}
+
+	// 可观测性：累计本次裁剪上传字节数（与 handleMediaUpload 同 metrics 口径）。
+	if s.metrics != nil {
+		s.metrics.RecordUploadBytes(written)
+	}
+
+	resp := map[string]any{
+		"media_id":        newID,
+		"source_media_id": mediaID,
+		"size":            written,
+		"version":         "trimmed",
+	}
+	if metaWarn != "" {
+		resp["metadata_warning"] = metaWarn
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // reviveDeletedMedia 把已软删的 media 行复活（deleted=0 并刷新 updated_at），
 // 供秒传命中软删记录时恢复内容可见性，使多端"删除-重传"语义一致。
 func (s *Server) reviveDeletedMedia(ctx context.Context, mediaID string) error {
@@ -1806,6 +1974,14 @@ func detectMediaTypeForStorage(filename string) string {
 var allowedUploadExt = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
 	".webp": true, ".bmp": true, ".heic": true,
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
+	".webm": true, ".m4v": true,
+}
+
+// videoTrimAllowedExt 是视频裁剪端点允许的文件扩展名白名单（allowedUploadExt 的视频子集）。
+// 仅允许视频容器格式：mp4/mov/avi/mkv/webm/m4v。前端裁剪导出按原视频格式上传，
+// 必须落在该白名单内，配合 isAllowedMediaType 的 magic bytes 校验双重防伪造。
+var videoTrimAllowedExt = map[string]bool{
 	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
 	".webm": true, ".m4v": true,
 }
