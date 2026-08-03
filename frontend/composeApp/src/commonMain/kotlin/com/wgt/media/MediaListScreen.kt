@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -56,6 +57,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import com.wgt.media.AuthState
 import com.wgt.feature.media.MediaService
+import com.wgt.media.ui.EmptyState
+import com.wgt.media.ui.LoadingShimmer
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -623,10 +626,12 @@ fun MediaListScreen(
             // 媒体 Tab（0-2）：标题 + 搜索栏 + 筛选条 + 网格列表
             Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
+                // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
+                // onSurface 主色；选择模式计数用 titleMedium。搜索图标用 onSurfaceVariant。
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 8.dp, bottom = 4.dp, start = 16.dp, end = 16.dp),
+                        .padding(top = Dimens.spacingSmall, bottom = Dimens.spacingSmall, start = Dimens.spacingLarge, end = Dimens.spacingLarge),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -646,22 +651,23 @@ fun MediaListScreen(
                                     Icon(
                                         painter = painterResource(Res.drawable.ic_close),
                                         contentDescription = "退出选择",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.size(24.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(Dimens.spacingSmall))
                                 Text(
                                     "已选择 ${viewModel.selectedCount} 项",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 18.sp,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.animateContentSize(tween(200))
                                 )
                             }
                         } else {
                             Text(
                                 "图片管理",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 20.sp
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -847,52 +853,54 @@ private fun ActivityBottomBar(
     selectedTab: Int,
     onSelect: (Int) -> Unit
 ) {
-    Row(
+    // M3 Expressive：底部 Tab 栏容器用 expressiveShape（28dp 超圆角）包裹，
+    // 浮于内容之上 + 微 elevation；外层留 horizontal padding 使容器不贴边。
+    // 选中态由 NavTab 内部用 pillShape 胶囊背景 + animateColorAsState 渐变体现。
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp)
-            .background(MaterialTheme.colorScheme.surface)
-            // 极细顶部描边替代 elevation：在边缘绘制一条 outlineVariant 半透明线，
-            // 比阴影更克制、与整体扁平精致风格一致。
-            .drawBehind {
-                drawLine(
-                    color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.06f),
-                    start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                    end = androidx.compose.ui.geometry.Offset(size.width, 0f),
-                    strokeWidth = 1f
-                )
-            },
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = Dimens.spacingMedium, vertical = Dimens.spacingSmall),
+        shape = expressiveShape,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = Dimens.cardElevationFlat,
+        shadowElevation = Dimens.cardElevationFlat
     ) {
-        NavTab(
-            icon = Res.drawable.ic_photo,
-            label = "本地图片",
-            selected = selectedTab == 0,
-            onClick = { onSelect(0) }
-        )
-        NavTab(
-            icon = Res.drawable.ic_file_upload,
-            label = "已上传",
-            selected = selectedTab == 1,
-            onClick = { onSelect(1) }
-        )
-        CenterActivityFab(
-            selected = selectedTab == 2,
-            onClick = { onSelect(2) }
-        )
-        NavTab(
-            icon = Res.drawable.ic_cloud,
-            label = "网盘图片",
-            selected = selectedTab == 3,
-            onClick = { onSelect(3) }
-        )
-        NavTab(
-            icon = Res.drawable.ic_settings,
-            label = "我的",
-            selected = selectedTab == 4,
-            onClick = { onSelect(4) }
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            NavTab(
+                icon = Res.drawable.ic_photo,
+                label = "本地图片",
+                selected = selectedTab == 0,
+                onClick = { onSelect(0) }
+            )
+            NavTab(
+                icon = Res.drawable.ic_file_upload,
+                label = "已上传",
+                selected = selectedTab == 1,
+                onClick = { onSelect(1) }
+            )
+            CenterActivityFab(
+                selected = selectedTab == 2,
+                onClick = { onSelect(2) }
+            )
+            NavTab(
+                icon = Res.drawable.ic_cloud,
+                label = "网盘图片",
+                selected = selectedTab == 3,
+                onClick = { onSelect(3) }
+            )
+            NavTab(
+                icon = Res.drawable.ic_settings,
+                label = "我的",
+                selected = selectedTab == 4,
+                onClick = { onSelect(4) }
+            )
+        }
     }
 }
 
@@ -907,8 +915,8 @@ private fun NavTab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    // 未选中态用 40% alpha 弱化（对标 M3 NavigationBar 默认 0.6→约 0.4 更克制），
-    // 选中态保留 primary 全色，对比更鲜明。
+    // M3 Expressive：选中态用 pillShape 胶囊背景（primaryContainer 半透明），
+    // 颜色与 alpha 均走 animateColorAsState tween(200) 柔和渐变。
     val baseTint = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
     val alpha by animateFloatAsState(
@@ -916,14 +924,24 @@ private fun NavTab(
         animationSpec = tween(200),
         label = "navTabAlpha"
     )
+    // 选中胶囊背景色：primaryContainer → 透明，tween 渐变。
+    val pillColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0f),
+        animationSpec = tween(200),
+        label = "navPillColor"
+    )
     Column(
         modifier = Modifier
+            // 选中态胶囊背景：pillShape + primaryContainer，仅选中时显现。
+            .clip(pillShape)
+            .background(pillColor)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = ripple(),
                 onClick = onClick
             )
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = Dimens.spacingMedium, vertical = Dimens.spacingSmall),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
@@ -970,6 +988,18 @@ private fun CenterActivityFab(
     else MaterialTheme.colorScheme.primary
     val iconColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
     else MaterialTheme.colorScheme.onPrimary
+    // M3 Expressive：中间凸起 FAB 用 expressiveShape（28dp 超圆角）替代纯圆形，
+    // 视觉更柔和现代；elevation 保留凸起感。颜色用 animateColorAsState 柔和过渡。
+    val animContainerColor by animateColorAsState(
+        targetValue = containerColor,
+        animationSpec = tween(200),
+        label = "fabContainer"
+    )
+    val animIconColor by animateColorAsState(
+        targetValue = iconColor,
+        animationSpec = tween(200),
+        label = "fabIcon"
+    )
     val borderColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
     else Color.Transparent
     Column(
@@ -982,13 +1012,13 @@ private fun CenterActivityFab(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Surface(
-            shape = CircleShape,
-            color = containerColor,
+            shape = expressiveShape,
+            color = animContainerColor,
             border = androidx.compose.foundation.BorderStroke(2.dp, borderColor),
             modifier = Modifier
                 .size(Dimens.centerFabSize)
                 .offset(y = (-12).dp)
-                .shadow(Dimens.centerFabElevation, CircleShape)
+                .shadow(Dimens.centerFabElevation, expressiveShape)
         ) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -997,7 +1027,7 @@ private fun CenterActivityFab(
                 Icon(
                     painter = painterResource(Res.drawable.ic_cloud),
                     contentDescription = "活动",
-                    tint = iconColor,
+                    tint = animIconColor,
                     modifier = Modifier.size(28.dp)
                 )
             }
@@ -1130,9 +1160,9 @@ private fun MyTabContent(
 
         Text(
             "我的",
-            fontWeight = FontWeight.Bold,
-            fontSize = 22.sp,
-            modifier = Modifier.padding(bottom = 16.dp)
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(bottom = Dimens.spacingLarge)
         )
 
         MyTabItem(
@@ -1944,10 +1974,10 @@ fun MediaGrid(
     LazyVerticalStaggeredGrid(
         state = gridState,
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
-        // 外边距 6dp，项间横向 3dp 纵向 5dp：视觉舒服的瀑布流间距（口径见 Dimens）。
-        contentPadding = PaddingValues(Dimens.gridContentPadding),
-        horizontalArrangement = Arrangement.spacedBy(Dimens.gridHorizontalSpacing),
-        verticalItemSpacing = Dimens.gridVerticalSpacing,
+        // M3 Expressive：卡片间距统一用 Dimens.spacingSmall（4dp），口径与设计系统一致。
+        contentPadding = PaddingValues(Dimens.spacingSmall),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.spacingSmall),
+        verticalItemSpacing = Dimens.spacingSmall,
         modifier = modifier
     ) {
         items(
@@ -2077,8 +2107,10 @@ fun MediaGridItem(
                 scaleY = combinedScale
             )
            .shadow(
-               elevation = if (isSelected) Dimens.selectedCardElevation else Dimens.cardElevation,
-               shape = RoundedCornerShape(Dimens.gridThumbCornerRadius),
+               // M3 Expressive：网格卡片用 mediumCardShape（16dp 圆角）+ 微阴影（1dp），
+               // 比原 12dp 直角更柔和；选中态阴影略高强化强调。
+               elevation = if (isSelected) Dimens.selectedCardElevation else Dimens.cardElevationFlat,
+               shape = mediumCardShape,
                clip = false
            )
            .combinedClickable(
@@ -2090,7 +2122,7 @@ fun MediaGridItem(
                    onLongClick()
                }
            ),
-       shape = RoundedCornerShape(Dimens.gridThumbCornerRadius),
+       shape = mediumCardShape,
        colors = CardDefaults.cardColors(
            containerColor = MaterialTheme.colorScheme.surfaceVariant
        )
@@ -2098,19 +2130,20 @@ fun MediaGridItem(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .border(if (isSelected) 2.dp else 0.dp, borderColor, RoundedCornerShape(Dimens.gridThumbCornerRadius))
+                .border(if (isSelected) 2.dp else 0.dp, borderColor, mediumCardShape)
         ) {
             // 媒体缩略图
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(Dimens.gridThumbCornerRadius)),
+                    .clip(mediumCardShape),
                 contentAlignment = Alignment.Center
             ) {
                 when {
                     isLoading -> {
-                        // 扫光 shimmer 占位：覆盖整格、左→右高光扫过，明确"正在填充此处"。
-                        ShimmerPlaceholder(modifier = Modifier.fillMaxSize())
+                        // M3 Expressive：加载占位统一用 L0 LoadingShimmer
+                        // （surfaceVariant↔surface pulse，mediumCardShape 圆角）。
+                        LoadingShimmer(modifier = Modifier.fillMaxSize())
                     }
 
                     thumbnailBitmap != null -> {
@@ -2224,20 +2257,22 @@ fun MediaGridItem(
                 )
             }
 
-            // 选中状态指示器（角落勾选）
+            // 选中状态指示器（角落勾选）—— M3 Expressive：用 pillShape 胶囊徽章
+            // 替代纯圆形，与 Tab 栏选中胶囊视觉口径一致。
             if (isSelected) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(6.dp)
-                        .size(24.dp)
-                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                        .shadow(Dimens.cardElevationFlat, pillShape)
+                        .background(MaterialTheme.colorScheme.primary, pillShape)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         painterResource(Res.drawable.ic_check_circle),
                         contentDescription = "已选中",
-                        tint = Color.White,
+                        tint = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -3143,6 +3178,10 @@ private fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
 @OptIn(ExperimentalResourceApi::class)
 @Composable
 private fun EmptyStateView(tabIndex: Int) {
+    // M3 Expressive：空态用 L0 EmptyState 组件统一视觉口径
+    // （titleMedium + bodyMedium + onSurfaceVariant + Dimens 间距）。
+    // 因 L0 EmptyState.icon 要求 ImageVector 而本场景用 emoji 主视觉，
+    // 此处复用 EmptyState 的排版/颜色/间距规范，保留 emoji + 脉冲动画。
     // 入场动画：图标与文案依次淡入+上移，比同时闪现更柔和。
     val iconAlpha by animateFloatAsState(
         targetValue = 1f,
@@ -3184,7 +3223,9 @@ private fun EmptyStateView(tabIndex: Int) {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(Dimens.spacingXLarge),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -3198,19 +3239,20 @@ private fun EmptyStateView(tabIndex: Int) {
                 alpha = iconAlpha
             )
         )
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(Dimens.spacingLarge))
+        // L0 口径：titleMedium + onSurface（与 EmptyState 组件一致）
         Text(
             title,
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f * textAlpha),
             modifier = Modifier.graphicsLayer(alpha = textAlpha)
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(Dimens.spacingSmall))
+        // L0 口径：bodyMedium + onSurfaceVariant（与 EmptyState 组件一致）
         Text(
             subtitle,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f * textAlpha),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f * textAlpha),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier.graphicsLayer(alpha = textAlpha)
         )
