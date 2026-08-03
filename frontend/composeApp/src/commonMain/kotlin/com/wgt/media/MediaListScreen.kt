@@ -117,9 +117,10 @@ fun MediaListScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // TopAppBar 滚动行为：列表滚动时 TopAppBar elevation 动画升高，增强层次感。
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
-    // 默认打开"网盘图片" Tab（index=2）：真机启动即对后端发 q=source=cloud 请求，
-    // 便于第一时间验证后端连通与 cloud 图片（data/cloud-images）加载。
-    var selectedTab by remember { mutableStateOf(2) }
+    // 默认打开"网盘图片" Tab（index=3）：5-Tab 重构后，网盘图片从 2 后移到 3。
+    // 真机启动即对后端发 q=source=cloud 请求，便于第一时间验证后端连通与
+    // cloud 图片（data/cloud-images）加载。新增的"活动"Tab(index=2)是 RN 嵌入页，不拉媒体。
+    var selectedTab by remember { mutableStateOf(3) }
 
     // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
     // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
@@ -192,11 +193,12 @@ fun MediaListScreen(
     }
 
     // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
-    // Tab 3 = "我的"，不加载媒体数据。
+    // 5-Tab 重构后：0=本地图片 / 1=已上传 / 2=活动(RN,不加载媒体) / 3=网盘图片 / 4=我的
     LaunchedEffect(selectedTab) {
         // 切换 Tab 时清空选中状态，避免上一 Tab 的选中项串到新 Tab（选中 ID 不匹配新列表）
         viewModel.deselectAll()
-        if (selectedTab == 3) return@LaunchedEffect
+        // "活动"(2)和"我的"(4) Tab 不加载媒体数据。
+        if (selectedTab == 2 || selectedTab == 4) return@LaunchedEffect
         // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
         // 串到新 Tab 造成“列表为空/对不上”的困惑。
         viewModel.clearSearchAndFilter()
@@ -207,7 +209,7 @@ fun MediaListScreen(
             // "已上传" Tab 现为云端媒体视图：展示 sync/changes 增量同步累积的 cloudMedia，
             // 进入即触发后台增量续拉。保留 loadCloudViewForTab 的"秒开已有视图 + 增量刷新"语义。
             viewModel.loadCloudViewForTab(forceRefresh = false)
-        } else if (selectedTab == 2) {
+        } else if (selectedTab == 3) {
             viewModel.loadCloudMediaList(forceRefresh = false)
         }
     }
@@ -215,6 +217,7 @@ fun MediaListScreen(
     // V9：标签云 chip 点击搜索——从"我的"切到媒体 Tab 后，上面的 LaunchedEffect(selectedTab)
     // 会先 clearSearchAndFilter。这里在 pendingTagSearch 变化时（Tab 已切完）把 query 设为 #tag，
     // 并展开搜索栏让用户看见。延迟一帧避开 clear 的竞争。
+    // 5-Tab 重构后"我的"切"网盘图片"目标从 2 改为 3（见 onTagSearch）。
     LaunchedEffect(pendingTagSearch) {
         val tag = pendingTagSearch ?: return@LaunchedEffect
         pendingTagSearch = null
@@ -280,7 +283,7 @@ fun MediaListScreen(
                                 // 列表刷新后预览内的图片方向也会跟着更新。
                                 when (selectedTab) {
                                     1 -> viewModel.loadCloudViewForTab(forceRefresh = true)
-                                    2 -> viewModel.loadCloudMediaList(forceRefresh = true)
+                                    3 -> viewModel.loadCloudMediaList(forceRefresh = true)
                                 }
                             }
                         }
@@ -512,7 +515,8 @@ fun MediaListScreen(
         // MIUI 修复：完全移除 topBar 槽位——MIUI 系统会拦截 Scaffold topBar 区域的触摸事件。
         // 标题 + 搜索图标改放到内容区第一行，确保 y 坐标足够低，绕过状态栏触摸拦截。
         bottomBar = {
-            if (viewModel.hasSelection && selectedTab < 3) {
+            // 选择模式仅在媒体 Tab（0/1/3）显示；"活动"(2)和"我的"(4)无选择态。
+            if (viewModel.hasSelection && selectedTab != 2 && selectedTab != 4) {
                 // 选择模式：显示批量操作底栏（替换 NavigationBar）
                 SelectionBottomBar(
                     selectedCount = viewModel.selectedCount,
@@ -588,33 +592,12 @@ fun MediaListScreen(
                     showBatchRotateButton = selectedTab != 0 // V8：仅云端源显示批量旋转
                 )
             } else {
-                // 正常模式：底部导航栏（MIUI 风格）
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        icon = { Icon(painterResource(Res.drawable.ic_photo), contentDescription = "本地图片") },
-                        label = { Text("本地图片") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        icon = { Icon(painterResource(Res.drawable.ic_file_upload), contentDescription = "已上传") },
-                        label = { Text("已上传") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 2,
-                        onClick = { selectedTab = 2 },
-                        icon = { Icon(painterResource(Res.drawable.ic_cloud), contentDescription = "网盘图片") },
-                        label = { Text("网盘图片") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 3,
-                        onClick = { selectedTab = 3 },
-                        icon = { Icon(painterResource(Res.drawable.ic_settings), contentDescription = "我的") },
-                        label = { Text("我的") }
-                    )
-                }
+                // 正常模式：5-Tab 底部导航栏（MIUI 风格 + 中间圆形凸起"活动"Tab）
+                // 顺序：0 本地图片 / 1 已上传 / 2 活动(凸起,RN) / 3 网盘图片 / 4 我的
+                ActivityBottomBar(
+                    selectedTab = selectedTab,
+                    onSelect = { selectedTab = it }
+                )
             }
         },
         floatingActionButton = {
@@ -630,19 +613,34 @@ fun MediaListScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues)) {
-            // "我的" Tab：设置 / 相册入口页，不渲染媒体网格
-            if (selectedTab == 3) {
+            // "活动" Tab(index=2)：直接嵌入 RN 活动中心页面（无 TopAppBar/返回按钮，
+            // 由底部 Tab 切换进出）。RnContainer 加载 assets/index.android.bundle，
+            // 组件名 "MediaManagerApp"。hostId 用独立标识避免与导航到 RnActivityScreen 的
+            // 那个 host 复用（两者场景不同：此为常驻 Tab，彼为 push 页）。
+            if (selectedTab == 2) {
+                RnContainer(
+                    componentName = "MediaManagerApp",
+                    bundleAssetName = "index.android.bundle",
+                    hostId = "activity-tab",
+                    modifier = Modifier.fillMaxSize().statusBarsPadding()
+                )
+                return@Box
+            }
+
+            // "我的" Tab(index=4)：设置 / 相册入口页，不渲染媒体网格
+            if (selectedTab == 4) {
                 MyTabContent(
                     onNavigateToSettings = onNavigateToSettings,
                     onNavigateToAlbums = onNavigateToAlbums,
                     onNavigateToFileManagement = onNavigateToFileManagement,
                     // V9：标签云 chip 点击搜索——切到"网盘图片" Tab 并把搜索 query 设为 #tag。
-                    // MyTabContent 在"我的" Tab 渲染，搜索栏仅 Tab 0-2 显示，故需切 Tab。
+                    // MyTabContent 在"我的" Tab 渲染，搜索栏仅媒体 Tab（0/1/3）显示，故需切 Tab。
                     // 因 LaunchedEffect(selectedTab) 会 clearSearchAndFilter，这里只切 Tab +
                     // 记下待搜索标签，由下方 pendingTagSearch 的 LaunchedEffect 在 Tab 切换后应用。
+                    // 5-Tab 重构后目标从 2 改为 3（网盘图片新索引）。
                     onTagSearch = { tag ->
                         pendingTagSearch = tag
-                        selectedTab = 2
+                        selectedTab = 3
                     },
                     onShowSnackbar = { msg ->
                         advancedSearchScope.launch { snackbarHostState.showSnackbar(msg) }
@@ -698,7 +696,8 @@ fun MediaListScreen(
                     }
                 }
                 // 搜索栏：自带 IconButton 展开收起，无需额外图标
-                if (selectedTab < 3) {
+                // 媒体 Tab（0/1/3）才显示搜索 + 筛选；"活动"(2)/"我的"(4)在上面 return@Box 了。
+                if (selectedTab != 2 && selectedTab != 4) {
                     SearchBar(
                         expanded = searchExpanded,
                         onExpandedChange = { searchExpanded = it },
@@ -716,7 +715,7 @@ fun MediaListScreen(
                         selected = viewModel.filterType,
                         onSelect = { type -> viewModel.applyFilterType(type) }
                     )
-                } // end if (selectedTab < 3)
+                } // end if (selectedTab != 2 && selectedTab != 4)
 
                 // ── 回忆卡片横滚区域（PRD-v7 §1.4 时光相册）──
                 // 仅在「已上传」Tab 顶部、网格之上展示：基于 cloudMedia 按月份自动生成的
@@ -747,7 +746,7 @@ fun MediaListScreen(
                         // "已上传" Tab 的同步态由 isSyncing 驱动（loadCloudViewForTab 先秒开
                         // 已有视图，isSyncing 期间叠加刷新指示）。
                         1 -> viewModel.isSyncing
-                        2 -> viewModel.isCloudLoading
+                        3 -> viewModel.isCloudLoading
                         else -> viewModel.isLoading
                     }
                     val mediaList = viewModel.mediaList
@@ -834,7 +833,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 2) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 } else {
@@ -848,7 +847,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 2) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
@@ -858,6 +857,157 @@ fun MediaListScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * 5-Tab 底部导航栏（含中间"活动"Tab 圆形凸起）。
+ *
+ * 布局：[本地图片][已上传] [●活动●] [网盘图片][我的]，SpaceEvenly 排列。
+ * 中间"活动"(index=2)为圆形凸起按钮（56dp primary 圆 + offset(-12dp)），类似抖音/
+ * 小红书中间 + 号风格；选中时圆形换 primaryContainer + 加边框。普通 Tab 由 [NavTab] 渲染。
+ *
+ * @param selectedTab 当前选中的 Tab 索引
+ * @param onSelect    Tab 点击回调，参数为 Tab 索引（0..4）
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun ActivityBottomBar(
+    selectedTab: Int,
+    onSelect: (Int) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .background(MaterialTheme.colorScheme.surface),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        NavTab(
+            icon = Res.drawable.ic_photo,
+            label = "本地图片",
+            selected = selectedTab == 0,
+            onClick = { onSelect(0) }
+        )
+        NavTab(
+            icon = Res.drawable.ic_file_upload,
+            label = "已上传",
+            selected = selectedTab == 1,
+            onClick = { onSelect(1) }
+        )
+        CenterActivityFab(
+            selected = selectedTab == 2,
+            onClick = { onSelect(2) }
+        )
+        NavTab(
+            icon = Res.drawable.ic_cloud,
+            label = "网盘图片",
+            selected = selectedTab == 3,
+            onClick = { onSelect(3) }
+        )
+        NavTab(
+            icon = Res.drawable.ic_settings,
+            label = "我的",
+            selected = selectedTab == 4,
+            onClick = { onSelect(4) }
+        )
+    }
+}
+
+/**
+ * 普通底部导航 Tab（无凸起）。图标 + 文案纵向排列，选中时着 primary 色。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+private fun NavTab(
+    icon: DrawableResource,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val tint = if (selected) MaterialTheme.colorScheme.primary
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = Modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick
+            )
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            painter = painterResource(icon),
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            color = tint,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * 中间"活动"Tab：圆形凸起按钮。56dp 圆，offset(y=-12dp) 上凸。
+ * 选中时圆背景改 primaryContainer + 加 onPrimaryContainer 边框，未选中时 primary 实心。
+ */
+@Composable
+private fun CenterActivityFab(
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+    else MaterialTheme.colorScheme.primary
+    val iconColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+    else MaterialTheme.colorScheme.onPrimary
+    val borderColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+    else Color.Transparent
+    Column(
+        modifier = Modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick
+            ),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = containerColor,
+            border = androidx.compose.foundation.BorderStroke(2.dp, borderColor),
+            modifier = Modifier
+                .size(56.dp)
+                .offset(y = (-12).dp)
+                .shadow(6.dp, CircleShape)
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painter = painterResource(Res.drawable.ic_cloud),
+                    contentDescription = "活动",
+                    tint = iconColor,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+        // 下方文案不偏移，与左右 Tab 文案对齐（凸起部分占上方 12dp）
+        Text(
+            "活动",
+            fontSize = 11.sp,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            modifier = Modifier.offset(y = (-8).dp)  // 回补凸起位移，使文案视觉与左右齐平
+        )
     }
 }
 
@@ -9407,11 +9557,14 @@ private fun ShimmerPlaceholder(modifier: Modifier = Modifier) {
 }
 
 /**
- * 空状态视图：每个 Tab 不同文案与图标，带淡入动画。
+ * 空状态视图：每个媒体 Tab 不同文案与图标，带淡入动画。
+ *
+ * 5-Tab 重构后三个媒体 Tab 的索引：Tab 0 (本地图片) / Tab 1 (已上传) / Tab 3 (网盘图片)。
+ * "活动"(2)和"我的"(4)不进入此处（前者渲染 RN，后者 return@Box）。
  *
  * - Tab 0 (本地图片)：图片图标 + "相册是空的" + "下拉刷新从图库加载"
  * - Tab 1 (已上传)：云上传图标 + "还没有上传过图片" + "点击右下角按钮上传"
- * - Tab 2 (网盘图片)：云图标 + "网盘暂无图片" + "下拉刷新重试"
+ * - Tab 3 (网盘图片)：云图标 + "网盘暂无图片" + "下拉刷新重试"  (else 分支兜底)
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
