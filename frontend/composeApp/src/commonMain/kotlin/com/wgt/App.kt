@@ -16,11 +16,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
 import com.wgt.feature.media.MediaService
 import com.wgt.media.AlbumScreen
+import com.wgt.media.AppearanceScreen
 import com.wgt.media.AuthState
+import com.wgt.media.BackupSettingsScreen
+import com.wgt.media.AboutScreen
+import com.wgt.media.DeveloperScreen
 import com.wgt.media.FileManagementScreen
 import com.wgt.media.InsightsDashboardScreen
 import com.wgt.media.LoginScreen
 import com.wgt.media.MediaListScreen
+import com.wgt.media.MediaToolsScreen
 import com.wgt.media.MediaViewModel
 import com.wgt.media.MemoryDetailScreen
 import com.wgt.media.RegisterScreen
@@ -161,10 +166,34 @@ fun App() {
                         Screen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
                             onBack = { screen = Screen.MEDIA },
-                                onNavigateToTrash = { screen = Screen.TRASH },
-                                onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY },
-                                onNavigateToCleanup = { screen = Screen.CLEANUP },
-                                onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
+                            onNavigateToBackup = { screen = Screen.BACKUP_SETTINGS },
+                            onNavigateToAppearance = { screen = Screen.APPEARANCE },
+                            onNavigateToMediaTools = { screen = Screen.MEDIA_TOOLS },
+                            onNavigateToAbout = { screen = Screen.ABOUT },
+                            onNavigateToDeveloper = { screen = Screen.DEVELOPER }
+                        )
+                        Screen.BACKUP_SETTINGS -> BackupSettingsScreen(
+                            onBack = { screen = Screen.SETTINGS },
+                            viewModel = viewModel
+                        )
+                        Screen.APPEARANCE -> AppearanceScreen(
+                            onBack = { screen = Screen.SETTINGS }
+                        )
+                        Screen.MEDIA_TOOLS -> MediaToolsScreen(
+                            onBack = { screen = Screen.SETTINGS },
+                            viewModel = viewModel,
+                            onNavigateToTrash = { screen = Screen.TRASH },
+                            onNavigateToCleanup = { screen = Screen.CLEANUP },
+                            onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY }
+                        )
+                        Screen.ABOUT -> AboutScreen(
+                            onBack = { screen = Screen.SETTINGS },
+                            viewModel = viewModel,
+                            onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
+                        )
+                        Screen.DEVELOPER -> DeveloperScreen(
+                            onBack = { screen = Screen.SETTINGS },
+                            viewModel = viewModel
                         )
                         Screen.ALBUM -> AlbumScreen(
                             viewModel = viewModel,
@@ -195,7 +224,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, INSIGHTS_DASHBOARD }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, BACKUP_SETTINGS, APPEARANCE, MEDIA_TOOLS, ABOUT, DEVELOPER, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, INSIGHTS_DASHBOARD }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }
