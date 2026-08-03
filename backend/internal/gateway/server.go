@@ -705,6 +705,8 @@ func (s *Server) registerRoutes() {
 	// 存储增长预测、最活跃月份、多样性评分等"AI 解读"口径，供前端"AI 洞察"卡片展示。
 	// 只读端点，需认证 + store，按 user_id 隔离。
 	s.mux.HandleFunc("/api/media/media-ai-insights", s.handleMediaAIInsights)
+	// V8：个性化仪表盘
+	s.mux.HandleFunc("/api/media/media-personalized-dashboard", s.handleMediaPersonalizedDashboard)
 	// 相册智能建议——基于未分类媒体（不在任何相册中的 media）按日期/类型/标签分组，
 	// 推荐可创建的相册（如"2026年7月的照片"、"视频合集"、"旅行标签"等），供前端
 	// "推荐相册"功能展示并让用户一键创建。只读端点。
@@ -24776,5 +24778,66 @@ func (s *Server) handleMediaArchiveRecommendV2(w http.ResponseWriter, r *http.Re
 			"tag_enabled":       taggedOK,
 		},
 		"user_id": uid,
+	})
+}
+
+// handleMediaPersonalizedDashboard V8：GET /api/media/media-personalized-dashboard — 个性化仪表盘。
+func (s *Server) handleMediaPersonalizedDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	now := time.Now()
+	hour := now.Hour()
+	greeting := "你好"
+	if hour >= 5 && hour < 12 {
+		greeting = "早安"
+	} else if hour >= 12 && hour < 18 {
+		greeting = "午安"
+	} else if hour >= 18 && hour < 23 {
+		greeting = "晚安"
+	}
+	// 今日统计
+	mediaList, _ := s.store.ListMediaByUser(r.Context(), uid)
+	todayStr := now.Format("2006-01-02")
+	todayUploads := 0
+	for _, m := range mediaList {
+		if m.CreatedAt.Format("2006-01-02") == todayStr {
+			todayUploads++
+		}
+	}
+	// 每日提示
+	tips := []string{
+		"定期清理重复文件可以节省存储空间",
+		"给照片打标签可以让搜索更高效",
+		"创建相册可以帮助你更好地整理回忆",
+		"收藏重要照片以免遗忘",
+		"定期备份是保护回忆的最佳方式",
+		"使用智能搜索快速找到你想要的照片",
+		"清理未使用的标签可以让标签库更整洁",
+	}
+	dayOfYear := now.YearDay()
+	tipOfDay := tips[dayOfYear%len(tips)]
+	// 快捷操作
+	quickActions := []map[string]any{
+		{"action": "upload", "label": "上传新照片", "emoji": "📤"},
+		{"action": "cleanup", "label": "清理重复", "emoji": "🧹"},
+		{"action": "album", "label": "创建相册", "emoji": "📁"},
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"greeting":      greeting,
+		"today":         map[string]any{"uploads": todayUploads, "actions": 0},
+		"quick_actions": quickActions,
+		"tip_of_day":    tipOfDay,
+		"recommendations": []map[string]any{},
 	})
 }
