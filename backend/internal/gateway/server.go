@@ -825,6 +825,13 @@ func (s *Server) registerRoutes() {
 
 	// 运营活动（PRD §3.3）：返回 promotions 列表，供客户端首页 banner/弹窗展示。
 	s.mux.HandleFunc("/api/promotions", s.handlePromotions)
+	// RN 活动详情页 & 挑战页（PRD §3.3 RN 扩展）：
+	//   /api/promotions/challenge — 当前媒体挑战（认证可选，见 authMiddleware 豁免）
+	//   /api/promotions/{id}      — 单条活动详情（前缀匹配，需认证）
+	// Go ServeMux 静态路径优先于前缀路径，故 challenge 精确路由先于 /api/promotions/
+	// 前缀命中，无需手动排序。
+	s.mux.HandleFunc("/api/promotions/challenge", s.handlePromotionsChallenge)
+	s.mux.HandleFunc("/api/promotions/", s.handlePromotionDetail)
 
 	// Metrics: Prometheus 文本格式指标暴露（PRD §2.6）。无认证（authMiddleware 豁免，
 	// 与 /healthz 一致），供 Prometheus 抓取。与 /api/stats 并存——前者面向采集系统，
@@ -914,7 +921,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// /api/auth/refresh 用 body 中的 refresh token 鉴权（非 Bearer access），故也需豁免。
 		// /metrics 与 /healthz 同为无认证端点，供 Prometheus 与健康探针抓取。
 		switch r.URL.Path {
-		case "/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/healthz", "/metrics":
+		case "/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/healthz", "/metrics", "/api/promotions/challenge":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1743,14 +1750,14 @@ func (s *Server) handleMediaEditSave(w http.ResponseWriter, r *http.Request) {
 		metaDir, err := s.userDirs.MetadataDir(uid)
 		if err == nil {
 			meta := map[string]any{
-				"filename":           editedFilename,
-				"size":               written,
-				"created_at":         ts,
-				"mime_type":          "image/jpeg",
-				"edited":             true,
-				"edit_timestamp":     ts,
-				"original_media_id":  mediaID,
-				"original_filename":  mediaID,
+				"filename":          editedFilename,
+				"size":              written,
+				"created_at":        ts,
+				"mime_type":         "image/jpeg",
+				"edited":            true,
+				"edit_timestamp":    ts,
+				"original_media_id": mediaID,
+				"original_filename": mediaID,
 			}
 			data, mErr := json.Marshal(meta)
 			if mErr == nil {
@@ -1899,13 +1906,13 @@ func (s *Server) handleMediaVideoTrim(w http.ResponseWriter, r *http.Request) {
 		metaDir, err := s.userDirs.MetadataDir(uid)
 		if err == nil {
 			meta := map[string]any{
-				"filename":       trimFilename,
-				"size":           written,
-				"created_at":     ts,
-				"mime_type":      mimeType,
-				"trimmed":        true,
+				"filename":        trimFilename,
+				"size":            written,
+				"created_at":      ts,
+				"mime_type":       mimeType,
+				"trimmed":         true,
 				"source_media_id": mediaID,
-				"trim_timestamp": ts,
+				"trim_timestamp":  ts,
 			}
 			data, mErr := json.Marshal(meta)
 			if mErr == nil {

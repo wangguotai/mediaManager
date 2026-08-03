@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"media-manager/backend/internal/service"
 )
@@ -258,6 +259,190 @@ func (s *Server) handlePromotions(w http.ResponseWriter, r *http.Request) {
 		promos = []promotion{}
 	}
 	writeJSON(w, http.StatusOK, promos)
+}
+
+// ============ 活动详情与媒体挑战端点（PRD §3.3 RN 扩展）============
+//
+// 补充两个面向 RN 活动详情页与挑战页的只读端点：
+//
+//	GET /api/promotions/challenge  — 当前媒体挑战（认证可选：无 token 时
+//	                                       current_count=0 且 rankings 为 mock）
+//	GET /api/promotions/{id}       — 单条活动详情（在 promotions.json 中按 id 匹配）
+//
+// 路由优先级：/api/promotions/challenge 精确匹配优先于 /api/promotions/ 前缀
+// （Go ServeMux 静态路径优于前缀路径，注册时二者并存即自然满足）。
+
+// promotionDetail 是 /api/promotions/{id} 的响应体。比列表项 promotion 多返回
+// rules / participants_count / created_at，供 RN 活动详情页渲染完整信息。
+// 字段命名沿用前端 camelCase 约定（与 promotion 一致）。
+type promotionDetail struct {
+	ID                string `json:"id"`
+	Title             string `json:"title"`
+	ImageURL          string `json:"imageUrl"`
+	Link              string `json:"link"`
+	ExpiresAt         string `json:"expiresAt"`
+	Rules             string `json:"rules,omitempty"`
+	ParticipantsCount int    `json:"participantsCount"`
+	CreatedAt         string `json:"createdAt,omitempty"`
+}
+
+// challengeView 是 /api/promotions/challenge 响应中 challenge 节点的结构。
+type challengeView struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	TargetCount  int    `json:"target_count"`
+	CurrentCount int    `json:"current_count"`
+	ProgressPct  int    `json:"progress_pct"`
+	Participants int    `json:"participants"`
+	EndDate      string `json:"end_date"`
+	Reward       string `json:"reward"`
+}
+
+// challengeRanking 是挑战排行榜单条记录。
+type challengeRanking struct {
+	Username string `json:"username"`
+	Count    int    `json:"count"`
+	Rank     int    `json:"rank"`
+}
+
+// challengeResponse 是 /api/promotions/challenge 的顶层响应体。
+type challengeResponse struct {
+	Challenge challengeView      `json:"challenge"`
+	Rankings  []challengeRanking `json:"rankings"`
+}
+
+// mockChallengeRankings 返回固定 5 条 mock 排行榜数据，供未认证或 store 不可用时
+// 仍能渲染挑战页（降级体验，与 handlePromotions 对缺失数据的降级策略一致）。
+func mockChallengeRankings() []challengeRanking {
+	return []challengeRanking{
+		{Username: "alice", Count: 15, Rank: 1},
+		{Username: "bob", Count: 12, Rank: 2},
+		{Username: "carol", Count: 9, Rank: 3},
+		{Username: "dave", Count: 7, Rank: 4},
+		{Username: "eve", Count: 5, Rank: 5},
+	}
+}
+
+// handlePromotionsChallenge 返回当前媒体挑战数据。
+//
+// 认证可选：authMiddleware 将 /api/promotions/challenge 列入豁免，故无 token 亦可
+// 访问。若请求带有效 token（context 中有 uid），则 current_count 取该用户本月
+// 实际上传媒体数（从 store 统计）；否则 current_count=0，rankings 用 mock。
+//
+// current_count 统计口径：ListMediaByUser 返回该用户未软删的全部媒体，handler 在
+// 内存中按 CreatedAt 年月过滤当月。store 不可用（nil）或查询失败时降级为 0，不阻断。
+func (s *Server) handlePromotionsChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+
+	current := 0
+	if uid != "" && s.store != nil {
+		media, err := s.store.ListMediaByUser(r.Context(), uid)
+		if err == nil {
+			now := time.Now()
+			year, month := now.Year(), now.Month()
+			for _, m := range media {
+				if m.CreatedAt.Year() == year && m.CreatedAt.Month() == month {
+					current++
+				}
+			}
+		}
+		// err != nil 时静默降级为 0（挑战端点为非核心，不应因 store 故障 500）。
+	}
+
+	const target = 10
+	progress := 0
+	if target > 0 {
+		progress = current * 100 / target
+		if progress > 100 {
+			progress = 100
+		}
+	}
+
+	resp := challengeResponse{
+		Challenge: challengeView{
+			ID:           "summer-2026",
+			Title:        "夏日媒体挑战",
+			Description:  "上传 10 张夏日照片赢取奖励",
+			TargetCount:  target,
+			CurrentCount: current,
+			ProgressPct:  progress,
+			Participants: 128,
+			EndDate:      "2026-09-01",
+			Reward:       "100GB 云存储空间",
+		},
+		Rankings: mockChallengeRankings(),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handlePromotionDetail 返回单条活动详情。
+//
+// 路由为 /api/promotions/ 前缀匹配，handler 从 r.URL.Path 尾段取 id，在
+// promotions.json 列表中按 ID 查找。命中返回 promotionDetail（比列表多 rules /
+// participants_count / created_at）；未命中返回 404。
+//
+// 注意：/api/promotions/challenge 精确路由优先匹配，不会落到这里；但为稳妥，
+// handler 内对 id=="challenge" 的情况显式返回 404，避免 challenge 被当成活动 id。
+func (s *Server) handlePromotionDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	// 纵深防御：即便 authMiddleware 已放行，handler 仍校验 uid（数据下发不应匿名可达）。
+	if userIDFromContext(r.Context()) == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	// 从 /api/promotions/{id} 取尾段作为 id。
+	id := strings.TrimPrefix(r.URL.Path, "/api/promotions/")
+	id = strings.Trim(id, "/")
+	if id == "" || id == "challenge" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "promotion not found"})
+		return
+	}
+
+	path := s.promotionsPath()
+	if path == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "promotion not found"})
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "promotion not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to read promotions: " + err.Error()})
+		return
+	}
+	var promos []promotion
+	if err := json.Unmarshal(data, &promos); err != nil {
+		// promotions.json 损坏：降级为未找到，不阻断（运营位为非核心功能）。
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "promotion not found"})
+		return
+	}
+	for _, p := range promos {
+		if p.ID == id {
+			detail := promotionDetail{
+				ID:                p.ID,
+				Title:             p.Title,
+				ImageURL:          p.ImageURL,
+				Link:              p.Link,
+				ExpiresAt:         p.ExpiresAt,
+				Rules:             "1. 上传夏日主题照片；2. 每张照片需含位置信息；3. 不可重复上传同一张照片。",
+				ParticipantsCount: 42,
+				CreatedAt:         "2026-06-01",
+			}
+			writeJSON(w, http.StatusOK, detail)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "promotion not found"})
 }
 
 // isSafeBundleName 校验 bundle 名/文件名仅含字母数字、-、_、.，
