@@ -1,0 +1,3 @@
+ops-server/ops-data/*.db-shm
+ops-server/ops-data/*.db-wal
+ops-data/

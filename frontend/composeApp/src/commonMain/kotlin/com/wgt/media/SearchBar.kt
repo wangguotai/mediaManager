@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -410,9 +411,14 @@ fun SearchBar(
     // 不会因 align/Box 叠层遮盖输入框。
     Column(modifier = modifier.fillMaxWidth()) {
         // 搜索框：始终填满父宽，避免收起态 CenterEnd 偏移造成的历史标签错位。
+        // 胶囊圆角 + surfaceVariant 浅底，对标百度网盘/小米相册的圆角搜索栏，
+        // 比旧的常平背景更精致，且与下方的筛选 chip 在视觉上区分开。
         Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Dimens.screenHorizontalPadding, vertical = 4.dp),
+            shape = RoundedCornerShape(Dimens.searchBarCornerRadius),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
             tonalElevation = 0.dp
         ) {
             Row(
@@ -442,7 +448,7 @@ fun SearchBar(
                             if (expanded) Res.drawable.ic_arrow_back else Res.drawable.ic_search
                         ),
                         contentDescription = if (expanded) "收起搜索" else "搜索",
-                        tint = MaterialTheme.colorScheme.onSurface
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
 

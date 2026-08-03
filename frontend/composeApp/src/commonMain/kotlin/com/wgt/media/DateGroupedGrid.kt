@@ -100,10 +100,10 @@ fun DateGroupedGrid(
     LazyVerticalStaggeredGrid(
         state = gridState,
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
-        // 与 MediaGrid 保持一致的外边距与间距，分组视觉与原网格无缝衔接。
-        contentPadding = PaddingValues(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalItemSpacing = 6.dp,
+        // 与 MediaGrid 保持一致的外边距与间距（口径见 Dimens），分组视觉与原网格无缝衔接。
+        contentPadding = PaddingValues(Dimens.gridContentPadding),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.gridHorizontalSpacing),
+        verticalItemSpacing = Dimens.gridVerticalSpacing,
         modifier = modifier
     ) {
         groups.forEach { group ->

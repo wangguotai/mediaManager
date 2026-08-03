@@ -880,7 +880,17 @@ private fun ActivityBottomBar(
         modifier = Modifier
             .fillMaxWidth()
             .height(64.dp)
-            .background(MaterialTheme.colorScheme.surface),
+            .background(MaterialTheme.colorScheme.surface)
+            // 极细顶部描边替代 elevation：在边缘绘制一条 outlineVariant 半透明线，
+            // 比阴影更克制、与整体扁平精致风格一致。
+            .drawBehind {
+                drawLine(
+                    color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.06f),
+                    start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                    end = androidx.compose.ui.geometry.Offset(size.width, 0f),
+                    strokeWidth = 1f
+                )
+            },
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -926,8 +936,15 @@ private fun NavTab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val tint = if (selected) MaterialTheme.colorScheme.primary
+    // 未选中态用 40% alpha 弱化（对标 M3 NavigationBar 默认 0.6→约 0.4 更克制），
+    // 选中态保留 primary 全色，对比更鲜明。
+    val baseTint = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
+    val alpha by animateFloatAsState(
+        targetValue = if (selected) 1f else 0.42f,
+        animationSpec = tween(200),
+        label = "navTabAlpha"
+    )
     Column(
         modifier = Modifier
             .clickable(
@@ -941,15 +958,30 @@ private fun NavTab(
         Icon(
             painter = painterResource(icon),
             contentDescription = label,
-            tint = tint,
-            modifier = Modifier.size(24.dp)
+            tint = baseTint.copy(alpha = alpha),
+            modifier = Modifier.size(Dimens.navIconSize)
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             label,
             fontSize = 11.sp,
-            color = tint,
+            color = baseTint.copy(alpha = alpha),
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        // 选中指示圆点：动画 alpha 过渡，选中时显现 primary 色小圆点，
+        // 未选中时完全透明不占视觉位。比顶部指示线更精致、不破坏扁平观感。
+        val dotAlpha by animateFloatAsState(
+            targetValue = if (selected) 1f else 0f,
+            animationSpec = tween(200),
+            label = "navDotAlpha"
+        )
+        Box(
+            modifier = Modifier
+                .size(Dimens.navIndicatorDotSize)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = dotAlpha))
         )
     }
 }
@@ -983,9 +1015,9 @@ private fun CenterActivityFab(
             color = containerColor,
             border = androidx.compose.foundation.BorderStroke(2.dp, borderColor),
             modifier = Modifier
-                .size(56.dp)
+                .size(Dimens.centerFabSize)
                 .offset(y = (-12).dp)
-                .shadow(6.dp, CircleShape)
+                .shadow(Dimens.centerFabElevation, CircleShape)
         ) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -7606,9 +7638,9 @@ private fun MyTabItem(
                 role = Role.Button
                 contentDescription = title
             },
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(Dimens.cardCornerRadius),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 1.dp
+        tonalElevation = Dimens.cardElevation
     ) {
         Row(
             modifier = Modifier
@@ -8370,10 +8402,10 @@ fun MediaGrid(
     LazyVerticalStaggeredGrid(
         state = gridState,
         columns = StaggeredGridCells.Adaptive(minSize = 110.dp),
-        // 外边距 8dp，项间横向 4dp 纵向 6dp：更紧凑的瀑布流布局。
-        contentPadding = PaddingValues(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalItemSpacing = 6.dp,
+        // 外边距 6dp，项间横向 3dp 纵向 5dp：视觉舒服的瀑布流间距（口径见 Dimens）。
+        contentPadding = PaddingValues(Dimens.gridContentPadding),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.gridHorizontalSpacing),
+        verticalItemSpacing = Dimens.gridVerticalSpacing,
         modifier = modifier
     ) {
         items(
@@ -8503,8 +8535,8 @@ fun MediaGridItem(
                 scaleY = combinedScale
             )
            .shadow(
-               elevation = if (isSelected) 4.dp else 2.dp,
-               shape = RoundedCornerShape(16.dp),
+               elevation = if (isSelected) Dimens.selectedCardElevation else Dimens.cardElevation,
+               shape = RoundedCornerShape(Dimens.gridThumbCornerRadius),
                clip = false
            )
            .combinedClickable(
@@ -8516,7 +8548,7 @@ fun MediaGridItem(
                    onLongClick()
                }
            ),
-       shape = RoundedCornerShape(16.dp),
+       shape = RoundedCornerShape(Dimens.gridThumbCornerRadius),
        colors = CardDefaults.cardColors(
            containerColor = MaterialTheme.colorScheme.surfaceVariant
        )
@@ -8524,13 +8556,13 @@ fun MediaGridItem(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .border(3.dp, borderColor, RoundedCornerShape(16.dp))
+                .border(if (isSelected) 2.dp else 0.dp, borderColor, RoundedCornerShape(Dimens.gridThumbCornerRadius))
         ) {
             // 媒体缩略图
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(16.dp)),
+                    .clip(RoundedCornerShape(Dimens.gridThumbCornerRadius)),
                 contentAlignment = Alignment.Center
             ) {
                 when {
@@ -8637,7 +8669,7 @@ fun MediaGridItem(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(start = if (isSelected) 32.dp else 6.dp, top = 6.dp)
-                    .background(typeBadgeColor.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                    .background(typeBadgeColor.copy(alpha = 0.85f), RoundedCornerShape(Dimens.badgeCornerRadius))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -8727,8 +8759,8 @@ fun MediaGridItem(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
                                 .padding(6.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(Dimens.badgeCornerRadius))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
                 }
@@ -10375,18 +10407,18 @@ private fun MemoryCard(
         modifier = Modifier
             .width(MemoryCardWidth)
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(Dimens.cardCornerRadius),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = Dimens.cardElevation)
     ) {
         // 封面区：2×2 网格缩略图，固定高度，clip 到卡片圆角
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(160.dp)
-                .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                .clip(RoundedCornerShape(topStart = Dimens.cardCornerRadius, topEnd = Dimens.cardCornerRadius))
         ) {
             // 2×2 封面网格
             Column(modifier = Modifier.fillMaxSize()) {
