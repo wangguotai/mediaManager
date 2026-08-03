@@ -542,6 +542,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-size-percentile", s.handleMediaSizePercentile)
 	// 媒体年龄分布（按 created_at 到 now 的时间差分组：<1天/1-7天/7-30天/30-90天/90-365天/>365天）
 	s.mux.HandleFunc("/api/media/media-age-distribution", s.handleMediaAgeDistribution)
+	// 离线清单：返回最近 7 天媒体的轻量元数据（id/filename/type/size/created_at/thumbnail_url），
+	// 供前端预缓存到 IndexedDB/Service Worker。需认证 + store，按 user_id 隔离；最多 200 项。
+	s.mux.HandleFunc("/api/media/media-offline-manifest", s.handleMediaOfflineManifest)
 	// 媒体归档状态（按上传年龄热/温/冷分类：热≤30天 / 温30-180天 / 冷>180天）
 	s.mux.HandleFunc("/api/media/media-archive-status", s.handleMediaArchiveStatus)
 	// 媒体宽高比分布（按 width/height 比值分类：横向/纵向/方形/全景），含 count + percentage + most_common。
@@ -1246,18 +1249,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          overall,
-		"db_health":       dbHealth,
-		"disk_health":     diskHealth,
-		"network_health":  netHealth,
-		"version":         "v0.4.0",
-		"media_count":     mediaCount,
-		"uptime":          fmt.Sprintf("%ds", int(uptime.Seconds())),
-		"cache":           cacheStatus,
-		"cache_hit_rate":  fmt.Sprintf("%.1f%%", cacheHitRate),
-		"favorite_count":  favoriteCount,
-		"disk":            diskInfo,
-		"memory":          memoryInfo,
+		"status":         overall,
+		"db_health":      dbHealth,
+		"disk_health":    diskHealth,
+		"network_health": netHealth,
+		"version":        "v0.4.0",
+		"media_count":    mediaCount,
+		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
+		"cache":          cacheStatus,
+		"cache_hit_rate": fmt.Sprintf("%.1f%%", cacheHitRate),
+		"favorite_count": favoriteCount,
+		"disk":           diskInfo,
+		"memory":         memoryInfo,
 	})
 }
 
@@ -5283,16 +5286,16 @@ func (s *Server) handleMediaAdvancedSearch(w http.ResponseWriter, r *http.Reques
 // smartParsedQuery 是智能搜索解析后的结构化查询表示，与 AdvancedSearchOpts
 // 对应但面向返回给前端的展示字段（含 null 友好的指针类型，未解析到的维度返回 null）。
 type smartParsedQuery struct {
-	Type      string   `json:"type,omitempty"`       // IMAGE / VIDEO / LIVE_PHOTO；未识别为空
+	Type      string `json:"type,omitempty"` // IMAGE / VIDEO / LIVE_PHOTO；未识别为空
 	DateRange *struct {
-		From string `json:"from"` // RFC3339
-		To   string `json:"to"`   // RFC3339
+		From  string `json:"from"`  // RFC3339
+		To    string `json:"to"`    // RFC3339
 		Label string `json:"label"` // 可读标签，如 "去年夏天"
 	} `json:"date_range,omitempty"`
 	SizeRange *struct {
-		Min    int64  `json:"min,omitempty"` // 字节；0 表示无下限
-		Max    int64  `json:"max,omitempty"` // 字节；0 表示无上限
-		Label  string `json:"label"`         // 可读标签，如 "大于10MB"
+		Min   int64  `json:"min,omitempty"` // 字节；0 表示无下限
+		Max   int64  `json:"max,omitempty"` // 字节；0 表示无上限
+		Label string `json:"label"`         // 可读标签，如 "大于10MB"
 	} `json:"size_range,omitempty"`
 	Tags []string `json:"tags,omitempty"` // #标签名 列表（不含 #）
 }
@@ -14089,6 +14092,91 @@ func (s *Server) handleMediaAgeDistribution(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ranges": buckets,
 		"total":  total,
+	})
+}
+
+// handleMediaOfflineManifest GET /api/media/media-offline-manifest — 离线缓存清单。
+//
+// 返回当前用户最近 7 天上传的媒体的轻量元数据列表，供前端（Service Worker /
+// IndexedDB）预缓存，实现离线浏览。每项仅包含前端离线渲染所需的最小字段：
+//
+//	id / filename / type / size / created_at / thumbnail_url
+//
+// thumbnail_url 形如 /api/media/thumbnail/{id}?size=small，指向已注册的缩略图端点。
+//
+// 过滤口径：created_at >= now-7天（上传时间，非拍摄时间 taken_at）。ListMediaByUser
+// 已按 created_at DESC 排序且只返回 deleted=0 行，故无需二次排序或软删过滤——只需
+// 沿切片顺序取前 N 条满足"近 7 天"的记录即可在命中上限时提前截断。
+// 上限 200 项，避免响应过大；total_count 为近 7 天命中总数（可能 > 返回条数）。
+// 需认证，按 user_id 隔离；store 未注入返回 503。
+//
+// 响应结构：
+//
+//	{
+//	  "items": [
+//	    {"id","filename","type","size","created_at","thumbnail_url"}, ...
+//	  ],
+//	  "total_count":  N, // 最近 7 天命中媒体总数（截断前）
+//	  "generated_at": "2026-08-03T12:00:00Z" // 清单生成时刻（RFC3339/UTC）
+//	}
+func (s *Server) handleMediaOfflineManifest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	// 上限 200 项，避免响应体过大；前端可基于 generated_at + total_count 判断是否被截断。
+	const maxItems = 200
+
+	type offlineItem struct {
+		ID           string    `json:"id"`
+		Filename     string    `json:"filename"`
+		Type         string    `json:"type"`
+		Size         int64     `json:"size"`
+		CreatedAt    time.Time `json:"created_at"`
+		ThumbnailURL string    `json:"thumbnail_url"`
+	}
+
+	items := make([]offlineItem, 0, maxItems)
+	var totalCount int64
+	for _, m := range mediaList {
+		// ListMediaByUser 仅返回 deleted=0 行；此处无需再判 m.Deleted。
+		// created_at 降序，首条不满足 ⇒ 其后均更旧，可安全中断。
+		if m.CreatedAt.Before(cutoff) {
+			break
+		}
+		totalCount++
+		if len(items) < maxItems {
+			items = append(items, offlineItem{
+				ID:           m.ID,
+				Filename:     m.Filename,
+				Type:         m.Type,
+				Size:         m.Size,
+				CreatedAt:    m.CreatedAt,
+				ThumbnailURL: "/api/media/thumbnail/" + m.ID + "?size=small",
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":        items,
+		"total_count":  totalCount,
+		"generated_at": now.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -23641,9 +23729,9 @@ func (s *Server) handleMediaCleanupPlan(w http.ResponseWriter, r *http.Request) 
 		// 可选来源细节（不同 type 携带不同字段，omitempty 保持响应精简）。
 		SHA256      string `json:"sha256,omitempty"`
 		Resolution  string `json:"resolution,omitempty"`
-		PeerMediaID string `json:"peer_media_id,omitempty"`  // near_duplicates 对端 ID
-		ErrorType   string `json:"error_type,omitempty"`     // error_files 的子类型
-		AgeDays     int    `json:"age_days,omitempty"`       // archive_candidates 的文件年龄（天）
+		PeerMediaID string `json:"peer_media_id,omitempty"` // near_duplicates 对端 ID
+		ErrorType   string `json:"error_type,omitempty"`    // error_files 的子类型
+		AgeDays     int    `json:"age_days,omitempty"`      // archive_candidates 的文件年龄（天）
 	}
 
 	plan := make([]cleanupItem, 0, len(mediaList))
@@ -23668,7 +23756,7 @@ func (s *Server) handleMediaCleanupPlan(w http.ResponseWriter, r *http.Request) 
 	}
 	cands := make([]ndCand, 0, len(mediaList))
 	now := time.Now()
-	const archiveAgeDays = 180        // 超过 180 天视为旧文件
+	const archiveAgeDays = 180                       // 超过 180 天视为旧文件
 	const archiveSizeBytes = int64(50 * 1024 * 1024) // >=50MB 视为大文件
 
 	for _, m := range mediaList {
@@ -23803,17 +23891,17 @@ func (s *Server) handleMediaCleanupPlan(w http.ResponseWriter, r *http.Request) 
 	// media_id 取对端 ID（即"建议可删的那一份"），peer_media_id 取当前端。两端各出现
 	// 一次，由前端在用户确认后决定删哪一份。reclaimable = 对端文件 size。
 	type ndPair struct {
-		MediaAID   string
-		MediaBID   string
-		FilenameA  string
-		FilenameB  string
-		Size       int64
-		Width      int32
-		Height     int32
-		Type       string
-		SizeDiff   int64
-		SHA256A    string
-		SHA256B    string
+		MediaAID  string
+		MediaBID  string
+		FilenameA string
+		FilenameB string
+		Size      int64
+		Width     int32
+		Height    int32
+		Type      string
+		SizeDiff  int64
+		SHA256A   string
+		SHA256B   string
 	}
 	nearPairs := make([]ndPair, 0)
 	for i := 0; i < len(cands); i++ {
@@ -23932,13 +24020,13 @@ func (s *Server) handleMediaCleanupPlan(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plan":                     plan,
-		"total_items":              totalItems,
-		"total_reclaimable_bytes":  totalReclaimable,
-		"estimated_time_min":       estimatedTimeMin,
-		"source_counts":            sourceCounts,
-		"disk_check":               diskCheck,
-		"user_id":                  uid,
+		"plan":                    plan,
+		"total_items":             totalItems,
+		"total_reclaimable_bytes": totalReclaimable,
+		"estimated_time_min":      estimatedTimeMin,
+		"source_counts":           sourceCounts,
+		"disk_check":              diskCheck,
+		"user_id":                 uid,
 	})
 }
 
@@ -24745,7 +24833,9 @@ func shootUnixOf(takenAtMs int64, createdAt time.Time) int64 {
 //
 // ?limit=20（默认 20，钳制 [1,200]）。按 archive_score 倒序，并列按 size 倒序作稳定 tiebreaker。
 // 返回：{recommendations:[{media_id,filename,score,size,age_days,type,reasons:[...]}],
-//        total, potential_savings_bytes, scored_count, user_id}
+//
+//	total, potential_savings_bytes, scored_count, user_id}
+//
 // potential_savings_bytes 为返回的 recommendations 中各条 size 之和（归档后可从热存储释放的上限）。
 func (s *Server) handleMediaArchiveRecommendV2(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -24927,23 +25017,23 @@ func (s *Server) handleMediaArchiveRecommendV2(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"recommendations":          recs,
-		"total":                    len(recs),
-		"potential_savings_bytes":  potentialSavings,
-		"potential_savings_mb":     round2(float64(potentialSavings) / float64(mbBytes)),
-		"scored_count":             scoredCount, // 截取前进入评分的 media 总数
-		"limit":                    limit,
+		"recommendations":         recs,
+		"total":                   len(recs),
+		"potential_savings_bytes": potentialSavings,
+		"potential_savings_mb":    round2(float64(potentialSavings) / float64(mbBytes)),
+		"scored_count":            scoredCount, // 截取前进入评分的 media 总数
+		"limit":                   limit,
 		"dimensions": map[string]any{
-			"age_over_days":     coldThresholdDays,
-			"age_score":         coldScore,
-			"no_tag_score":      noTagScore,
+			"age_over_days":      coldThresholdDays,
+			"age_score":          coldScore,
+			"no_tag_score":       noTagScore,
 			"not_in_album_score": notInAlbumScore,
-			"large_size_mb":     largeSizeMB,
-			"large_size_score":  largeSizeScore,
+			"large_size_mb":      largeSizeMB,
+			"large_size_score":   largeSizeScore,
 			"not_favorite_score": notFavScore,
-			"favorite_enabled":  favOK,
-			"album_enabled":     albumOK,
-			"tag_enabled":       taggedOK,
+			"favorite_enabled":   favOK,
+			"album_enabled":      albumOK,
+			"tag_enabled":        taggedOK,
 		},
 		"user_id": uid,
 	})
@@ -25002,10 +25092,10 @@ func (s *Server) handleMediaPersonalizedDashboard(w http.ResponseWriter, r *http
 		{"action": "album", "label": "创建相册", "emoji": "📁"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"greeting":      greeting,
-		"today":         map[string]any{"uploads": todayUploads, "actions": 0},
-		"quick_actions": quickActions,
-		"tip_of_day":    tipOfDay,
+		"greeting":        greeting,
+		"today":           map[string]any{"uploads": todayUploads, "actions": 0},
+		"quick_actions":   quickActions,
+		"tip_of_day":      tipOfDay,
 		"recommendations": []map[string]any{},
 	})
 }
@@ -25043,9 +25133,9 @@ func (s *Server) handleMediaAiCleanupSuggestions(w http.ResponseWriter, r *http.
 	}
 
 	// 阈值常量
-	const lowResThreshold = 600      // max(width,height) < 此值视为低分辨率
+	const lowResThreshold = 600                  // max(width,height) < 此值视为低分辨率
 	const largeImageThreshold = 15 * 1024 * 1024 // 15MB
-	const tinyFileThreshold = 30 * 1024 // 30KB
+	const tinyFileThreshold = 30 * 1024          // 30KB
 
 	type suggestionItem struct {
 		MediaID  string `json:"media_id"`
@@ -25132,29 +25222,29 @@ func (s *Server) handleMediaAiCleanupSuggestions(w http.ResponseWriter, r *http.
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"low_resolution": map[string]any{
-			"count":            len(lowRes),
+			"count":             len(lowRes),
 			"reclaimable_bytes": sumSize(lowRes),
-			"items":            lowRes,
+			"items":             lowRes,
 		},
 		"screenshots": map[string]any{
-			"count":            len(screenshots),
+			"count":             len(screenshots),
 			"reclaimable_bytes": sumSize(screenshots),
-			"items":            screenshots,
+			"items":             screenshots,
 		},
 		"large_images": map[string]any{
-			"count":            len(largeImages),
+			"count":             len(largeImages),
 			"reclaimable_bytes": sumSize(largeImages),
-			"items":            largeImages,
+			"items":             largeImages,
 		},
 		"tiny_files": map[string]any{
-			"count":            len(tinyFiles),
+			"count":             len(tinyFiles),
 			"reclaimable_bytes": sumSize(tinyFiles),
-			"items":            tinyFiles,
+			"items":             tinyFiles,
 		},
 		"no_taken_at": map[string]any{
-			"count":            len(noTakenAt),
+			"count":             len(noTakenAt),
 			"reclaimable_bytes": sumSize(noTakenAt),
-			"items":            noTakenAt,
+			"items":             noTakenAt,
 		},
 		"total_suggestion_count": totalCount,
 		"user_id":                uid,

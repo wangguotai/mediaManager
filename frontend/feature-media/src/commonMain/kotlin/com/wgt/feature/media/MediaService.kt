@@ -11143,4 +11143,80 @@ object MediaService {
             items = items
         )
     }
+
+    // ============ 离线缩略图缓存 ============
+
+    /**
+     * 离线缓存清单条目 —— 与后端 `GET /api/media/media-offline-manifest` 返回的数组元素对齐。
+     *
+     * 后端按\"已上传 / 常访问\"的最近媒体聚合出一个\"适合离线预览\"的清单，前端在网络可用时
+     * 用 [OfflineCacheManager.prefetchOfflineThumbnails] 拉取每个 [id] 的缩略图字节并落盘，
+     * 离线时直接从磁盘读图显图，无需回退到\"网络失败→空网格\"的体验。
+     *
+     * 字段命名沿用运行时 JSON 解析（与 [getMediaListPaged] 的 [MediaMetadata] 字段语义一致，
+     * 但这里用简单 data class 而非 protobuf 生成的 [MediaMetadata]——离线清单无需
+     * protobuf 编解码，只需\"id+缩略图 url\"即可，避免引入 wire 适配器）。
+     *
+     * 后端没有 `thumbnailUrl` 显式字段时，前端回退到 `${base}/api/media/thumbnail/{id}`，
+     * 故 [thumbnailUrl] 可选（空串即走默认构造路径）。
+     *
+     * @property id 媒体 ID —— 缩略图文件名键与 [getThumbnail] 的入参
+     * @property filename 文件名（仅用于日志，不参与缓存键）
+     * @property type 媒体类型字符串（\"IMAGE\"/\"VIDEO\"/\"LIVE_PHOTO\"）；离线场景一般仅缓存 IMAGE
+     * @property size 原始字节数；用于日志，不参与缓存键
+     * @property createdAt 创建时间戳（后端 time.Time 的 RFC3339 字符串原样透传）；离线场景仅展示
+     * @property thumbnailUrl 缩略图直链 URL（可选）。空串时 [OfflineCacheManager] 用 [id] 走默认 thumbnail 端点
+     */
+    data class OfflineMediaItem(
+        val id: String,
+        val filename: String = "",
+        val type: String = "",
+        val size: Long = 0L,
+        val createdAt: String = "",
+        val thumbnailUrl: String = ""
+    )
+
+    /**
+     * GET /api/media/media-offline-manifest — 拉取离线缩略图预缓存清单。
+     *
+     * 后端返回 `{ "list": [{id, filename, type, size, created_at, thumbnail_url}] }`，
+     * 前端解析为 [List]<[OfflineMediaItem]>。`thumbnail_url` 字段后端可不返回（空串回退），
+     * 此时 [OfflineCacheManager.prefetchOfflineThumbnails] 改用默认 thumbnail 端点构造 URL。
+     *
+     * 失败策略：HTTP 非 200 或网络异常均返回 null，调用方按\"无清单\"处理 —— 即不预缓存，
+     * 不抛异常打断上层流程（与 [getRelatedMedia] / [getSimilarMedia] 的容错风格一致）。
+     * 鉴权头由 defaultRequest 统一注入，无需此处重复附加。
+     *
+     * @return 离线清单；失败返回 null。**清单为空不是失败**，后端可合理返回空 list（无媒体时）。
+     */
+    suspend fun getOfflineManifest(): List<OfflineMediaItem>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-offline-manifest")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                o["list"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val id = item["id"]?.jsonPrimitive?.contentOrNull
+                        ?: item["media_id"]?.jsonPrimitive?.contentOrNull
+                        ?: return@mapNotNull null
+                    OfflineMediaItem(
+                        id = id,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        type = item["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = item["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        createdAt = item["created_at"]?.jsonPrimitive?.contentOrNull
+                            ?: item["createdAt"]?.jsonPrimitive?.contentOrNull ?: "",
+                        thumbnailUrl = item["thumbnail_url"]?.jsonPrimitive?.contentOrNull
+                            ?: item["thumbnailUrl"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getOfflineManifest status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getOfflineManifest FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 }
