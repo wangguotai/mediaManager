@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -31,7 +30,7 @@ import com.wgt.media.CleanupScreen
 import com.wgt.media.TrashScreen
 import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
-import com.wgt.media.AppShapes
+import com.wgt.media.AppTheme
 import com.wgt.applyAmoledOverride
 
 private val viewModel = MediaViewModel()
@@ -115,7 +114,7 @@ fun App() {
     // 登录/登出/401 变更触发本 Composable 重组，从而在登录页与主界面间切换。
     val isLoggedIn = AuthState.isLoggedIn
 
-    MaterialTheme(colorScheme = colors, shapes = AppShapes) {
+    AppTheme(colorScheme = colors) {
         AnimatedContent(
             targetState = showSplash,
             transitionSpec = { fadeIn(tween(400)) togetherWith fadeOut(tween(400)) },
