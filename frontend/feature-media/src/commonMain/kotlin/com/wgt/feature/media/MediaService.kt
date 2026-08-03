@@ -11061,4 +11061,86 @@ object MediaService {
             null
         }
     }
+
+    // ============ AI 清理建议（V8 §1.4） ============
+
+    /** AI 清理建议单条项——检出的一张可清理图片及其原因。 */
+    data class AiCleanupItem(
+        val mediaId: String,
+        val filename: String,
+        val size: Long,
+        val width: Int,
+        val height: Int,
+        val reason: String
+    )
+
+    /** AI 清理建议分类汇总——各类的条目列表 + 可回收字节数。 */
+    data class AiCleanupCategory(
+        val count: Int,
+        val reclaimableBytes: Long,
+        val items: List<AiCleanupItem>
+    )
+
+    /**
+     * AI 清理建议 —— V8 §1.4。
+     *
+     * 后端 `GET /api/media/media-ai-cleanup-suggestions` 基于媒体元数据启发式分析
+     * （低分辨率/截图/超大图/极小文件/缺拍摄时间），检出可删除候选并分组。
+     * 纯元数据分析，不解码图片，轻量。
+     *
+     * @return 五类清理建议汇总；失败返回 null
+     */
+    suspend fun getAiCleanupSuggestions(): AiCleanupSuggestions? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-ai-cleanup-suggestions")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                AiCleanupSuggestions(
+                    lowResolution = parseCleanupCategory(o["low_resolution"]?.jsonObject),
+                    screenshots = parseCleanupCategory(o["screenshots"]?.jsonObject),
+                    largeImages = parseCleanupCategory(o["large_images"]?.jsonObject),
+                    tinyFiles = parseCleanupCategory(o["tiny_files"]?.jsonObject),
+                    noTakenAt = parseCleanupCategory(o["no_taken_at"]?.jsonObject),
+                    totalSuggestionCount = o["total_suggestion_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "getAiCleanupSuggestions status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAiCleanupSuggestions FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** AI 清理建议汇总。 */
+    data class AiCleanupSuggestions(
+        val lowResolution: AiCleanupCategory,
+        val screenshots: AiCleanupCategory,
+        val largeImages: AiCleanupCategory,
+        val tinyFiles: AiCleanupCategory,
+        val noTakenAt: AiCleanupCategory,
+        val totalSuggestionCount: Int
+    )
+
+    /** 解析一个清理分类的 JSON 对象为 [AiCleanupCategory]。 */
+    private fun parseCleanupCategory(o: JsonObject?): AiCleanupCategory {
+        if (o == null) return AiCleanupCategory(0, 0L, emptyList())
+        val items = o["items"]?.jsonArray?.mapNotNull { el ->
+            val item = el.jsonObject
+            AiCleanupItem(
+                mediaId = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                size = item["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                width = item["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                height = item["height"]?.jsonPrimitive?.intOrNull ?: 0,
+                reason = item["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+            )
+        } ?: emptyList()
+        return AiCleanupCategory(
+            count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+            reclaimableBytes = o["reclaimable_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+            items = items
+        )
+    }
 }

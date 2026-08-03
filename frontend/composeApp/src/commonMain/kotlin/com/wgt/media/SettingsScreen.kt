@@ -1892,6 +1892,10 @@ fun SettingsScreen(
             // 着色。独立 @Composable，自取数据；紧跟清理计划后，作为"智能建议"系列收尾。
             AIInsightsCard()
 
+            // V8 §1.4：AI 清理建议卡片 —— 调 /api/media/media-ai-cleanup-suggestions 显示
+            // 低分辨率/截图/超大图/极小文件/缺拍摄时间五类可清理候选，每类显示数量+可回收空间。
+            AiCleanupSuggestionsCard()
+
             Spacer(modifier = Modifier.height(8.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(8.dp))
@@ -5370,6 +5374,125 @@ private fun AIInsightsCard() {
                     modifier = Modifier.padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
                 )
             }
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+/**
+ * V8 §1.4：AI 清理建议卡片。
+ *
+ * 调 GET /api/media/media-ai-cleanup-suggestions 获取基于媒体元数据启发式分析的
+ * 五类可清理候选（低分辨率/截图/超大图/极小文件/缺拍摄时间），每类显示数量 +
+ * 可回收字节数 + 前几条示例。四态自洽（loading/error/empty/data），与
+ * [AIInsightsCard] / [CleanupPlanCard] 同款结构。独立 @Composable，自取数据。
+ */
+@Composable
+private fun AiCleanupSuggestionsCard() {
+    var suggestions by remember { mutableStateOf<MediaService.AiCleanupSuggestions?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        suggestions = MediaService.getAiCleanupSuggestions()
+        loading = false
+    }
+    SectionTitle("🧹 AI 清理建议", iconRes = Res.drawable.ic_delete)
+
+    if (loading) {
+        Text(
+            "分析中...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else if (suggestions == null) {
+        Text(
+            "无法获取清理建议",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+        )
+    } else {
+        val s = suggestions!!
+        if (s.totalSuggestionCount == 0) {
+            Text(
+                "🎉 未发现可清理的低质量图片",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+            )
+        } else {
+            // 五类建议，每类一行：emoji + 名称 + 数量 + 可回收空间
+            val categories = listOf(
+                Triple("🖼️", "低分辨率", s.lowResolution),
+                Triple("📱", "截图", s.screenshots),
+                Triple("📦", "超大图片", s.largeImages),
+                Triple("📄", "极小文件", s.tinyFiles),
+                Triple("🕐", "缺拍摄时间", s.noTakenAt)
+            )
+            categories.forEach { (emoji, label, cat) ->
+                if (cat.count > 0) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(emoji, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            label,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${cat.count} 项",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (cat.reclaimableBytes > 0) {
+                            Text(
+                                formatBytesToMB(cat.reclaimableBytes),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    // 显示前 3 条示例
+                    cat.items.take(3).forEach { item ->
+                        Text(
+                            "  $emoji ${item.filename} — ${item.reason}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(start = 38.dp, bottom = 1.dp)
+                        )
+                    }
+                    if (cat.count > 3) {
+                        Text(
+                            "  ...还有 ${cat.count - 3} 项",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            modifier = Modifier.padding(start = 38.dp, bottom = 2.dp)
+                        )
+                    }
+                }
+            }
+            // 总计
+            val totalBytes = s.lowResolution.reclaimableBytes +
+                s.screenshots.reclaimableBytes +
+                s.largeImages.reclaimableBytes +
+                s.tinyFiles.reclaimableBytes +
+                s.noTakenAt.reclaimableBytes
+            Text(
+                "共 ${s.totalSuggestionCount} 项建议，可回收 ${formatBytesToMB(totalBytes)} MB",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp)
+            )
         }
     }
     Spacer(modifier = Modifier.height(8.dp))

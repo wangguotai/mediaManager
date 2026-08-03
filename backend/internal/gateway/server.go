@@ -707,6 +707,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-ai-insights", s.handleMediaAIInsights)
 	// V8：个性化仪表盘
 	s.mux.HandleFunc("/api/media/media-personalized-dashboard", s.handleMediaPersonalizedDashboard)
+	// V8 §1.4：AI 清理建议——基于媒体元数据的启发式分析（低分辨率/截图/超大图/极小文件/缺拍摄时间），
+	// 检出可删除候选项并分组展示，供前端"AI 清理建议"卡片展示并让用户一键清理。
+	// 纯元数据启发式，不解码图片，轻量；只读端点，需认证 + store，按 user_id 隔离。
+	s.mux.HandleFunc("/api/media/media-ai-cleanup-suggestions", s.handleMediaAiCleanupSuggestions)
 	// 相册智能建议——基于未分类媒体（不在任何相册中的 media）按日期/类型/标签分组，
 	// 推荐可创建的相册（如"2026年7月的照片"、"视频合集"、"旅行标签"等），供前端
 	// "推荐相册"功能展示并让用户一键创建。只读端点。
@@ -24839,5 +24843,156 @@ func (s *Server) handleMediaPersonalizedDashboard(w http.ResponseWriter, r *http
 		"quick_actions": quickActions,
 		"tip_of_day":    tipOfDay,
 		"recommendations": []map[string]any{},
+	})
+}
+
+// handleMediaAiCleanupSuggestions V8 §1.4：GET /api/media/media-ai-cleanup-suggestions — AI 清理建议。
+//
+// 基于媒体元数据的启发式分析，检出可删除候选并分组：
+//
+//	a) 低分辨率：图片 max(width,height) < 600（可能缩略图/小图误传/低质量网络图）。
+//	b) 截图：文件名匹配 Screenshot_/Screen_/Screenshot_ 等模式且为 IMAGE（截图通常无需长期保留）。
+//	c) 超大单图：单张图片 >15MB（质量过高，可压缩后替代）。
+//	d) 极小文件：图片 <30KB（可能损坏或测试图）。
+//	e) 缺拍摄时间：TakenAt=0 的图片（无 EXIF，可能非相机拍摄，整理价值低）。
+//
+// 纯元数据启发式，不解码图片，轻量。每类给出媒体列表（id+filename+原因）+
+// 可回收字节数 + 总计建议数。供前端"AI 清理建议"卡片展示。
+func (s *Server) handleMediaAiCleanupSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 阈值常量
+	const lowResThreshold = 600      // max(width,height) < 此值视为低分辨率
+	const largeImageThreshold = 15 * 1024 * 1024 // 15MB
+	const tinyFileThreshold = 30 * 1024 // 30KB
+
+	type suggestionItem struct {
+		MediaID  string `json:"media_id"`
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		Width    int32  `json:"width"`
+		Height   int32  `json:"height"`
+		Reason   string `json:"reason"`
+	}
+
+	var lowRes, screenshots, largeImages, tinyFiles, noTakenAt []suggestionItem
+
+	for _, m := range mediaList {
+		// 仅分析图片（视频不在清理建议范围——视频大小通常合理且有不同清理策略）
+		if m.Type != "IMAGE" {
+			continue
+		}
+		maxDim := m.Width
+		if m.Height > maxDim {
+			maxDim = m.Height
+		}
+
+		// (a) 低分辨率
+		if maxDim > 0 && maxDim < lowResThreshold {
+			lowRes = append(lowRes, suggestionItem{
+				MediaID: m.ID, Filename: m.Filename, Size: m.Size,
+				Width: m.Width, Height: m.Height,
+				Reason: fmt.Sprintf("分辨率 %dx%d 低于 %dpx", m.Width, m.Height, lowResThreshold),
+			})
+		}
+
+		// (b) 截图检测：文件名模式 + PNG 格式
+		fn := strings.ToLower(m.Filename)
+		isScreenshot := strings.Contains(fn, "screenshot") ||
+			strings.Contains(fn, "screen_") ||
+			strings.Contains(fn, "screen shot") ||
+			strings.Contains(fn, "scr_")
+		if isScreenshot {
+			screenshots = append(screenshots, suggestionItem{
+				MediaID: m.ID, Filename: m.Filename, Size: m.Size,
+				Width: m.Width, Height: m.Height,
+				Reason: "文件名匹配截图模式（Screenshot/Screen_）",
+			})
+		}
+
+		// (c) 超大单图
+		if m.Size > largeImageThreshold {
+			largeImages = append(largeImages, suggestionItem{
+				MediaID: m.ID, Filename: m.Filename, Size: m.Size,
+				Width: m.Width, Height: m.Height,
+				Reason: fmt.Sprintf("单图 %.1fMB 超过 %.0fMB，可压缩", float64(m.Size)/1048576, float64(largeImageThreshold)/1048576),
+			})
+		}
+
+		// (d) 极小文件
+		if m.Size > 0 && m.Size < tinyFileThreshold {
+			tinyFiles = append(tinyFiles, suggestionItem{
+				MediaID: m.ID, Filename: m.Filename, Size: m.Size,
+				Width: m.Width, Height: m.Height,
+				Reason: fmt.Sprintf("文件仅 %dKB，可能损坏或测试图", m.Size/1024),
+			})
+		}
+
+		// (e) 缺拍摄时间
+		if m.TakenAt == 0 {
+			noTakenAt = append(noTakenAt, suggestionItem{
+				MediaID: m.ID, Filename: m.Filename, Size: m.Size,
+				Width: m.Width, Height: m.Height,
+				Reason: "无 EXIF 拍摄时间，可能非相机拍摄",
+			})
+		}
+	}
+
+	// 计算各类可回收字节数
+	sumSize := func(items []suggestionItem) int64 {
+		var s int64
+		for _, it := range items {
+			s += it.Size
+		}
+		return s
+	}
+
+	totalCount := len(lowRes) + len(screenshots) + len(largeImages) + len(tinyFiles) + len(noTakenAt)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"low_resolution": map[string]any{
+			"count":            len(lowRes),
+			"reclaimable_bytes": sumSize(lowRes),
+			"items":            lowRes,
+		},
+		"screenshots": map[string]any{
+			"count":            len(screenshots),
+			"reclaimable_bytes": sumSize(screenshots),
+			"items":            screenshots,
+		},
+		"large_images": map[string]any{
+			"count":            len(largeImages),
+			"reclaimable_bytes": sumSize(largeImages),
+			"items":            largeImages,
+		},
+		"tiny_files": map[string]any{
+			"count":            len(tinyFiles),
+			"reclaimable_bytes": sumSize(tinyFiles),
+			"items":            tinyFiles,
+		},
+		"no_taken_at": map[string]any{
+			"count":            len(noTakenAt),
+			"reclaimable_bytes": sumSize(noTakenAt),
+			"items":            noTakenAt,
+		},
+		"total_suggestion_count": totalCount,
+		"user_id":                uid,
 	})
 }
