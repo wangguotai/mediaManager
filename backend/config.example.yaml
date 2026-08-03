@@ -29,7 +29,7 @@ db_path: ./data/media.db
 # 同时配置后 backend 启动会自动 POST /op/server/register 拿 token 并维持 WS 长连
 # （路径 B 中继，PRD §3.2）。
 # 留空时回退到环境变量 OPENCLAW_GATEWAY_URL，再回退 http://127.0.0.1:8090。
-# ops-server 默认 HTTP 8090 + TCP relay 18790（见 ops-server/docker-compose.yml）。
+# ops-server 默认 HTTP 8090 + TCP relay 18791（见 ops-server/docker-compose.yml）。
 # 若未部署 ops-server，保持留空即可——桥接端点会返回 502，不影响媒体主功能。
 ops_server_url: ""
 

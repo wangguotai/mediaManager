@@ -11,7 +11,7 @@
 #
 # 端口：
 #   8090  → REST/admin + /healthz（HTTP）
-#   18790 → TCP 中继（relay）
+#   18791 → TCP 中继（relay）。注：原 18790 与同机 OpenClaw gateway 冲突，改 18791。
 
 services:
   ops-server:
@@ -24,8 +24,8 @@ services:
 
     # 暴露 HTTP 与中继端口。relay 仅在内网/可信网络使用，按需对外映射。
     ports:
-      - "8090:8090"     # HTTP: REST/admin + /healthz
-      - "18790:18790"   # TCP relay
+      - "8090:8090"       # HTTP: REST/admin + /healthz
+      - "18791:18791"     # TCP relay
 
     # 运行时配置。env_file 优先级低于下方 environment，便于在此覆盖个别项。
     env_file:
@@ -34,7 +34,7 @@ services:
     environment:
       # 默认值已在 Dockerfile 设定；此处显式声明便于一眼看清。
       MM_OPS_HTTP_ADDR: ":8090"
-      MM_OPS_RELAY_ADDR: ":18790"
+      MM_OPS_RELAY_ADDR: ":18791"
       MM_OPS_DATA_DIR: "/data"
 
       # —— 以下为示例占位，去掉注释并填值后启用 ——

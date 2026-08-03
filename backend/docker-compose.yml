@@ -43,7 +43,7 @@ services:
       # ---- 运维面（可选）----
       # ops-server 地址，供 POST /api/openclaw/command 转发 + 启动注册上报（路径 B 中继）。
       # 配置后 backend 启动会自动 POST /op/server/register 拿 token 并维持 WS 长连。
-      # ops-server 默认监听 8090（HTTP）+ 18790（TCP relay），见 ops-server/docker-compose.yml。
+      # ops-server 默认监听 8090（HTTP）+ 18791（TCP relay），见 ops-server/docker-compose.yml。
       # MM_OPS_SERVER_URL: "http://host.docker.internal:8090"
 
       # ---- 首次启动超管引导（可选）----

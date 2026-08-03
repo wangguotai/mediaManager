@@ -3,7 +3,8 @@
 // 它把 internal/ 下各组件组装为一个进程：
 //   - HTTP(:8090)：挂载 /admin/* 前端 + JSON API，以及 /op/* 运营中继 API
 //     （受管服务端注册、设备发现、信令 WS /op/ws、/op/server/ws）。
-//   - TCP(:18790)：TURN 式中继，接受配对连接并记账。
+//   - TCP(:18791)：TURN 式中继，接受配对连接并记账。
+//     （原 :18790 与同机 OpenClaw gateway 中继冲突，默认改 :18791；可用 MM_OPS_RELAY_ADDR 覆盖。）
 //
 // 启动时若无运营账号且提供了 MM_OPS_BOOTSTRAP_ADMIN=user:pass，则创建首位 admin，
 // 使登录可用（signup=first 模式下首位即 admin）。这是"独立管理员账号"的最小接入路径。

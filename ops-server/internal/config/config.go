@@ -37,8 +37,10 @@ type Config struct {
 const (
 	// defaultHTTPAddr REST/WS 默认监听 :8090（与 docker-compose/Dockerfile 对齐，PRD §3.5）。
 	defaultHTTPAddr = ":8090"
-	// defaultRelayAddr TCP 中继默认监听 :18790（紧邻 REST 端口，便于记忆）。
-	defaultRelayAddr = ":18790"
+	// defaultRelayAddr TCP 中继默认监听 :18791。
+	// 注：原默认 :18790 与同机 OpenClaw gateway 中继端口冲突，改为 :18791 避让；
+	// docker-compose.yml 同步映射 18791。如需复用 18790，设 MM_OPS_RELAY_ADDR=:18790。
+	defaultRelayAddr = ":18791"
 	// defaultDataDir 默认数据目录（相对 cwd）。
 	defaultDataDir = "./ops-data"
 	// defaultJWTTTL 默认 JWT 有效期：7 天，与 backend 一致。

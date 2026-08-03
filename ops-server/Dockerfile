@@ -42,14 +42,14 @@ VOLUME /data
 COPY --from=builder /out/ops-server /usr/local/bin/ops-server
 
 # 运行时默认配置（可在 docker-compose / docker run 用 MM_OPS_* 覆盖）：
-#   HTTP 监听 8090（任务要求端口）；relay 监听 18790；数据目录指向卷。
+#   HTTP 监听 8090（任务要求端口）；relay 监听 18791（避让同机 OpenClaw 的 18790）；数据目录指向卷。
 ENV MM_OPS_HTTP_ADDR=:8090 \
-    MM_OPS_RELAY_ADDR=:18790 \
+    MM_OPS_RELAY_ADDR=:18791 \
     MM_OPS_DATA_DIR=/data
 
 USER ops
 
-EXPOSE 8090 18790
+EXPOSE 8090 18791
 
 # 健康检查：HTTP /healthz 由 main.go 暴露，返回 {"status":"ok"}。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
