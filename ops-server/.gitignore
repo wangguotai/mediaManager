@@ -1,3 +1,5 @@
 ops-server/ops-data/*.db-shm
 ops-server/ops-data/*.db-wal
 ops-data/
+# 误生成的可执行文件（go build ./cmd/ops-server 在目录下产出同名二进制）
+/ops-server
