@@ -105,6 +105,12 @@ func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "old_password and new_password are required"})
 		return
 	}
+	// 弱口令泄漏检测：新密码命中常见弱口令黑名单则拒绝。
+	// 与 auth.ChangePassword 内部的长度+复杂度校验互补（防 Passw0rd/Qwerty123 等）。
+	if isPasswordCompromised(req.NewPassword) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "password is too common, please choose a stronger one"})
+		return
+	}
 
 	if err := s.authSvc.ChangePassword(r.Context(), uid, req.OldPassword, req.NewPassword); err != nil {
 		writeAuthError(w, err)
@@ -131,6 +137,12 @@ func (s *Server) handleAuthRegister(w http.ResponseWriter, r *http.Request) {
 	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" || req.Password == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "username and password are required"})
+		return
+	}
+	// 弱口令泄漏检测：拒绝常见弱密码（即便满足复杂度策略）。
+	// 在 auth.Register 内部的长度+复杂度校验之外叠加一层黑名单拦截。
+	if isPasswordCompromised(req.Password) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "password is too common, please choose a stronger one"})
 		return
 	}
 
@@ -161,4 +173,48 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 	}
+}
+
+// handleAuthRefresh POST /api/auth/refresh — 用 refresh token 换发新 access token。
+//
+// 请求体: {"refresh_token": "..."}。验证 refresh token 有效（签名+过期+type=refresh）
+// 后签发新 access token（不签发新 refresh，无滑动窗口——refresh 有bounded 30天寿命）。
+// 此端点豁免 Bearer access token 中间件（走 refresh token 鉴权）。
+func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if s.authSvc == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "auth is not configured"})
+		return
+	}
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if req.RefreshToken == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "refresh_token is required"})
+		return
+	}
+	userID, err := s.authSvc.ParseRefreshToken(req.RefreshToken)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or expired refresh token"})
+		return
+	}
+	// 签发新 access token（不签发新 refresh）。
+	token, exp, err := s.authSvc.IssueAccessToken(userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to issue token"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":       token,
+		"expires_at":  exp,
+		"token_type":  "Bearer",
+		"user_id":     userID,
+	})
 }

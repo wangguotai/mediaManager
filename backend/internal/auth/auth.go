@@ -99,24 +99,48 @@ type RegisterRequest struct {
 }
 
 // LoginResult 是登录成功响应，与接口契约 {token, expires_at, user} 对齐。
+// RefreshToken/RefreshExpiresAt 为新增 refresh token 字段：登录同时签发长效 refresh，
+// 供 POST /api/auth/refresh 换发新 access token。旧客户端忽略这两个额外字段即可
+// （JSON 向后兼容），不破坏既有 {token,expires_at,user} 契约。
 type LoginResult struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	User      User      `json:"user"`
+	Token            string    `json:"token"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitempty"`
+	User             User      `json:"user"`
 }
 
-// defaultTTL 是 jwt_ttl_seconds <=0 时的默认有效期：7 天。
+// defaultTTL 是 jwt_ttl_seconds <=0 时的默认 access token 有效期：7 天。
 const defaultTTL = 7 * 24 * time.Hour
+
+// defaultRefreshTTL 是 refresh token 的默认有效期：30 天。
+// 当 access token ttl >= refresh ttl 时（如配置了 30 天 access），refresh 取 ttl+1 天，
+// 保证 refresh 始终长于 access（否则 refresh 无意义）。
+const defaultRefreshTTL = 30 * 24 * time.Hour
+
+// tokenTypeClaimKey 是 JWT 私有 claim 中标识 token 类型的键。
+// 用 jwt.RegisteredClaims 无法表达的私有 claim，通过 MapClaims 路径注入。
+// 取值见 tokenTypeAccess / tokenTypeRefresh。
+const tokenTypeClaimKey = "type"
+
+// tokenTypeAccess / tokenTypeRefresh 是 type claim 的两种取值。
+// access 用于普通 API 鉴权（authMiddleware 接受）；refresh 仅用于 /api/auth/refresh
+// 换发新 access，被 authMiddleware 拒绝（防 refresh 被误用作 access）。
+const (
+	tokenTypeAccess  = "access"
+	tokenTypeRefresh = "refresh"
+)
 
 // AuthService 封装认证逻辑。零值不可用，必须经 New 构造。
 // secret 为空时 New 会生成进程级随机密钥（重启失效），仅适合开发。
 type AuthService struct {
-	store   UserStore
-	secret  []byte
-	ttl     time.Duration
-	signup  string // config.Signup* 之一
-	idGen   IDGenerator
-	nowFunc func() time.Time // 可注入，便于测试
+	store      UserStore
+	secret     []byte
+	ttl        time.Duration // access token 有效期
+	refreshTTL time.Duration // refresh token 有效期（>= ttl，否则用 ttl+1 天兜底）
+	signup     string        // config.Signup* 之一
+	idGen      IDGenerator
+	nowFunc    func() time.Time // 可注入，便于测试
 }
 
 // IDGenerator 生成用户主键。默认用 crypto/rand UUID；测试可注入固定值。
@@ -160,13 +184,20 @@ func New(store UserStore, secret string, ttlSeconds int, signupMode string, opts
 	if ttl <= 0 {
 		ttl = defaultTTL
 	}
+	// refresh token 有效期：默认 30 天；若配置的 access ttl >= 30 天（如默认 7 天不会触发，
+	// 但用户显式配 30 天 access 时），则 refresh 取 ttl + 1 天，保证 refresh 长于 access。
+	refreshTTL := defaultRefreshTTL
+	if ttl >= defaultRefreshTTL {
+		refreshTTL = ttl + 24*time.Hour
+	}
 	a := &AuthService{
-		store:   store,
-		secret:  sec,
-		ttl:     ttl,
-		signup:  mode,
-		idGen:   newUUID,
-		nowFunc: time.Now,
+		store:      store,
+		secret:     sec,
+		ttl:        ttl,
+		refreshTTL: refreshTTL,
+		signup:     mode,
+		idGen:      newUUID,
+		nowFunc:    time.Now,
 	}
 	for _, o := range opts {
 		o(a)
@@ -195,9 +226,16 @@ func (a *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	if err != nil {
 		return nil, err
 	}
+	// 同步签发 refresh token（长效，供 /api/auth/refresh 换发新 access）。
+	refreshToken, refreshExp, err := a.issueRefreshToken(u.ID, a.nowFunc())
+	if err != nil {
+		return nil, err
+	}
 	return &LoginResult{
-		Token:     token,
-		ExpiresAt: exp,
+		Token:            token,
+		ExpiresAt:        exp,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: refreshExp,
 		User: User{
 			ID:        u.ID,
 			Username:  u.Username,
@@ -247,9 +285,16 @@ func (a *AuthService) Register(ctx context.Context, req RegisterRequest) (*Login
 	if err != nil {
 		return nil, err
 	}
+	// 同步签发 refresh token（与 Login 一致，注册即获得 refresh）。
+	refreshToken, refreshExp, err := a.issueRefreshToken(u.ID, now)
+	if err != nil {
+		return nil, err
+	}
 	return &LoginResult{
-		Token:     token,
-		ExpiresAt: exp,
+		Token:            token,
+		ExpiresAt:        exp,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: refreshExp,
 		User: User{
 			ID:        u.ID,
 			Username:  u.Username,
@@ -308,13 +353,26 @@ func (a *AuthService) validatePassword(pw string) error {
 	return nil
 }
 
-// issueToken 签发 HS256 JWT，sub=用户ID，含 iat/exp。
+// issueToken 签发 HS256 access JWT，sub=用户ID，type=access，含 iat/exp。
 func (a *AuthService) issueToken(userID string, now time.Time) (string, time.Time, error) {
-	exp := now.Add(a.ttl)
-	claims := jwt.RegisteredClaims{
-		Subject:   userID,
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(exp),
+	return a.signToken(userID, tokenTypeAccess, a.ttl, now)
+}
+
+// issueRefreshToken 签发 HS256 refresh JWT，sub=用户ID，type=refresh，有效期 refreshTTL。
+// 供 /api/auth/refresh 端点验证后换发新 access token；不被 access 中间件接受。
+func (a *AuthService) issueRefreshToken(userID string, now time.Time) (string, time.Time, error) {
+	return a.signToken(userID, tokenTypeRefresh, a.refreshTTL, now)
+}
+
+// signToken 是 issueToken / issueRefreshToken 的共用签发逻辑。
+// typeClaim 写入私有 claim "type"，ParseToken 据此拒绝 refresh token 被当作 access 使用。
+func (a *AuthService) signToken(userID, typeClaim string, ttl time.Duration, now time.Time) (string, time.Time, error) {
+	exp := now.Add(ttl)
+	claims := jwt.MapClaims{
+		"sub":  userID,
+		"iat":  jwt.NewNumericDate(now).Unix(),
+		"exp":  jwt.NewNumericDate(exp).Unix(),
+		"type": typeClaim,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(a.secret)
@@ -324,11 +382,24 @@ func (a *AuthService) issueToken(userID string, now time.Time) (string, time.Tim
 	return signed, exp, nil
 }
 
-// ParseToken 解析并校验 Bearer token，返回 sub（user_id）。任何失败（格式/签名/过期）返回 ErrInvalidToken。
+// ParseToken 解析并校验 access Bearer token，返回 sub（user_id）。
+// refresh token（type=refresh）被拒绝——防止 refresh 被误用为 access。
+// 任何失败（格式/签名/过期/类型不符）返回 ErrInvalidToken。
 func (a *AuthService) ParseToken(tokenStr string) (string, error) {
-	claims := &jwt.RegisteredClaims{}
+	return a.parseTypedToken(tokenStr, tokenTypeAccess)
+}
+
+// ParseRefreshToken 解析并校验 refresh token，返回 sub（user_id）。
+// 供 /api/auth/refresh 端点使用；access token 不被接受。
+func (a *AuthService) ParseRefreshToken(tokenStr string) (string, error) {
+	return a.parseTypedToken(tokenStr, tokenTypeRefresh)
+}
+
+// parseTypedToken 是 ParseToken / ParseRefreshToken 的共用解析逻辑。
+// 校验签名、过期、sub 非空、type claim 匹配预期。
+func (a *AuthService) parseTypedToken(tokenStr, expectedType string) (string, error) {
+	claims := jwt.MapClaims{}
 	_, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
-		// 强制 HMAC 算法族，防止 alg=none / RS→HS 等降级攻击。
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
@@ -337,14 +408,25 @@ func (a *AuthService) ParseToken(tokenStr string) (string, error) {
 	if err != nil {
 		return "", ErrInvalidToken
 	}
-	if claims.Subject == "" {
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
 		return "", ErrInvalidToken
 	}
-	return claims.Subject, nil
+	typ, _ := claims["type"].(string)
+	if typ != expectedType {
+		return "", ErrInvalidToken
+	}
+	return sub, nil
 }
 
 // AllowSignup 返回当前注册模式，供 /healthz 或调试端点观测。
 func (a *AuthService) AllowSignup() string { return a.signup }
+
+// IssueAccessToken 为已认证用户签发新 access token（供 /api/auth/refresh 端点使用）。
+// 不签发新 refresh token（无滑动窗口）。 userID 应由 ParseRefreshToken 验证后传入。
+func (a *AuthService) IssueAccessToken(userID string) (string, time.Time, error) {
+	return a.issueToken(userID, a.nowFunc())
+}
 
 // ChangePassword 校验旧密码后更新为新密码。供 POST /api/auth/change-password 调用，
 // userID 由 JWT 中间件解析注入（即只能改自己的密码，防横向越权）。

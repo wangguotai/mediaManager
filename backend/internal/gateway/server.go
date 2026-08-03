@@ -133,9 +133,12 @@ func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
 func (s *Server) SetStore(store *storage.Store) { s.store = store }
 
 func (s *Server) registerRoutes() {
-	// Auth: 登录/注册本身无需认证（中间件按路径前缀豁免）；改密端点需认证（带 token）。
+	// Auth: 登录/注册/refresh 本身无需 access token（中间件按路径豁免）；改密端点需认证（带 token）。
+	// /api/auth/refresh 不走 Bearer access token 鉴权，而是校验 body 中的 refresh token，
+	// 故同样需在 authMiddleware 豁免（否则无 access token 的请求会被 401 拦在中间件）。
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("/api/auth/register", s.handleAuthRegister)
+	s.mux.HandleFunc("/api/auth/refresh", s.handleAuthRefresh)
 	s.mux.HandleFunc("/api/auth/change-password", s.handleAuthChangePassword)
 
 	// OpenClaw bridge
@@ -888,12 +891,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// 豁免登录/注册、健康检查与 metrics 抓取：这些端点本身不涉用户数据或用于探活/采集。
-		// 注意：仅豁免 login 与 register 两条；change-password 必须带 token（走认证），
+		// 豁免登录/注册/refresh、健康检查与 metrics 抓取：这些端点本身不涉用户数据或用于探活/采集。
+		// 注意：仅豁免 login、register、refresh 三条；change-password 必须带 token（走认证），
 		// 故不再用宽泛的 /api/auth/ 前缀豁免，避免新增的改密端点被误放行。
+		// /api/auth/refresh 用 body 中的 refresh token 鉴权（非 Bearer access），故也需豁免。
 		// /metrics 与 /healthz 同为无认证端点，供 Prometheus 与健康探针抓取。
 		switch r.URL.Path {
-		case "/api/auth/login", "/api/auth/register", "/healthz", "/metrics":
+		case "/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/healthz", "/metrics":
 			next.ServeHTTP(w, r)
 			return
 		}
