@@ -19,6 +19,7 @@ import com.wgt.feature.media.MediaService
 import com.wgt.media.AlbumScreen
 import com.wgt.media.AuthState
 import com.wgt.media.FileManagementScreen
+import com.wgt.media.InsightsDashboardScreen
 import com.wgt.media.LoginScreen
 import com.wgt.media.MediaListScreen
 import com.wgt.media.MediaViewModel
@@ -161,9 +162,10 @@ fun App() {
                         Screen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
                             onBack = { screen = Screen.MEDIA },
-                            onNavigateToTrash = { screen = Screen.TRASH },
-                            onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY },
-                            onNavigateToCleanup = { screen = Screen.CLEANUP }
+                                onNavigateToTrash = { screen = Screen.TRASH },
+                                onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY },
+                                onNavigateToCleanup = { screen = Screen.CLEANUP },
+                                onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
                         )
                         Screen.ALBUM -> AlbumScreen(
                             viewModel = viewModel,
@@ -183,6 +185,9 @@ fun App() {
                             viewModel = viewModel,
                             onBack = { screen = Screen.SETTINGS }
                         )
+                        Screen.INSIGHTS_DASHBOARD -> InsightsDashboardScreen(
+                            onBack = { screen = Screen.SETTINGS }
+                        )
                     }
                 }
             }
@@ -191,7 +196,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, INSIGHTS_DASHBOARD }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }
