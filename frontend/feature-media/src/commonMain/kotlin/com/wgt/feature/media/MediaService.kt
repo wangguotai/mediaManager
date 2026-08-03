@@ -409,7 +409,24 @@ object MediaService {
         pageSize: Int = 20,
         source: MediaSource = MediaSource.BACKEND,
         cloud: Boolean = false
-    ): List<MediaMetadata> {
+    ): List<MediaMetadata> = getMediaListPaged(page, pageSize, source, cloud).list
+
+    /**
+     * 分页版 [getMediaList]，返回 [PagedMediaList]（含 totalCount / hasMore）。
+     *
+     * 后端 `/api/media/list` 响应已包含 `total_count`/`page`/`page_size` 字段。
+     * 本方法解析这些字段，计算 `hasMore = page * pageSize < totalCount`，供前端
+     * 无限滚动判断是否继续拉取下一页。JSON 缺失 total_count 时回退 0（hasMore=false）。
+     *
+     * 网盘场景（cloud=true）出错时不回退 mock，直接抛出；其余场景回退 mock
+     * （PagedMediaList 无 hasMore，避免假数据触发无限滚动）。
+     */
+    suspend fun getMediaListPaged(
+        page: Int = 1,
+        pageSize: Int = 20,
+        source: MediaSource = MediaSource.BACKEND,
+        cloud: Boolean = false
+    ): PagedMediaList {
         return try {
             val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/list") {
                 parameter("page", page)
@@ -418,23 +435,38 @@ object MediaService {
             }
             if (response.status == HttpStatusCode.OK) {
                 val body: String = response.body()
-                val parsed = parseMediaList(body)
+                val (list, totalCount) = parseMediaListPaged(body)
                 logger.info(
                     "MediaService",
-                    "getMediaList cloud=$cloud status=${response.status} parsed=${parsed.size}"
+                    "getMediaListPaged cloud=$cloud page=$page status=${response.status} parsed=${list.size} total=$totalCount"
                 )
-                parsed
+                PagedMediaList(
+                    list = list,
+                    page = page,
+                    pageSize = pageSize,
+                    totalCount = totalCount,
+                    hasMore = page * pageSize < totalCount
+                )
             } else {
                 // 网盘场景不回退 mock，保证 UI 真实性
                 if (cloud) throw RuntimeException("后端返回 ${response.status}")
-                mockMediaList(page)
+                PagedMediaList(mockMediaList(page), page, pageSize, 0, false)
             }
         } catch (e: Exception) {
-            logger.error("MediaService", "getMediaList FAILED cloud=$cloud: ${e::class.simpleName} ${e.message}")
+            logger.error("MediaService", "getMediaListPaged FAILED cloud=$cloud: ${e::class.simpleName} ${e.message}")
             if (cloud) throw e
-            mockMediaList(page)
+            PagedMediaList(mockMediaList(page), page, pageSize, 0, false)
         }
     }
+
+    /** 分页媒体列表结果，含分页元数据。 */
+    data class PagedMediaList(
+        val list: List<MediaMetadata>,
+        val page: Int,
+        val pageSize: Int,
+        val totalCount: Int,
+        val hasMore: Boolean
+    )
 
     /**
      * 获取图片原图字节流 (通过后端 REST proxy → gRPC GetMediaStream)
@@ -8124,6 +8156,32 @@ object MediaService {
                 height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
             )
         } ?: emptyList()
+    }
+
+    /**
+     * 分页版 [parseMediaList]：额外解析 `total_count` 字段（缺失回退 0）。
+     * 返回 Pair(list, totalCount)，供 [getMediaListPaged] 计算 hasMore。
+     */
+    private fun parseMediaListPaged(json: String): Pair<List<MediaMetadata>, Int> {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        val list = obj["media_list"]?.jsonArray?.map { item ->
+            val m = item.jsonObject
+            MediaMetadata(
+                id = m["id"]?.jsonPrimitive?.content ?: "",
+                filename = m["filename"]?.jsonPrimitive?.content ?: "",
+                type = parseMediaType(m["type"]?.jsonPrimitive?.content),
+                size = m["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                mime_type = m["mime_type"]?.jsonPrimitive?.content ?: "",
+                created_at = m["created_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                updated_at = m["updated_at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                is_live_photo = m["is_live_photo"]?.jsonPrimitive?.booleanOrNull ?: false,
+                live_photo_video_id = m["live_photo_video_id"]?.jsonPrimitive?.content ?: "",
+                width = m["width"]?.jsonPrimitive?.intOrNull ?: 0,
+                height = m["height"]?.jsonPrimitive?.intOrNull ?: 0
+            )
+        } ?: emptyList()
+        val totalCount = obj["total_count"]?.jsonPrimitive?.intOrNull ?: 0
+        return Pair(list, totalCount)
     }
 
     /**

@@ -834,7 +834,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else null,
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 2) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 } else {
@@ -848,7 +848,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else null,
+                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 2) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }

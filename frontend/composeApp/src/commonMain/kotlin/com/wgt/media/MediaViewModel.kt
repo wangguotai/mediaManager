@@ -248,6 +248,16 @@ class MediaViewModel {
     var isCloudLoading by mutableStateOf(false)
         private set
 
+    /**
+     * 网盘图片 Tab（第三个 Tab）分页状态（V8 §4.3）。
+     *
+     * [loadCloudMediaList] 首次拉取第 1 页（pageSize=50），[hasMoreCloudList] 由后端
+     * total_count 决定；滚动到底时 [loadMoreCloudList] 续拉下一页追加到 mediaList。
+     */
+    private var cloudListPage = 1
+    var hasMoreCloudList by mutableStateOf(false)
+        private set
+
     // 缓存管理
     private var cachedLocalMedia: List<MediaMetadata>? = null
     private var cachedUploadedMedia: List<MediaMetadata>? = null
@@ -849,22 +859,57 @@ class MediaViewModel {
         listLoadError = null
         currentSource = MediaSource.BACKEND
 
+        // 强制刷新或首次加载：重置分页到第 1 页。
+        cloudListPage = 1
+
         viewModelScope.launch {
             try {
                 // cloud=true → 后端附加 q=source=cloud，命中 LocalCloudSource（data/cloud-images）。
                 // 该源现同时收录图片与视频扩展名，故此 Tab 已天然包含 VIDEO 条目，无需额外请求。
+                // V8 §4.3：使用 getMediaListPaged 获取分页元数据（totalCount→hasMore）。
                 // 出错时 MediaService 不再回退 mock，直接抛出，这里捕获后置 listLoadError。
-                val cloudMedia = MediaService.getMediaList(pageSize = 50, cloud = true)
-                cachedCloudMedia = cloudMedia
-                mediaList = cloudMedia
+                val paged = MediaService.getMediaListPaged(page = cloudListPage, pageSize = 50, cloud = true)
+                cachedCloudMedia = paged.list
+                mediaList = paged.list
+                hasMoreCloudList = paged.hasMore
                 // 列表就绪后后台预取视频时长（仅 VIDEO 项），供网格时长标签与播放器复用。
-                prefetchVideoDurations(cloudMedia)
+                prefetchVideoDurations(paged.list)
             } catch (e: Exception) {
                 // 列表加载失败：保留 listLoadError 持续占位，而非落入“暂无网盘图片”误导。
                 // mediaList 保持既有值（首次失败时为空），UI 由 listLoadError 驱动重试占位。
                 mediaList = cachedCloudMedia ?: emptyList()
                 listLoadError = e.message ?: "无法连接后端"
                 errorMessage = "加载网盘图片失败: ${listLoadError}"
+            } finally {
+                isCloudLoading = false
+            }
+        }
+    }
+
+    /**
+     * 网盘图片 Tab 滚动到底时续拉下一页（V8 §4.3）。
+     *
+     * 仅当 [hasMoreCloudList] 为 true 且未在加载中时才触发，避免无效请求与重入。
+     * 成功后把新页追加到 [mediaList] 末尾（保持 created_at 降序，因后端已按页返回有序结果）。
+     */
+    fun loadMoreCloudList() {
+        if (!hasMoreCloudList || isCloudLoading) return
+
+        isCloudLoading = true
+        cloudListPage++
+
+        viewModelScope.launch {
+            try {
+                val paged = MediaService.getMediaListPaged(page = cloudListPage, pageSize = 50, cloud = true)
+                val combined = (cachedCloudMedia ?: emptyList()) + paged.list
+                cachedCloudMedia = combined
+                mediaList = combined
+                hasMoreCloudList = paged.hasMore
+                prefetchVideoDurations(paged.list)
+            } catch (e: Exception) {
+                // 续拉失败：回退页码，保留已有列表，不置 listLoadError（不阻塞已有内容）。
+                cloudListPage--
+                logger.error(TAG, "loadMoreCloudList failed: ${e::class.simpleName} ${e.message}")
             } finally {
                 isCloudLoading = false
             }
