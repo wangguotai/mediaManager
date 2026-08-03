@@ -93,6 +93,7 @@ actual fun PlatformRnView(
             hostId = hostId,
             bundleAssetName = bundleAssetName,
             mainComponentName = componentName,
+            useDevelopmentSupport = false,
             bundleOverridePath = overridePath
         ) as ReactHostImpl
         hostImpl = host
@@ -108,12 +109,15 @@ actual fun PlatformRnView(
         // ReactInstance 未初始化时无法挂载视图树）。
         val listener = object : ReactInstanceEventListener {
             override fun onReactContextInitialized(context: ReactContext) {
+                android.util.Log.i("RnContainer", "onReactContextInitialized 回调触发, componentName=$componentName")
                 // 总在 UI 线程回调
                 if (surface != null) return // 已创建（防御）
+                android.util.Log.i("RnContainer", "createSurface: componentName=$componentName")
                 val s = host.createSurface(app, componentName, initialProps) as ReactSurfaceImpl
                 // 注意：createSurface 内部已 attach，无需再调 surface.attach(host)
                 s.start()
                 surface = s
+                android.util.Log.i("RnContainer", "surface.start() 完成")
             }
         }
         reactContextListener = listener
@@ -122,14 +126,43 @@ actual fun PlatformRnView(
         // 启动 JS 运行时（幂等——已启动则跳过）
         host.start()
 
+        // 创建 Surface 的统一入口（回调路径 + 轮询路径共用）
+        fun tryCreateSurface(ctx: ReactContext) {
+            if (surface != null) return
+            val s = host.createSurface(app, componentName, initialProps) as ReactSurfaceImpl
+            s.start()
+            surface = s
+        }
+
         // 快捷路径：若 start() 前 ReactContext 已就绪（host 复用场景），
         // onReactContextInitialized 不会再次回调，需手动触发 surface 创建。
         host.currentReactContext?.let { ctx ->
-            if (surface == null) {
-                val s = host.createSurface(app, componentName, initialProps) as ReactSurfaceImpl
-                s.start()
-                surface = s
+            tryCreateSurface(ctx)
+        }
+
+        // 轮询兜底：onReactContextInitialized 回调在 Compose 协程与 ReactInstance
+        // 异步初始化的时序下可能不触发（TestAarApp 在 Activity 同步上下文调用能收到
+        // 回调；KMP Compose 的 LaunchedEffect 协程时序不同，回调被错过）。若快捷路径
+        // 未命中且 surface 仍空，主线程轮询 currentReactContext 直到就绪，就绪后立即
+        // 创建 surface。50ms 间隔，最多 10 秒。
+        if (surface == null) {
+            val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            val checkInterval = 50L
+            val maxChecks = 200
+            var checks = 0
+            val pollRunnable = object : Runnable {
+                override fun run() {
+                    if (surface != null) return
+                    checks++
+                    val ctx = host.currentReactContext
+                    if (ctx != null) {
+                        tryCreateSurface(ctx)
+                    } else if (checks < maxChecks) {
+                        mainHandler.postDelayed(this, checkInterval)
+                    }
+                }
             }
+            mainHandler.postDelayed(pollRunnable, checkInterval)
         }
 
         // LaunchedEffect 退出（key 变化/dispose）时移除监听器

@@ -127,7 +127,8 @@ class RNContainerManager private constructor(private val application: Applicatio
         val defaultTmmDelegateBuilder = DefaultTurboModuleManagerDelegate.Builder()
 
         val packageList: List<ReactPackage> = listOf(
-            MainReactPackage()
+            MainReactPackage(),
+            com.th3rdwave.safeareacontext.SafeAreaContextPackage()
         )
 
         val defaultReactHostDelegate = DefaultReactHostDelegate(
