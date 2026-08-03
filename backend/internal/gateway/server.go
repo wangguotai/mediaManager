@@ -329,6 +329,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/thumbnail/", s.handleMediaThumbnail)
 	s.mux.HandleFunc("/api/media/delete", s.handleMediaDelete)
 	s.mux.HandleFunc("/api/media/upload", s.handleMediaUpload)
+	// 编辑后图片保存：POST /api/media/media-edit-save/{mediaId} 把前端照片编辑器
+	// （涂鸦/马赛克/文字/裁剪/旋转/滤镜）导出的图片字节流保存为原图的新版本，
+	// 保留原图备份（不覆盖原文件，新文件名 {mediaId}_edited_{timestamp}.jpg）。
+	// 前缀匹配，{mediaId} 取路径尾段；走 authMiddleware（/api/media/ 前缀整体鉴权），
+	// handler 用 userIDFromContext 取 uid 并按用户隔离落盘目录。
+	s.mux.HandleFunc("/api/media/media-edit-save/", s.handleMediaEditSave)
 	s.mux.HandleFunc("/api/media/metadata/", s.handleMediaMetadata)
 
 	// 媒体收藏：POST 设置/取消收藏，DELETE 取消收藏，GET 返回收藏列表。
@@ -1623,6 +1629,145 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	// 可观测性：累计本次实际上传字节数（不含秒传/去重命中，那些路径未真正落盘新内容）。
 	if s.metrics != nil {
 		s.metrics.RecordUploadBytes(written)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleMediaEditSave 处理 POST /api/media/media-edit-save/{mediaId}，
+// 把前端照片编辑器（涂鸦/马赛克/文字/裁剪/旋转/滤镜）导出的图片字节流保存为
+// 原图 mediaId 的新版本。原图保留不动（备份），编辑后的图片落到同一用户的
+// uploads 目录，文件名为 {mediaId}_edited_{unix秒}.jpg，并在该用户的 metadata
+// 目录写一份 sidecar JSON 记录 edited=true + edit_timestamp + original_filename，
+// 供前端/同步层区分编辑版本与原始上传。
+//
+// 与 handleMediaUpload 的区别：
+//   - 不做 sha256 去重（编辑产物每次都可能不同，去重无意义）；
+//   - 不写 storage media 表（不新建独立 media 记录，仅作为原图的版本副本）；
+//   - 落盘文件名带 _edited_{timestamp} 后缀，不覆盖原 {mediaId}.jpg；
+//   - body 上限收紧到 50MB（编辑导出图通常远小于原图 raw）。
+//
+// 用户隔离与认证复用 handleMediaUpload 同套机制：authMiddleware 注入 uid，
+// userUploadsDir(uid) 解析到该用户的 uploads 目录；uid 缺失或目录解析失败即 401。
+func (s *Server) handleMediaEditSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	uploadsDir := s.userUploadsDir(uid)
+	if uploadsDir == "" {
+		// 未认证或 userDirs 未配置：拒绝落盘，与 handleMediaUpload 一致。
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	// {mediaId} 取路径尾段：/api/media/media-edit-save/{mediaId} → TrimPrefix 后取剩余。
+	// 不允许包含 "/" 或 ".."（防越权目录穿越到他人 uploads 或上层目录）。
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/media/media-edit-save/")
+	if mediaID == "" || strings.Contains(mediaID, "/") || strings.Contains(mediaID, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid media_id"})
+		return
+	}
+
+	// 编辑后图片统一保存为 JPEG（前端编辑器导出即 JPEG），故扩展名固定 .jpg，
+	// 文件名 {mediaId}_edited_{unix秒}.jpg。timestamp 用 Unix 秒保证同一原图多次
+	// 编辑保存不撞名（秒级冲突概率极低，且即便撞名也只覆盖同秒内的更早版本，
+	// 符合"新版本覆盖旧版本"语义）。
+	ts := time.Now().Unix()
+	editedFilename := fmt.Sprintf("%s_edited_%d.jpg", mediaID, ts)
+	editedPath := filepath.Join(uploadsDir, editedFilename)
+
+	// 流式落盘 + 同步收 header 做内容校验：先用临时文件接收 body（LimitReader 50MB），
+	// 再读头 512 字节做 isAllowedMediaType 校验，通过后 rename 到最终路径。
+	// 与 handleMediaUpload 同构，但上限 50MB（编辑导出图通常远小于 100MB raw 原图）。
+	tmpFile, err := os.CreateTemp(uploadsDir, "edit-*"+".jpg")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create temp file"})
+		return
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+
+	limited := io.LimitReader(r.Body, 50<<20)
+	written, err := io.Copy(tmpFile, limited)
+	tmpFile.Close()
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read body"})
+		return
+	}
+	if written == 0 {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "empty body"})
+		return
+	}
+
+	// 内容层校验：读临时文件头前 512 字节，复用 isAllowedMediaType 做 magic bytes +
+	// MIME 双重校验，拒绝伪造扩展名/非图片内容。编辑导出图固定 JPEG，故用 editedFilename
+	// 作为 filename 参数（其扩展名为 .jpg，走 isAllowedMediaType 的 jpg 分支）。
+	header := make([]byte, 512)
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to inspect upload"})
+		return
+	}
+	n, _ := f.Read(header)
+	_ = f.Close()
+	if !isAllowedMediaType(editedFilename, header[:n]) {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file type not allowed"})
+		return
+	}
+
+	// 原子 rename 到最终路径（同目录 rename 不跨设备，O(1)）。若最终路径已存在
+	// （同秒内重复保存），直接覆盖——符合"新版本替换旧版本"语义。
+	if err := os.Rename(tmpPath, editedPath); err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 写 metadata sidecar：在该用户的 metadata 目录写 {mediaId}_edited_{ts}.json，
+	// 记录 edited=true + edit_timestamp + original_filename，供前端/同步层识别编辑版本。
+	// 与 handleMediaUpload 的 writeUploadMetadata 同目录但不同文件名，避免覆盖原 {id}.json。
+	metaWarn := ""
+	if s.userDirs != nil {
+		metaDir, err := s.userDirs.MetadataDir(uid)
+		if err == nil {
+			meta := map[string]any{
+				"filename":           editedFilename,
+				"size":               written,
+				"created_at":         ts,
+				"mime_type":          "image/jpeg",
+				"edited":             true,
+				"edit_timestamp":     ts,
+				"original_media_id":  mediaID,
+				"original_filename":  mediaID,
+			}
+			data, mErr := json.Marshal(meta)
+			if mErr == nil {
+				metaPath := filepath.Join(metaDir, fmt.Sprintf("%s_edited_%d.json", mediaID, ts))
+				if wErr := os.WriteFile(metaPath, data, 0644); wErr != nil {
+					metaWarn = wErr.Error()
+				}
+			} else {
+				metaWarn = mErr.Error()
+			}
+		} else {
+			metaWarn = err.Error()
+		}
+	} else {
+		metaWarn = "user dirs not configured"
+	}
+
+	resp := map[string]any{
+		"media_id": mediaID,
+		"version":  "edited",
+		"path":     editedFilename,
+		"size":     written,
+	}
+	if metaWarn != "" {
+		resp["metadata_warning"] = metaWarn
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

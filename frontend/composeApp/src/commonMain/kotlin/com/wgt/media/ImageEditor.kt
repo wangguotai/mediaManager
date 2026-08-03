@@ -157,12 +157,14 @@ private enum class SaveState { IDLE, SAVING, SUCCESS, FAILED }
  *
  * 保存流程：
  * 1. 用户点保存 → 进入 SAVING 状态，显示加载动画
- * 2. 异步执行 cropAndRotateImageBitmap + saveImageBitmapToGallery
- * 3. 成功 → SUCCESS 状态，短暂显示成功提示后关闭
- * 4. 失败 → FAILED 状态，显示错误提示，允许重试
+ * 2. 若存在涂鸦/马赛克/文字叠加层 → 调用 [bakeOverlaysToImageBitmap] 把叠加层烘焙到
+ *    crop+rotate+filter 的结果位图；否则走原 [cropAndRotateImageBitmap] 路径。
+ *    烘焙失败（如 iOS 未实现返回 null）自动回退到原路径，保证保存不中断。
+ * 3. 异步执行 saveImageBitmapToGallery 写入相册
+ * 4. 成功 → SUCCESS 状态，短暂显示成功提示后关闭
+ * 5. 失败 → FAILED 状态，显示错误提示，允许重试
  *
- * 注：涂鸦/马赛克/文字作为编辑预览叠加层；保存时仅持久化 Crop/Filter/Rotate
- * 的结果（视听叠加可视化不持久化，受 commonMain 渲染能力限制）。
+ * 注：iOS 端烘焙暂未实现（actual 返回 null），保存会回退到仅 crop+rotate+filter。
  *
  * 取消编辑（点返回）不修改原文件。
  *
@@ -279,9 +281,34 @@ fun ImageEditor(
                             val sourceRect = displayRect?.let {
                                 mapDisplayRectToSource(it, viewport, src2.width, src2.height, rotation)
                             }
-                            val processed = cropAndRotateImageBitmap(
-                                src2, sourceRect, rotation.toFloat(), filterMatrix
-                            )
+                            // 烘焙叠加层（涂鸦/马赛克/文字）。
+                            // 有任何叠加层时走 bakeOverlaysToImageBitmap，它内部会完成 crop+rotate+filter
+                            // 并把叠加层一并烘焙到结果位图；iOS 暂未实现，返回 null。
+                            // 无叠加层或烘焙失败时回退到原 cropAndRotateImageBitmap 路径（仅 crop+rotate+filter）。
+                            val hasOverlays = drawStrokes.isNotEmpty() ||
+                                mosaicStrokes.isNotEmpty() ||
+                                textOverlays.isNotEmpty()
+                            val processed: ImageBitmap = if (hasOverlays && viewport.width > 0 && viewport.height > 0) {
+                                val vp = IntSize(viewport.width, viewport.height)
+                                val baked = bakeOverlaysToImageBitmap(
+                                    baseImage = src2,
+                                    viewport = vp,
+                                    cropRect = displayRect,
+                                    rotationDegrees = rotation.toFloat(),
+                                    drawColor = drawColor,
+                                    drawStrokes = drawStrokes.toList(),
+                                    mosaicStrokes = mosaicStrokes.toList(),
+                                    textOverlays = textOverlays.map { (pos, text) ->
+                                        TextOverlay(position = pos, text = text)
+                                    },
+                                    filterMatrix = filterMatrix
+                                )
+                                baked ?: cropAndRotateImageBitmap(
+                                    src2, sourceRect, rotation.toFloat(), filterMatrix
+                                )
+                            } else {
+                                cropAndRotateImageBitmap(src2, sourceRect, rotation.toFloat(), filterMatrix)
+                            }
                             val result = saveImageBitmapToGallery(processed, media.filename)
                             if (result != null) {
                                 saveState = SaveState.SUCCESS
