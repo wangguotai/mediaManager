@@ -150,7 +150,8 @@ fun App() {
                                 memoryYear = year
                                 memoryMonth = month
                                 screen = Screen.MEMORY_DETAIL
-                            }
+                            },
+                            onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
                         )
                         Screen.MEMORY_DETAIL -> MemoryDetailScreen(
                             viewModel = viewModel,
