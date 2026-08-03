@@ -179,3 +179,123 @@ func clientIP(r *http.Request) string {
 	}
 	return host
 }
+
+// ============ 分享链接公开访问 IP 限速 ============
+//
+// 防暴力枚举短链：GET /api/share/{token} 与 /api/share/{token}/stream/{mediaId}
+// 为公开访问端点（无需认证），攻击者可无凭证遍历 token 空间枚举有效分享链接。
+// 对这些端点按客户端 IP 做滑动窗口限速：每个 IP 在 window 内最多 max 次请求，
+// 超限返回 429 Too Many Requests。内存级实现，复用本文件 clientIP 提取逻辑。
+//
+// 与 loginRateLimiter（按 (ip,username) 维度，sync.Map）的区别：本限速器仅按 IP
+// 维度（公开端点无 username），用 sync.Mutex+map 保护以满足并发安全要求；
+// 后台 goroutine 周期清理过期条目，避免长期运行后被大量随机 IP 撑大内存。
+//
+// Server 在 NewServer 中始终创建一个实例（公开端点不限部署形态），
+// 存于 Server.rateLimiter，在公开分享访问 handler 入口调用 Allow 做前置限速。
+
+// shareRateWindow 是分享公开访问端点限速的滑动窗口时长：60 秒。
+const shareRateWindow = 60 * time.Second
+
+// shareRateMax 是单个 IP 在窗口内允许的最大请求次数：30（≈每 2 秒 1 次，
+// 足以覆盖单条分享的正常查看/下载/刷新；远低于枚举攻击所需速率）。
+const shareRateMax = 30
+
+// rlEntry 是单个 IP 的滑动窗口状态。hits 存窗口内命中时间戳（毫秒）。
+// 由父 RateLimiter.mu 串行保护，无需自带锁。
+type rlEntry struct {
+	hits []int64
+}
+
+// RateLimiter 是按 IP 做滑动窗口限速的并发安全限速器（用于公开分享访问端点）。
+// 用 sync.Mutex 保护内部 map，后台 goroutine 周期清理过期条目。
+// 零值不可用——须用 NewRateLimiter 构造（以启动清理 goroutine）。
+type RateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rlEntry
+	window  time.Duration
+	max     int
+	stop    chan struct{}
+}
+
+// NewRateLimiter 构造一个滑动窗口限速器：每个 IP 在 window 内最多 maxRequests 次。
+// window<=0 或 maxRequests<=0 视为非法，分别回退为 shareRateWindow / shareRateMax
+// （构造即始终可用，防御调用方误传零值）。启动后台 goroutine 周期清理过期条目
+// （周期 = window，取大于等于窗口可保证仍在窗口内的条目不会被误清）。
+func NewRateLimiter(window time.Duration, maxRequests int) *RateLimiter {
+	if window <= 0 {
+		window = shareRateWindow
+	}
+	if maxRequests <= 0 {
+		maxRequests = shareRateMax
+	}
+	r := &RateLimiter{
+		entries: make(map[string]*rlEntry),
+		window:  window,
+		max:     maxRequests,
+		stop:    make(chan struct{}),
+	}
+	go r.startClean()
+	return r
+}
+
+// Allow 判断 ip 是否仍在窗口内允许第 max 次以内的请求。
+// 返回 true 表示放行（已计数），false 表示超限（调用方据此回 429）。
+// 惰性裁剪：每次检查时原地丢弃窗口外的时间戳，避免切片无限增长。
+func (r *RateLimiter) Allow(ip string) bool {
+	now := time.Now().UnixMilli()
+	cutoff := now - r.window.Milliseconds()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[ip]
+	if !ok {
+		e = &rlEntry{}
+		r.entries[ip] = e
+	}
+	keep := e.hits[:0]
+	for _, t := range e.hits {
+		if t > cutoff {
+			keep = append(keep, t)
+		}
+	}
+	if len(keep) >= r.max {
+		e.hits = keep
+		return false
+	}
+	e.hits = append(keep, now)
+	return true
+}
+
+// startClean 周期性清理过期条目。停在 r.stop 上（进程后台运行，退出自然回收）。
+func (r *RateLimiter) startClean() {
+	ticker := time.NewTicker(r.window)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			r.cleanExpired()
+		case <-r.stop:
+			return
+		}
+	}
+}
+
+// cleanExpired 遍历所有条目，删除窗口内无剩余命中的 key。
+// 遍历开销与条目数成正比；周期 = window 且条目已被限速约束，可接受。
+func (r *RateLimiter) cleanExpired() {
+	cutoff := time.Now().UnixMilli() - r.window.Milliseconds()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, e := range r.entries {
+		live := false
+		for _, t := range e.hits {
+			if t > cutoff {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(r.entries, k)
+		}
+	}
+}

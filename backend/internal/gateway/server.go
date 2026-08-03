@@ -74,6 +74,11 @@ type Server struct {
 	// 防暴力撞库：每 (ip,username) 每分钟最多 loginRateMax 次，超限返回 429。
 	// 为 nil 时（未配置认证的纯测试 server）跳过限速，保持既有测试兼容。
 	loginLimiter *loginRateLimiter
+
+	// rateLimiter 是公开分享访问端点（GET /api/share/{token} 及其 /stream 子路径）
+	// 的 IP 级滑动窗口限速器，防暴力枚举短链。每 IP 60s 内最多 shareRateMax 次，
+	// 超限返回 429。在 NewServer 中始终创建（公开端点不限部署形态）。
+	rateLimiter *RateLimiter
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -108,6 +113,9 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 	if authSvc != nil {
 		s.loginLimiter = NewLoginRateLimiter()
 	}
+	// 公开分享访问限速器：始终创建（GET /api/share/{token} 为公开端点，不限部署形态）。
+	// 每 IP 60 秒内最多 shareRateMax（30）次，超限 429，防暴力枚举短链 token。
+	s.rateLimiter = NewRateLimiter(shareRateWindow, shareRateMax)
 	s.registerRoutes()
 	return s
 }
@@ -1178,16 +1186,74 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"num_gc":           memStats.NumGC,
 	}
 
+	// ── 深化健康检查（PRD §2.6 可观测性增强）：DB / 磁盘 / 网络分项检查 ──
+	// 三项均为独立探针，各自产出一个状态串；整体 status 由最差项聚合：
+	//   任意 error → "degraded"，否则 "healthy"。原有 healthz 字段保持不变，
+	//   仅在响应中追加 db_health / disk_health / network_health 三个新字段。
+
+	// db_health：通过 store 暴露的 *sql.DB 执行 PingContext 验证元数据库可达。
+	// store 为 nil（纯代理/测试场景，sync/device 等端点本就返回 503）记为 "unknown"，
+	// 不计入 degraded 判定——此时无DB依赖，谈"故障"无意义。
+	dbHealth := "unknown"
+	if s.store != nil {
+		if db := s.store.DB(); db != nil {
+			pingCtx, pingCancel := context.WithTimeout(r.Context(), 2*time.Second)
+			if err := db.PingContext(pingCtx); err != nil {
+				dbHealth = "error"
+			} else {
+				dbHealth = "ok"
+			}
+			pingCancel()
+		} else {
+			dbHealth = "error"
+		}
+	}
+
+	// disk_health：复用上方已取的 diskUsage 结果（避免二次 statfs）。
+	// 阈值：可用空间 <5% → error，<10% → warning，否则 ok。
+	// diskUsage 取不到（usersRoot 为空或 statfs 失败）记为 unknown。
+	diskHealth := "unknown"
+	if root := s.usersRoot(); root != "" {
+		if stat, err := diskUsage(root); err == nil && stat.TotalBytes > 0 {
+			availPct := float64(stat.AvailableBytes) / float64(stat.TotalBytes) * 100
+			switch {
+			case availPct < 5:
+				diskHealth = "error"
+			case availPct < 10:
+				diskHealth = "warning"
+			default:
+				diskHealth = "ok"
+			}
+		}
+	}
+
+	// network_health：探针式——store 是否非 nil（store 依赖本地文件系统 +
+	// SQLite，其可用性等价于"核心数据层就绪"）。未配置 store 的纯代理部署记 error。
+	netHealth := "error"
+	if s.store != nil {
+		netHealth = "ok"
+	}
+
+	// 整体 status：任意分项为 error → degraded；否则 healthy。
+	// unknown 不拉低 status（仅表示该探针不适用于当前部署形态）。
+	overall := "healthy"
+	if dbHealth == "error" || diskHealth == "error" || netHealth == "error" {
+		overall = "degraded"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         "ok",
-		"version":        "v0.4.0",
-		"media_count":    mediaCount,
-		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
-		"cache":          cacheStatus,
-		"cache_hit_rate": fmt.Sprintf("%.1f%%", cacheHitRate),
-		"favorite_count": favoriteCount,
-		"disk":           diskInfo,
-		"memory":         memoryInfo,
+		"status":          overall,
+		"db_health":       dbHealth,
+		"disk_health":     diskHealth,
+		"network_health":  netHealth,
+		"version":         "v0.4.0",
+		"media_count":     mediaCount,
+		"uptime":          fmt.Sprintf("%ds", int(uptime.Seconds())),
+		"cache":           cacheStatus,
+		"cache_hit_rate":  fmt.Sprintf("%.1f%%", cacheHitRate),
+		"favorite_count":  favoriteCount,
+		"disk":            diskInfo,
+		"memory":          memoryInfo,
 	})
 }
 
@@ -1398,6 +1464,11 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		ext = ".dat"
 		filename = filename + ext
 	}
+	// 文件类型白名单：扩展名不在允许列表内时直接 400 拒绝，不占用落盘 IO。
+	if !allowedUploadExt[strings.ToLower(ext)] {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file type not allowed"})
+		return
+	}
 
 	// 流式落盘：避免把整个上传体读入堆（旧实现用 io.ReadAll 把 100MB 整文件
 	// 载入内存）。这里在 uploads 目录下建临时文件，用 io.Copy 边收边写并同步计算
@@ -1422,6 +1493,24 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+
+	// 内容层白名单校验：读取临时文件头前 512 字节，做 magic bytes + MIME 双重
+	// 校验，拒绝扩展名伪造（如 .jpg 实为可执行文件）。校验在 rename 之前，失败即
+	// 清理临时文件并 400，恶意内容不会进入最终持久化路径。
+	header := make([]byte, 512)
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		cleanupTmp()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to inspect upload"})
+		return
+	}
+	n, _ := f.Read(header)
+	_ = f.Close()
+	if !isAllowedMediaType(filename, header[:n]) {
+		cleanupTmp()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file type not allowed"})
+		return
+	}
 
 	// 同步扩展参数（query 传递，因 body 是 raw binary）：
 	//   - sha256：内容指纹；提供时按 (user_id,sha256) 去重，命中则秒传不落盘。
@@ -1558,6 +1647,77 @@ func detectMediaTypeForStorage(filename string) string {
 	default:
 		return "IMAGE"
 	}
+}
+
+// allowedUploadExt 是上传端点允许的文件扩展名白名单（小写，含前导点）。
+// 覆盖常见图片与视频容器格式；未列出的扩展名一律拒绝。
+var allowedUploadExt = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
+	".webp": true, ".bmp": true, ".heic": true,
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
+	".webm": true, ".m4v": true,
+}
+
+// isAllowedMediaType 校验上传文件类型是否在白名单内，三重防护：
+//  1. 扩展名白名单（allowedUploadExt）。
+//  2. magic bytes：按扩展名对照已知文件头签名严格匹配，拒绝伪造扩展名。
+//  3. MIME：net/http.DetectContentType 推断须为 image/* 或 video/*；
+//     对 DetectContentType 不识别（返回 application/octet-stream）的容器格式
+//     （mkv/avi/heic 等），已由 magic bytes 严格匹配兜底，予以放行。
+//
+// filename 用于扩展名检查；header 为文件头前 512 字节（不足则取全部）。
+func isAllowedMediaType(filename string, header []byte) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if !allowedUploadExt[ext] {
+		return false
+	}
+	if !matchesKnownMagicBytes(ext, header) {
+		return false
+	}
+	// DetectContentType 对已通过 magic bytes 的容器格式可能返回 octet-stream，
+	// 属正常（mkv/avi/heic）；仅额外拒绝被嗅探为 text/html 等非媒体类型的文件。
+	detected := http.DetectContentType(header)
+	return strings.HasPrefix(detected, "image/") ||
+		strings.HasPrefix(detected, "video/") ||
+		detected == "application/octet-stream"
+}
+
+// matchesKnownMagicBytes 按扩展名对照已知文件头签名做严格匹配。
+// h 为文件头字节（可能不足 12 字节）。返回 true 表示内容头与该扩展名的已知签名一致。
+func matchesKnownMagicBytes(ext string, h []byte) bool {
+	switch ext {
+	case ".jpg", ".jpeg":
+		return len(h) >= 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF
+	case ".png":
+		return len(h) >= 4 && h[0] == 0x89 && h[1] == 'P' && h[2] == 'N' && h[3] == 'G'
+	case ".gif":
+		return len(h) >= 4 && h[0] == 'G' && h[1] == 'I' && h[2] == 'F' && h[3] == '8'
+	case ".bmp":
+		return len(h) >= 2 && h[0] == 'B' && h[1] == 'M'
+	case ".webp":
+		// RIFF....WEBP
+		return len(h) >= 12 &&
+			h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F' &&
+			h[8] == 'W' && h[9] == 'E' && h[10] == 'B' && h[11] == 'P'
+	case ".heic":
+		// ISO BMFF ftyp box + heic/heix/mif1 brand
+		return len(h) >= 12 && h[4] == 'f' && h[5] == 't' && h[6] == 'y' && h[7] == 'p' &&
+			((h[8] == 'h' && h[9] == 'e' && h[10] == 'i' && h[11] == 'c') ||
+				(h[8] == 'h' && h[9] == 'e' && h[10] == 'i' && h[11] == 'x') ||
+				(h[8] == 'm' && h[9] == 'i' && h[10] == 'f' && h[11] == '1'))
+	case ".mp4", ".m4v", ".mov":
+		// ISO BMFF ftyp box（brand 在 offset 8：mp42/isom/mp41/M4V/qt  等均以此开头）
+		return len(h) >= 8 && h[4] == 'f' && h[5] == 't' && h[6] == 'y' && h[7] == 'p'
+	case ".avi":
+		// RIFF....AVI LIST
+		return len(h) >= 12 &&
+			h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F' &&
+			h[8] == 'A' && h[9] == 'V' && h[10] == 'I' && h[11] == ' '
+	case ".mkv", ".webm":
+		// Matroska/WebM EBML magic
+		return len(h) >= 4 && h[0] == 0x1A && h[1] == 0x45 && h[2] == 0xDF && h[3] == 0xA3
+	}
+	return false
 }
 
 // userUploadsDir 返回当前用户 uid 的 uploads 目录路径（确保已创建）。

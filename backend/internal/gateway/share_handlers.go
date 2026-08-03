@@ -311,6 +311,14 @@ func (s *Server) handleShareExtend(w http.ResponseWriter, r *http.Request) {
 //
 // /api/share/create 由独立 handleShareCreate 处理，不进入此分流。
 func (s *Server) handleShareAccess(w http.ResponseWriter, r *http.Request) {
+	// 公开分享访问前置 IP 限速（防暴力枚举短链 token）。此 handler 是 /api/share/{token}
+	// 的统一入口（GET 查看 / GET stream / DELETE 撤销），按 client IP 滑动窗口计数，
+	// 每 IP 60s 内超 shareRateMax（30）次即拒。nil 守卫兼容未初始化的测试 server。
+	// 仅影响以 token 为路径段的公开端点；create/list/extend 为独立精确匹配路由，不受影响。
+	if s.rateLimiter != nil && !s.rateLimiter.Allow(clientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
+		return
+	}
 	if r.URL.Path == "/api/share/" || r.URL.Path == "/api/share" {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "token required"})
 		return
