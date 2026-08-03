@@ -1779,9 +1779,11 @@ class MediaViewModel {
     /**
      * 创建新相册。
      *
-     * 成功后刷新列表并提示。
+     * 成功后刷新列表并提示。若 [shareUsername] 非空，创建成功后自动调 [MediaService.shareAlbum]
+     * 邀请该用户共享（V8 §1.2：创建相册时可选共享 + 邀请用户）。共享失败不回滚相册创建，
+     * 仅追加错误提示——用户可在详情页重试共享。
      */
-    fun createAlbum(name: String) {
+    fun createAlbum(name: String, shareUsername: String? = null) {
         if (isAlbumLoading) return
         isAlbumLoading = true
         viewModelScope.launch {
@@ -1789,7 +1791,16 @@ class MediaViewModel {
                 val album = MediaService.createAlbum(name)
                 if (album != null) {
                     albumList = albumList + album
-                    errorMessage = "相册「${album.name}」已创建"
+                    if (shareUsername != null) {
+                        val ok = MediaService.shareAlbum(album.id, shareUsername)
+                        errorMessage = if (ok) {
+                            "相册「${album.name}」已创建并共享给 $shareUsername"
+                        } else {
+                            "相册「${album.name}」已创建，但共享失败——可在详情页重试"
+                        }
+                    } else {
+                        errorMessage = "相册「${album.name}」已创建"
+                    }
                 } else {
                     errorMessage = "创建相册失败"
                 }

@@ -30,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -123,9 +124,9 @@ fun AlbumScreen(
     if (showCreateDialog) {
         CreateAlbumDialog(
             onDismiss = { showCreateDialog = false },
-            onConfirm = { name ->
+            onConfirm = { name, shareUsername ->
                 showCreateDialog = false
-                viewModel.createAlbum(name)
+                viewModel.createAlbum(name, shareUsername)
             }
         )
     }
@@ -1511,31 +1512,62 @@ private fun AlbumDetailPage(
 @Composable
 private fun CreateAlbumDialog(
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onConfirm: (String, String?) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
+    var shareEnabled by remember { mutableStateOf(false) }
+    var username by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("新建相册") },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                singleLine = true,
-                placeholder = { Text("输入相册名称") },
-                modifier = Modifier.fillMaxWidth()
-            )
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    placeholder = { Text("输入相册名称") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(
+                        checked = shareEnabled,
+                        onCheckedChange = { shareEnabled = it }
+                    )
+                    Text(
+                        "创建为共享相册",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (shareEnabled) {
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = { username = it },
+                        label = { Text("邀请用户名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
         },
         confirmButton = {
             TextButton(
                 onClick = {
                     val trimmed = name.trim()
                     if (trimmed.isNotEmpty()) {
-                        onConfirm(trimmed)
+                        val shareUser = if (shareEnabled && username.trim().isNotEmpty()) {
+                            username.trim()
+                        } else null
+                        onConfirm(trimmed, shareUser)
                     }
                 },
-                enabled = name.trim().isNotEmpty()
+                enabled = name.trim().isNotEmpty() &&
+                    (!shareEnabled || username.trim().isNotEmpty())
             ) { Text("创建") }
         },
         dismissButton = {
