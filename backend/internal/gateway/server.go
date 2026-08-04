@@ -179,6 +179,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/media/media-search-suggestions", s.handleMediaPrefixSearchSuggestions)
 	// V8：多条件高级搜索（type+mime+size+date+tag 组合）
 	s.mux.HandleFunc("/api/media/advanced-search", s.handleMediaAdvancedSearch)
+	// PRD-v8 §3.1 运维可观测性面板：聚合 metrics_registry + store + audit_log，
+	// 给运维一次性返回 metrics_summary/top_users/recent_errors/daily_active_trend。
+	// 需认证（与其它 /api/* 同口径，user_id 由 authMiddleware 注入）。
+	s.mux.HandleFunc("/api/ops/observability-dashboard", s.handleObservabilityDashboard)
+	// PRD-v8 §2.3 全文搜索+位置筛选：q=关键词 & location=lat,lon & radius=米 & type=...
+	// 全文匹配 filename LIKE %q%（不引入 FTS5 虚拟表，保持 schema 轻量）；位置筛选
+	// 因 media 表无 taken_lat/taken_lon 列暂不可用，query_info 注明 location_filter_unavailable。
+	s.mux.HandleFunc("/api/media/media-full-text-search", s.handleMediaFullTextSearch)
 	// 智能搜索（自然语言解析）：GET ?q=去年夏天的视频
 	// 解析中文查询中的时间/类型/大小/标签关键词，转换为 AdvancedSearchOpts 条件。
 	// 支持 "去年夏天的视频" "大于10MB的图片" "最近7天 #旅行" 等模糊查询。
@@ -25577,4 +25585,368 @@ func (s *Server) handleMediaAiCleanupSuggestions(w http.ResponseWriter, r *http.
 		"total_suggestion_count": totalCount,
 		"user_id":                uid,
 	})
+}
+
+// ============================================================
+// PRD-v8 §3.1 GET /api/ops/observability-dashboard — 运维可观测性面板
+// ============================================================
+//
+// 一次性聚合进程级 metrics + 元数据库，给运维面板首屏渲染所需的全貌：
+//
+//	{
+//	  "metrics_summary": {
+//	    "total_requests":   N,   // 进程启动至今累计 HTTP 请求（所有 method/path/status 求和）
+//	    "total_uploads":    N,   // 上传尝试总数（RecordUploadOutcome 的 attempts，含失败）
+//	    "upload_success_rate": X,// 成功率 successes/attempts，0..1；无尝试时为 0
+//	    "active_endpoints": N    // 非零计数的不同归一化端点数（distinct path in reqCounters）
+//	  },
+//	  "top_users_by_storage": [
+//	    {"user_id":..., "media_count":N, "total_size":N}, ...  // 按 total_size 降序，前 10
+//	  ],
+//	  "recent_errors": [
+//	    {"endpoint":..., "status":N, "count":N, "last_seen":"RFC3339"}, ... // 5xx 聚合
+//	  ],
+//	  "daily_active_trend": [
+//	    {"date":"YYYY-MM-DD","active_users":N}, ... // 最近 14 天，audit_log 按天 user_id 去重
+//	  ]
+//	}
+//
+// 数据来源：
+//   - metrics_summary：s.metrics.Snapshot() 的 reqCounters/uploadAttempts/uploadSuccesses。
+//   - top_users_by_storage：遍历 s.store.ListUsers()，对每个用户调 ListMediaByUser 求和；
+//     这是跨用户聚合，运维端点语义上需放开用户隔离——此处仍要求登录（uid 非空），
+//     但聚合不限定 uid（与 /api/sync/usage 等单用户端点的隔离口径不同，运维视角）。
+//   - recent_errors：snapshot.recentErrors（metricsRegistry 已按 5xx 缓存最近 50 条），
+//     按 path+status 二次聚合得到 count + last_seen。
+//   - daily_active_trend：直接对 audit_logs 表做 GROUP BY date + DISTINCT user_id 的 SQL，
+//     取最近 14 天。这里走 s.store.DB() 原生查询（不新增 Store 方法），保持文件边界。
+//
+// 需认证 + store 注入；store 未注入时 metrics_summary 仍可返回（纯进程级），其余字段置空。
+func (s *Server) handleObservabilityDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
+	// ---- metrics_summary（进程级，metrics 始终非空）----
+	var totalReqs int64
+	activeEndpoints := make(map[string]struct{})
+	uploadAttempts, uploadSuccesses := int64(0), int64(0)
+	if s.metrics != nil {
+		sn := s.metrics.Snapshot()
+		uploadAttempts = sn.uploadAttempts
+		uploadSuccesses = sn.uploadSuccesses
+		for k, cnt := range sn.reqCounters {
+			totalReqs += cnt
+			activeEndpoints[k.path] = struct{}{}
+		}
+	}
+	var uploadRate float64
+	if uploadAttempts > 0 {
+		uploadRate = float64(uploadSuccesses) / float64(uploadAttempts)
+	}
+
+	// ---- recent_errors（进程级，来自 metricsRegistry.recentErrors 环形缓存）----
+	// 同一 (path,status) 可能多次出现，按二者聚合 count 并取最新 last_seen。
+	type errAgg struct {
+		Endpoint string
+		Status   int
+		Count    int
+		LastSeen time.Time
+	}
+	errAggMap := make(map[string]*errAgg)
+	if s.metrics != nil {
+		sn := s.metrics.Snapshot()
+		for _, e := range sn.recentErrors {
+			key := e.Path + "|" + strconv.Itoa(e.Status)
+			a, ok := errAggMap[key]
+			if !ok {
+				a = &errAgg{Endpoint: e.Path, Status: e.Status}
+				errAggMap[key] = a
+			}
+			a.Count++
+			if e.Time.After(a.LastSeen) {
+				a.LastSeen = e.Time
+			}
+		}
+	}
+	recentErrors := make([]map[string]any, 0, len(errAggMap))
+	for _, a := range errAggMap {
+		recentErrors = append(recentErrors, map[string]any{
+			"endpoint":  a.Endpoint,
+			"status":    a.Status,
+			"count":     a.Count,
+			"last_seen": a.LastSeen.UTC().Format(time.RFC3339),
+		})
+	}
+	// 按 count 降序输出（运维最关心高频错误端点）。
+	sort.Slice(recentErrors, func(i, j int) bool {
+		ci, _ := recentErrors[i]["count"].(int)
+		cj, _ := recentErrors[j]["count"].(int)
+		if ci != cj {
+			return ci > cj
+		}
+		// 并列时按 endpoint 字典序稳定输出。
+		ei, _ := recentErrors[i]["endpoint"].(string)
+		ej, _ := recentErrors[j]["endpoint"].(string)
+		return ei < ej
+	})
+
+	// ---- top_users_by_storage + daily_active_trend（需 store；未注入置空）----
+	type userStorage struct {
+		UserID     string `json:"user_id"`
+		MediaCount int    `json:"media_count"`
+		TotalSize  int64  `json:"total_size"`
+	}
+	var topUsers []userStorage
+	dailyTrend := []map[string]any{}
+
+	if s.store != nil {
+		// top_users_by_storage：遍历所有 user，对每个用户求 size/count 求和。
+		// 用户量级通常小（个人/家庭媒体库），单次 ListMediaByUser 全量拉取可接受；
+		// 不新增 Store 方法以保持文件边界（任务约定只改 server.go）。
+		users, err := s.store.ListUsers(r.Context())
+		if err == nil {
+			all := make([]userStorage, 0, len(users))
+			for _, u := range users {
+				mediaList, lerr := s.store.ListMediaByUser(r.Context(), u.ID)
+				if lerr != nil {
+					continue // 单用户失败不阻断整体聚合（与 list 端点"单坏行不阻断"策略一致）
+				}
+				var totalSize int64
+				for _, m := range mediaList {
+					totalSize += m.Size
+				}
+				all = append(all, userStorage{
+					UserID:     u.ID,
+					MediaCount: len(mediaList),
+					TotalSize:  totalSize,
+				})
+			}
+			// 按 total_size 降序取前 10。
+			sort.Slice(all, func(i, j int) bool { return all[i].TotalSize > all[j].TotalSize })
+			if len(all) > 10 {
+				all = all[:10]
+			}
+			topUsers = all
+		}
+
+		// daily_active_trend：直接 SQL 聚合 audit_logs 按天 user_id 去重，最近 14 天。
+		// audit_logs.created_at 为 RFC3339 文本，substr(_,1,10) 取 YYYY-MM-DD。
+		// COUNT(DISTINCT user_id) 即当日活跃用户数。不以 user_id 隔离（运维视角）。
+		db := s.store.DB()
+		if db != nil {
+			rows, qerr := db.QueryContext(r.Context(), `
+SELECT substr(created_at,1,10) AS day, COUNT(DISTINCT user_id) AS active
+FROM audit_logs
+WHERE created_at >= ?
+GROUP BY day
+ORDER BY day DESC
+LIMIT 14`, time.Now().UTC().AddDate(0, 0, -14).Format(time.RFC3339))
+			if qerr == nil {
+				for rows.Next() {
+					var day string
+					var active int
+					if err := rows.Scan(&day, &active); err == nil {
+						dailyTrend = append(dailyTrend, map[string]any{
+							"date":         day,
+							"active_users": active,
+						})
+					}
+				}
+				rows.Close()
+				// 按 date 升序输出（趋势图横轴从旧到新）。
+				sort.Slice(dailyTrend, func(i, j int) bool {
+					di, _ := dailyTrend[i]["date"].(string)
+					dj, _ := dailyTrend[j]["date"].(string)
+					return di < dj
+				})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"metrics_summary": map[string]any{
+			"total_requests":      totalReqs,
+			"total_uploads":       uploadAttempts,
+			"upload_success_rate": uploadRate,
+			"active_endpoints":    len(activeEndpoints),
+		},
+		"top_users_by_storage": topUsers,
+		"recent_errors":        recentErrors,
+		"daily_active_trend":   dailyTrend,
+	})
+}
+
+// ============================================================
+// PRD-v8 §2.3 GET /api/media/media-full-text-search — 全文搜索 + 位置筛选
+// ============================================================
+//
+// 全文搜索端点，支持关键词 + 位置半径 + 类型三维度组合。所有参数可选：
+//
+//	Query 参数:
+//	  q        — 关键词，对 filename 做大小写不敏感 LIKE %q% 子串匹配（未引入 FTS5
+//	             虚拟表，保持 schema 轻量；后续如需高召回可再迁移）。空则不施加关键词条件。
+//	  location — "lat,lon" 形式的经纬度，配合 radius 做位置筛选。CURRENT 媒体表无
+//	             taken_lat/taken_lon 列，故位置筛选暂不可用——query_info 注明
+//	             "location_filter_unavailable":true 并返回未筛选结果，避免静默忽略参数。
+//	  radius   — 位置筛选半径（米），仅 location 提供时有意义；当前实现忽略（见上）。
+//	  type     — 媒体类型 IMAGE/VIDEO/LIVE_PHOTO，精确匹配。
+//	  limit    — 返回上限，默认 100，最大 500（与 advanced-search 对齐）。
+//
+//	返回:
+//	  {
+//	    "results": [media...],
+//	    "total": N,
+//	    "query_info": {
+//	      "q": "关键词",
+//	      "location_filter": false,            // 是否实际应用了位置筛选
+//	      "location_filter_unavailable": true, // 当 location 给了但 schema 不支持时为 true
+//	      "type_filter": true/false,
+//	      "limit": N
+//	    }
+//	  }
+//
+// 实现：复用 AdvancedSearchMedia 的 SQL 构建路径不足以支持 filename LIKE（AdvancedSearchOpts
+// 无此字段），故这里直接用 store.DB() 拼 SQL，列与 mediaColumns 对齐后用 scanMediaRows 还原。
+// 仅查当前用户未软删行（user_id + deleted=0），与 advanced-search 同隔离口径。
+func (s *Server) handleMediaFullTextSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	loc := strings.TrimSpace(r.URL.Query().Get("location"))
+	radius := strings.TrimSpace(r.URL.Query().Get("radius"))
+	typeFilter := strings.TrimSpace(r.URL.Query().Get("type"))
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	// 位置筛选可用性：media 表无 taken_lat/taken_lon 列（schema 已确认），故永远不可用。
+	// location 参数被传入时在 query_info 显式标注，避免前端误以为已筛选。
+	locationFilterApplied := false
+	locationUnavailable := false
+	if loc != "" {
+		locationUnavailable = true
+	}
+	// radius 单独传但无 location：同样视为不可用，标注一下（前端可据此提示）。
+	if radius != "" && loc == "" {
+		locationUnavailable = true
+	}
+
+	typeFilterApplied := typeFilter != ""
+
+	// 拼 SQL：用本地 mediaColumnsLocal（与 storage.mediaColumns 同列序，后者未导出）。
+	// 参数全部以 ? 绑定，filename LIKE 也用参数（%q% 在 Go 侧拼好传入），防注入。
+	var sb strings.Builder
+	args := make([]any, 0, 6)
+	args = append(args, uid) // user_id = ?
+	sb.WriteString(`SELECT ` + mediaColumnsLocal + ` FROM "media" WHERE user_id = ? AND deleted = 0`)
+	if q != "" {
+		sb.WriteString(` AND LOWER(filename) LIKE LOWER(?)`)
+		args = append(args, "%"+q+"%")
+	}
+	if typeFilter != "" {
+		sb.WriteString(` AND "type" = ?`)
+		args = append(args, typeFilter)
+	}
+	sb.WriteString(` ORDER BY created_at DESC LIMIT ?`)
+	args = append(args, limit)
+
+	rows, err := s.store.DB().QueryContext(r.Context(), sb.String(), args...)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// scanMediaRows 是 storage 包内部函数（小写未导出）。这里在同一编译单元的
+	// server.go 属 gateway 包，无法直接调用。改用本地扫描逻辑，列序与 mediaColumns 对齐。
+	mediaList := make([]*storage.Media, 0, limit)
+	for rows.Next() {
+		m, serr := scanMediaRowLocal(rows.Scan)
+		if serr != nil {
+			rows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": serr.Error()})
+			return
+		}
+		mediaList = append(mediaList, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": mediaList,
+		"total":   len(mediaList),
+		"query_info": map[string]any{
+			"q":                            q,
+			"location_filter":              locationFilterApplied,
+			"location_filter_unavailable":  locationUnavailable,
+			"type_filter":                  typeFilterApplied,
+			"limit":                        limit,
+		},
+	})
+}
+
+// mediaColumnsLocal 是 media 表的完整列清单，与 storage.mediaColumns 同列序
+// （后者未导出，gateway 包无法引用，故此处复制一份）。供 full-text-search 拼 SELECT。
+// 列序必须与 scanMediaRowLocal 的 Scan 顺序严格一致；storage 层增删列时此处需同步。
+const mediaColumnsLocal = `id, user_id, filename, "type", size, mime, width, height, created_at, updated_at, sha256, deleted, client_id, taken_at, orientation`
+
+// scanMediaRowLocal 把一行 media 列扫描进 *storage.Media，列序与 mediaColumnsLocal 一致：
+// id, user_id, filename, "type", size, mime, width, height, created_at, updated_at,
+// sha256, deleted, client_id, taken_at, orientation。
+// 与 storage.scanMedia 同逻辑；因后者未导出，gateway 包内此处复制一份以避免改 storage 包边界。
+func scanMediaRowLocal(scan func(dest ...any) error) (*storage.Media, error) {
+	var m storage.Media
+	var createdAt, updatedAt string
+	var deleted int
+	if err := scan(&m.ID, &m.UserID, &m.Filename, &m.Type, &m.Size, &m.Mime,
+		&m.Width, &m.Height, &createdAt, &updatedAt, &m.SHA256, &deleted,
+		&m.ClientID, &m.TakenAt, &m.Orientation); err != nil {
+		return nil, fmt.Errorf("scan media (full-text-search): %w", err)
+	}
+	m.CreatedAt = timeFromValLocal(createdAt)
+	m.UpdatedAt = timeFromValLocal(updatedAt)
+	m.Deleted = deleted != 0
+	return &m, nil
+}
+
+// timeFromValLocal 把 RFC3339(Nano) 字符串解析回 time.Time；与 storage.timeFromVal 同逻辑，
+// 因后者未导出，此处复制一份。空串或解析失败返回零值（不报错，与 storage 同口径）。
+func timeFromValLocal(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Time{}
 }
