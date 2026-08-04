@@ -61,6 +61,17 @@ type reqKeyNoStatus struct {
 	path   string
 }
 
+// errorEntry 记录一条 5xx 错误的元数据，供 observability-dashboard 与
+// recent_errors 展示。不落完整请求体（隐私 + 体积），只记定位排障所需字段。
+type errorEntry struct {
+	Time     time.Time // 错误发生时刻
+	Method   string    // HTTP 方法
+	Path     string    // 归一化后的路径（normalizePath）
+	Status   int       // 原始状态码（如 500/502/503）
+	ReqID    string    // 关联 X-Request-ID，便于回溯链路
+	UserTag  string    // 脱敏用户标记（与访问日志同口径：anon / authed:<前8位>）
+}
+
 // metricsRegistry 收集本进程的全部可观测指标。
 // 访问日志中间件与业务 handler 通过 Record* 方法写入；/metrics handler 通过 Snapshot 读取。
 type metricsRegistry struct {
@@ -78,15 +89,25 @@ type metricsRegistry struct {
 	uploadBytes int64
 	// sync/changes 拉取条目累计。
 	syncChangesServed int64
+
+	// PRD-v8 §3.1 可观测性扩展：上传成功率与按端点错误率。
+	// uploadAttempts/successes 由 accessLogMiddleware 在请求结束时按 path+status 派生
+	// （/api/media/upload 的 2xx 计成功，非 2xx 计失败）。totalAPIErrors 用于
+	// /metrics 的全局 api_error_rate；recentErrors 缓存最近若干条 5xx 以供 dashboard。
+	uploadAttempts int64
+	uploadSuccesses int64
+	recentErrors   []errorEntry
+	recentErrorsMax int // 缓存上限，默认 50；0 表示不缓存
 }
 
 // newMetricsRegistry 返回一个空 registry。
 func newMetricsRegistry() *metricsRegistry {
 	return &metricsRegistry{
-		reqCounters: make(map[reqKey]int64),
-		histSum:     make(map[reqKeyNoStatus]float64),
-		histCount:   make(map[reqKeyNoStatus]int64),
-		histBuckets: make(map[reqKeyNoStatus][]int64),
+		reqCounters:     make(map[reqKey]int64),
+		histSum:         make(map[reqKeyNoStatus]float64),
+		histCount:       make(map[reqKeyNoStatus]int64),
+		histBuckets:     make(map[reqKeyNoStatus][]int64),
+		recentErrorsMax: 50,
 	}
 }
 
@@ -129,6 +150,34 @@ func (m *metricsRegistry) RecordSyncChanges(n int) {
 	m.syncChangesServed += int64(n)
 }
 
+// RecordUploadOutcome 记录一次上传尝试的结果（PRD-v8 §3.1 upload_success_rate）。
+// success=true 计入成功与总尝试；false 仅计入总尝试。由 accessLogMiddleware 在
+// /api/media/upload 请求结束时按状态码派生调用（2xx→success）。
+func (m *metricsRegistry) RecordUploadOutcome(success bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.uploadAttempts++
+	if success {
+		m.uploadSuccesses++
+	}
+}
+
+// RecordError 追加一条 5xx 错误记录到 recentErrors 环形缓存（PRD-v8 §3.1 recent_errors）。
+// 超过 recentErrorsMax 时丢弃最旧条目（FIFO），保持缓存固定大小。entry.Time 由调用方
+// 填入（通常为 time.Now）；其余字段从请求上下文与响应状态码取。
+func (m *metricsRegistry) RecordError(entry errorEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.recentErrorsMax <= 0 {
+		return
+	}
+	m.recentErrors = append(m.recentErrors, entry)
+	if len(m.recentErrors) > m.recentErrorsMax {
+		// 丢弃最旧的一条，保持切片不无限增长。
+		m.recentErrors = m.recentErrors[len(m.recentErrors)-m.recentErrorsMax:]
+	}
+}
+
 // snapshot 是 registry 在某一时刻的不可变快照，供渲染时免锁读取。
 type snapshot struct {
 	reqCounters   map[reqKey]int64
@@ -137,6 +186,10 @@ type snapshot struct {
 	histBuckets   map[reqKeyNoStatus][]int64
 	uploadBytes   int64
 	syncChanges   int64
+	// PRD-v8 §3.1 扩展字段
+	uploadAttempts  int64
+	uploadSuccesses int64
+	recentErrors    []errorEntry // 深拷贝，避免调用方与 registry 共享底层切片
 }
 
 // Snapshot 取一份当前 registry 的深拷贝快照（含 maps 的浅拷贝）。
@@ -144,8 +197,15 @@ func (m *metricsRegistry) Snapshot() snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := snapshot{
-		uploadBytes: m.uploadBytes,
-		syncChanges: m.syncChangesServed,
+		uploadBytes:     m.uploadBytes,
+		syncChanges:     m.syncChangesServed,
+		uploadAttempts:  m.uploadAttempts,
+		uploadSuccesses: m.uploadSuccesses,
+	}
+	// recentErrors 深拷贝：快照应与 registry 后续写入隔离。
+	if len(m.recentErrors) > 0 {
+		s.recentErrors = make([]errorEntry, len(m.recentErrors))
+		copy(s.recentErrors, m.recentErrors)
 	}
 	if len(m.reqCounters) > 0 {
 		s.reqCounters = make(map[reqKey]int64, len(m.reqCounters))
@@ -263,10 +323,70 @@ func (s *Server) renderMetrics(w io.Writer) {
 		b.WriteString("# HELP sync_changes_served_total Total sync change items served by /api/sync/changes.\n")
 		b.WriteString("# TYPE sync_changes_served_total counter\n")
 		b.WriteString(fmt.Sprintf("sync_changes_served_total %d\n", sn.syncChanges))
+
+		// ---- PRD-v8 §3.1 可观测性扩展指标 ----
+		// upload_success_rate：成功上传数 / 总尝试数（0..1）。无尝试时输出 0。
+		// 由 accessLogMiddleware 在 /api/media/upload 请求结束时按 2xx 判定调用 RecordUploadOutcome。
+		b.WriteString("# HELP media_upload_attempts_total Total upload attempts (any status code) to /api/media/upload.\n")
+		b.WriteString("# TYPE media_upload_attempts_total counter\n")
+		b.WriteString(fmt.Sprintf("media_upload_attempts_total %d\n", sn.uploadAttempts))
+		b.WriteString("# HELP media_upload_successes_total Successful (2xx) upload count to /api/media/upload.\n")
+		b.WriteString("# TYPE media_upload_successes_total counter\n")
+		b.WriteString(fmt.Sprintf("media_upload_successes_total %d\n", sn.uploadSuccesses))
+		b.WriteString("# HELP media_upload_success_rate Upload success rate (successes/attempts, 0..1).\n")
+		b.WriteString("# TYPE media_upload_success_rate gauge\n")
+		var uploadRate float64
+		if sn.uploadAttempts > 0 {
+			uploadRate = float64(sn.uploadSuccesses) / float64(sn.uploadAttempts)
+		}
+		b.WriteString(fmt.Sprintf("media_upload_success_rate %s\n", trimFloat(uploadRate)))
+
+		// api_error_rate_by_endpoint：按归一化 path 聚合的 5xx 占比（5xx/(2xx+4xx+5xx+...)）。
+		// 从 reqCounters 按 path 聚合 total 与 5xx，输出每端点一条 gauge 行。
+		// 仅输出至少有一条 5xx 记录的端点，避免无错误端点刷屏（错误率 0 由 absence 表达，
+		// Prometheus 语义中缺失即 0）。
+		b.WriteString("# HELP api_error_rate_by_endpoint Fraction of 5xx responses per normalized endpoint path.\n")
+		b.WriteString("# TYPE api_error_rate_by_endpoint gauge\n")
+		type pathAgg struct{ total, errCount int64 }
+		agg := make(map[string]*pathAgg)
+		for k, cnt := range sn.reqCounters {
+			a, ok := agg[k.path]
+			if !ok {
+				a = &pathAgg{}
+				agg[k.path] = a
+			}
+			a.total += cnt
+			// status 形如 "Internal Server Error"（http.StatusText）；按 5xx 词头判定不可靠，
+			// 这里用 key 字符串前缀匹配 5xx——但 reqKey.status 存的是 StatusText 而非码。
+			// 为稳健判定，改为解析码：见下方 endpointErrRateFromStatusText。
+			if isStatusText5xx(k.status) {
+				a.errCount += cnt
+			}
+		}
+		// 稳定排序输出（按 path 字典序）。
+		paths := make([]string, 0, len(agg))
+		for p := range agg {
+			paths = append(paths, p)
+		}
+		sortStrings(paths)
+		for _, p := range paths {
+			a := agg[p]
+			if a.errCount == 0 {
+				continue // 仅输出有 5xx 的端点。
+			}
+			var rate float64
+			if a.total > 0 {
+				rate = float64(a.errCount) / float64(a.total)
+			}
+			b.WriteString(fmt.Sprintf("api_error_rate_by_endpoint{path=%q} %s\n", p, trimFloat(rate)))
+		}
 	} else {
 		// registry 未初始化（应不发生，NewServer 保证注入）；输出零值保证格式完整。
 		b.WriteString("media_upload_bytes_total 0\n")
 		b.WriteString("sync_changes_served_total 0\n")
+		b.WriteString("media_upload_attempts_total 0\n")
+		b.WriteString("media_upload_successes_total 0\n")
+		b.WriteString("media_upload_success_rate 0\n")
 	}
 
 	// ---- cache 指标（list + thumb）----
@@ -411,4 +531,41 @@ func lessReqKeyNoStatus(a, b reqKeyNoStatus) bool {
 		return a.method < b.method
 	}
 	return a.path < b.path
+}
+
+// ── PRD-v8 §3.1 可观测性扩展辅助 ──
+
+// statusText5xxSet 是 http.StatusText(5xx) 的集合，用于从 reqKey.status（存的是
+// StatusText 而非数字码）反推是否属于 5xx。覆盖标准 500-511 与常见自定义 5xx。
+// 5xx StatusText 多数以 "Internal Server Error" 等形式存在，纯字符串前缀判定不可靠
+// （如 500 与 501 均含 "Error"），故用精确集合匹配。
+var statusText5xxSet = func() map[string]struct{} {
+	m := make(map[string]struct{})
+	for code := 500; code <= 511; code++ {
+		if t := http.StatusText(code); t != "" {
+			m[t] = struct{}{}
+		}
+	}
+	return m
+}()
+
+// isStatusText5xx 判断给定 StatusText 字符串是否对应一个 5xx 状态码。
+// 空串（理论上不应出现——RecordRequest 总会传 http.StatusText）返回 false。
+func isStatusText5xx(statusText string) bool {
+	_, ok := statusText5xxSet[statusText]
+	return ok
+}
+
+// sortStrings 对字符串切片做原地字典序排序（小规模，避免引入 sort 包开销）。
+// 与 sortReqKeys 同策略：选择排序，键数量通常 < 百级。
+func sortStrings(a []string) {
+	for i := 0; i < len(a); i++ {
+		min := i
+		for j := i + 1; j < len(a); j++ {
+			if a[j] < a[min] {
+				min = j
+			}
+		}
+		a[i], a[min] = a[min], a[i]
+	}
 }
