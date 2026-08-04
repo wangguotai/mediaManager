@@ -203,6 +203,32 @@ fun MediaListScreen(
     val offlineQueueItems by viewModel.offlineQueueItems.collectAsState()
     val isRetryingOfflineQueue by viewModel.isRetryingOfflineQueue.collectAsState()
 
+    // ── 后台上传持续进度（PRD-v8 §2.2）──
+    // collect backgroundUploadState：Idle/Running(completed,total)/Completed(total)/Failed(failedCount,total)。
+    // 与离线 banner 同处顶部，给用户持续进度反馈而非仅一次性 Snackbar。
+    // Running 时显示线性进度条 + "后台上传 N/M"；Completed/Failed 展示终态文案，
+    // 经 [bgBannerDismissDelay] 延迟后回 Idle 视觉消失（Completed 3s / Failed 5s）。
+    val bgUploadState by viewModel.backgroundUploadState.collectAsState()
+    // 顶部 banner 当前是否可见。Running 期间恒显；Completed/Failed 在延迟到期后由
+    // LaunchedEffect 置 false 收起。新一批 Running 进入时复位为 true。
+    var bgBannerVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(bgUploadState) {
+        when (bgUploadState) {
+            is BackgroundUploadState.Running -> bgBannerVisible = true
+            is BackgroundUploadState.Completed -> {
+                bgBannerVisible = true
+                kotlinx.coroutines.delay(3_000L)
+                bgBannerVisible = false
+            }
+            is BackgroundUploadState.Failed -> {
+                bgBannerVisible = true
+                kotlinx.coroutines.delay(5_000L)
+                bgBannerVisible = false
+            }
+            is BackgroundUploadState.Idle -> bgBannerVisible = false
+        }
+    }
+
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
 
@@ -938,6 +964,76 @@ fun MediaListScreen(
                                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                                     fontSize = 16.sp
                                 )
+                            }
+                        }
+                    }
+                }
+
+                // ── 后台上传持续进度 banner（PRD-v8 §2.2）──
+                // 离线 banner 下方，[bgBannerVisible] 控制显隐：Running 恒显进度条，
+                // Completed/Failed 显示终态文案 3s/5s 后由 LaunchedEffect 收起。
+                // 风格与离线 banner 一致（Surface + Row），用 primaryContainer 配色区分语义。
+                AnimatedVisibility(
+                    visible = bgBannerVisible,
+                    enter = fadeIn(tween(280)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(220)) + shrinkVertically(tween(220))
+                ) {
+                    val running = bgUploadState as? BackgroundUploadState.Running
+                    val completed = bgUploadState as? BackgroundUploadState.Completed
+                    val failed = bgUploadState as? BackgroundUploadState.Failed
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Dimens.spacingLarge, vertical = Dimens.spacingSmall),
+                        shape = RoundedCornerShape(Dimens.cardCornerRadius),
+                        color = when {
+                            failed != null -> MaterialTheme.colorScheme.errorContainer
+                            completed != null -> MaterialTheme.colorScheme.primaryContainer
+                            else -> MaterialTheme.colorScheme.primaryContainer
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            when {
+                                running != null -> {
+                                    val total = running.total.coerceAtLeast(1)
+                                    val ratio = running.completed.toFloat() / total
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "☁ 后台上传 ${running.completed}/${running.total}",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        LinearProgressIndicator(
+                                            progress = { ratio },
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
+                                completed != null -> {
+                                    Text(
+                                        "✓ 后台上传完成（共 ${completed.total} 项）",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                failed != null -> {
+                                    Text(
+                                        "⚠ 后台上传失败 ${failed.failedCount}/${failed.total} 项",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
                             }
                         }
                     }
