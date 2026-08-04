@@ -164,6 +164,12 @@ fun MediaListScreen(
     // 复用 advancedSearchScope 即可（同为后台搜索协程，无并发冲突）。
     var showSmartSearch by remember { mutableStateOf(false) }
 
+    // 全文搜索对话框显隐：SearchBar 上的「📍 全文搜索」按钮触发，
+    // FullTextSearchDialog 内部就地调 MediaService.getMediaFullTextSearch（关键词+可选位置/类型），
+    // 命中结果经 onResults 灌入 viewModel.applyAdvancedSearchResults 替换列表。
+    // 复用 advancedSearchScope。仅结构性挂载，不改既有本地搜索过滤逻辑。
+    var showFullTextSearch by remember { mutableStateOf(false) }
+
     // ── 离线模式状态（PRD-v8 §1.5）──
     // 每 5 秒轮询 OfflineCacheManager.isOfflineMode()，驱动离线 banner 显隐。
     // 用户可手动关 banner（offlineBannerDismissed），但网络恢复后 dismissed 标记自动复位，
@@ -530,6 +536,28 @@ fun MediaListScreen(
         )
     }
 
+    // 全文搜索对话框：用户输入关键词（可选位置 lat,lon + 半径 + 类型），FullTextSearchDialog
+    // 内部调 MediaService.getMediaFullTextSearch，命中结果经 onResults 灌入
+    // viewModel.applyAdvancedSearchResults 替换列表；位置筛选不可用时 Snackbar 提示。
+    if (showFullTextSearch) {
+        FullTextSearchDialog(
+            onDismiss = { showFullTextSearch = false },
+            onResults = { list, total, locUnavailable ->
+                showFullTextSearch = false
+                viewModel.applyAdvancedSearchResults(list)
+                if (total == 0) {
+                    advancedSearchScope.launch {
+                        snackbarHostState.showSnackbar("未找到匹配的媒体")
+                    }
+                } else if (locUnavailable) {
+                    advancedSearchScope.launch {
+                        snackbarHostState.showSnackbar("位置筛选不可用，已忽略位置条件")
+                    }
+                }
+            }
+        )
+    }
+
 // 上传进度对话框：显示 "上传中 2/5..." + 进度条
     viewModel.uploadProgress?.let { (uploaded, total) ->
         UploadProgressDialog(
@@ -735,7 +763,8 @@ fun MediaListScreen(
                     },
                     onSearchSubmit = { /* IME 搜索键：去抖已驱动过滤，此处无需额外动作 */ },
                     onAdvancedSearch = { showAdvancedSearch = true },
-                    onSmartSearch = { showSmartSearch = true }
+                    onSmartSearch = { showSmartSearch = true },
+                    onFullTextSearch = { showFullTextSearch = true }
                 )
 
                     // 类型筛选条：全部 / 图片 / 视频，与搜索叠加生效

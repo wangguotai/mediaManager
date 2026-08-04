@@ -350,6 +350,198 @@ private fun triggerSmartSearch(
 }
 
 /**
+ * 全文搜索对话框 —— 调 [MediaService.getMediaFullTextSearch] 对文件名/描述/标签等文本做全文检索。
+ *
+ * 与 [SmartSearchDialog]（自然语言）区别：本对话框接受关键词 + 可选位置（lat,lon）+ 半径 +
+ * 类型（图片/视频），命中文本匹配的媒体。后端 [MediaService.QueryInfo.locationFilterUnavailable]
+ * 为 true 时（无地理位置索引），对话框显式提示“位置筛选不可用”，避免用户以为位置已生效。
+ *
+ * 状态机：idle → searching → done（带结果摘要）/ error。空结果不关对话框，留在原地提示
+ * “未找到”，便于用户改写关键词重试。结果经 [onResults] 回调灌入调用方列表。
+ *
+ * @param onResults 搜索成功回调：命中的媒体列表 + 总数 + 是否位置筛选不可用（true 时调用方可 Snackbar 提示）。
+ * @param onDismiss 关闭回调。
+ */
+@OptIn(ExperimentalResourceApi::class)
+@Composable
+fun FullTextSearchDialog(
+    onResults: (List<MediaMetadata>, Int, Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var location by remember { mutableStateOf("") }
+    var radius by remember { mutableStateOf("") }
+    // 类型选项：与后端 type 参数口径一致（IMAGE/VIDEO）；空串=不限类型。
+    val typeOptions = listOf("" to "不限", "IMAGE" to "图片", "VIDEO" to "视频")
+    var selectedType by remember { mutableStateOf("") }
+    var typeMenuExpanded by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+    // 搜索完成后的摘要：total / 位置不可用标志 / 错误提示。null 表示尚未搜索。
+    var summary by remember { mutableStateOf<Triple<Int, Boolean, String>?>(null) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("📍 全文搜索") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "按关键词检索媒体文件名、描述、标签等文本字段，可叠加位置与类型筛选",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("关键词") },
+                    placeholder = { Text("例如：海边 旅行的照片") },
+                    singleLine = true,
+                    enabled = !searching,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        triggerFullTextSearch(query, location, radius, selectedType, scope,
+                            searching = { searching = it }, summary = { summary = it },
+                            onResults = { list, total, locUnavailable -> onResults(list, total, locUnavailable) })
+                    }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                // 类型下拉：沿用 AdvancedSearchDialog 的简易下拉实现。
+                Text("类型", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Box {
+                    OutlinedTextField(
+                        value = typeOptions.firstOrNull { it.first == selectedType }?.second ?: "不限",
+                        onValueChange = { },
+                        readOnly = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { typeMenuExpanded = true },
+                        trailingIcon = {
+                            IconButton(onClick = { typeMenuExpanded = true }) {
+                                Icon(
+                                    painter = painterResource(Res.drawable.ic_sort),
+                                    contentDescription = "选择类型",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        singleLine = true
+                    )
+                    DropdownMenu(
+                        expanded = typeMenuExpanded,
+                        onDismissRequest = { typeMenuExpanded = false }
+                    ) {
+                        typeOptions.forEach { (value, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    selectedType = value
+                                    typeMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                // 位置筛选（可选）：lat,lon。半径单位米。同时填了位置才生效。
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = location,
+                        onValueChange = { location = it },
+                        label = { Text("位置 lat,lon") },
+                        placeholder = { Text("31.23,121.47") },
+                        singleLine = true,
+                        enabled = !searching,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = radius,
+                        onValueChange = { radius = it.filter { c -> c.isDigit() } },
+                        label = { Text("半径(米)") },
+                        singleLine = true,
+                        enabled = !searching,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        modifier = Modifier.width(110.dp)
+                    )
+                }
+                // 搜索结果摘要区：命中数量 / 位置不可用提示 / 错误。
+                summary?.let { (total, locUnavailable, error) ->
+                    if (error.isNotEmpty()) {
+                        Text(error, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                    } else {
+                        if (locUnavailable) {
+                            Text(
+                                "⚠️ 位置筛选不可用（后端未启用地理位置索引），已忽略位置条件",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Text(
+                            "找到 $total 项匹配媒体${if (total > 0) "（已展示）" else ""}",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !searching && query.trim().isNotEmpty(),
+                onClick = {
+                    triggerFullTextSearch(query, location, radius, selectedType, scope,
+                        searching = { searching = it }, summary = { summary = it },
+                        onResults = { list, total, locUnavailable -> onResults(list, total, locUnavailable) })
+                }
+            ) {
+                Text(if (searching) "搜索中…" else "搜索")
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !searching, onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+/**
+ * [FullTextSearchDialog] 的搜索触发逻辑：trim 校验 → 调 [MediaService.getMediaFullTextSearch]
+ * → 回写 summary/onResults。提取为顶层私有函数避免 confirmButton 与 IME 回调重复。
+ */
+private fun triggerFullTextSearch(
+    rawQuery: String,
+    rawLocation: String,
+    rawRadius: String,
+    rawType: String,
+    scope: kotlinx.coroutines.CoroutineScope,
+    searching: (Boolean) -> Unit,
+    summary: (Triple<Int, Boolean, String>?) -> Unit,
+    onResults: (List<MediaMetadata>, Int, Boolean) -> Unit
+) {
+    val q = rawQuery.trim()
+    if (q.isEmpty()) return
+    val loc = rawLocation.trim().takeIf { it.isNotEmpty() }
+    val radiusInt = rawRadius.trim().toIntOrNull()
+    val type = rawType.trim().takeIf { it.isNotEmpty() }
+    searching(true)
+    summary(null)
+    scope.launch {
+        val result = MediaService.getMediaFullTextSearch(q, location = loc, radius = radiusInt, type = type)
+        if (result == null) {
+            searching(false)
+            summary(Triple(0, false, "全文搜索失败，请稍后重试"))
+        } else {
+            searching(false)
+            summary(Triple(result.total, result.queryInfo.locationFilterUnavailable == true, ""))
+            if (result.results.isNotEmpty()) {
+                onResults(result.results, result.total, result.queryInfo.locationFilterUnavailable == true)
+            }
+        }
+    }
+}
+
+/**
  * 可展开搜索栏。
  *
  * 收起态：仅一个搜索图标按钮 + 灰色"搜索"提示，占用空间小，不干扰浏览。
@@ -374,6 +566,7 @@ fun SearchBar(
     onSearchSubmit: () -> Unit = {},
     onAdvancedSearch: () -> Unit = {},
     onSmartSearch: () -> Unit = {},
+    onFullTextSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // 输入框本地文案：即时跟随键盘输入。
@@ -533,6 +726,16 @@ fun SearchBar(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+
+                    // 全文搜索入口：按关键词检索文件名/描述/标签等文本字段，可叠加位置与类型筛选，
+                    // 走后端 /api/media/media-full-text-search。与智能搜索（自然语言）互补。
+                    TextButton(onClick = onFullTextSearch) {
+                        Text(
+                            "📍 全文搜索",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     // 收起态占位文案：提示可点击搜索图标开始过滤。
                     Spacer(modifier = Modifier.width(8.dp))
@@ -554,6 +757,14 @@ fun SearchBar(
                     TextButton(onClick = onSmartSearch) {
                         Text(
                             "🤖",
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // 收起态同样提供全文搜索入口，紧跟智能搜索，任意状态下均可进入。
+                    TextButton(onClick = onFullTextSearch) {
+                        Text(
+                            "📍",
                             fontSize = 16.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

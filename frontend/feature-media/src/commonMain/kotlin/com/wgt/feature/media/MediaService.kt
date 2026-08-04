@@ -824,6 +824,144 @@ object MediaService {
         }
     }
 
+    // ---- 全文搜索 ----
+
+    /**
+     * 全文搜索结果（与后端 `media-full-text-search` JSON 对齐）。
+     *
+     * 后端返回 `{ "results": [...], "total": N, "query_info": {...} }`，
+     * 其中 `results` 与 [advancedSearch] / [getMediaSmartSearch] 同款直接序列化
+     * `storage.Media` 结构体（`mime` / RFC3339 时间），故 [results] 复用 [parseMediaItem]。
+     *
+     * [queryInfo] 暴露后端对本次查询的元信息：是否启用了类型/位置筛选，以及位置筛选
+     * 是否因后端无地理位置索引而不可用（[QueryInfo.locationFilterUnavailable]）——前端据此
+     * 给用户“位置筛选不可用”的提示，避免静默丢失条件。
+     *
+     * @param results 命中的媒体列表（已解析为 [MediaMetadata]）
+     * @param total 后端报告的总命中数（可能大于 [results].size，受 limit 截断）
+     * @param queryInfo 查询元信息
+     */
+    data class FullTextSearchResult(
+        val results: List<MediaMetadata>,
+        val total: Int,
+        val queryInfo: QueryInfo
+    )
+
+    /**
+     * 全文搜索查询元信息（后端 `query_info` 字段）。
+     *
+     * @param q 原始查询串（回显）
+     * @param locationFilter 是否施加了位置筛选（location/radius 非空且后端支持）
+     * @param typeFilter 是否施加了类型筛选
+     * @param locationFilterUnavailable 位置筛选不可用标志：后端无地理位置索引时为 true，
+     *        此时 [locationFilter] 为 false。前端据此提示“位置筛选不可用”。缺失时为 null。
+     */
+    data class QueryInfo(
+        val q: String,
+        val locationFilter: Boolean,
+        val typeFilter: Boolean,
+        val locationFilterUnavailable: Boolean? = null
+    )
+
+    /**
+     * 全文搜索 —— GET /api/media/media-full-text-search。
+     *
+     * 与 [advancedSearch]（多条件字段过滤）/ [getMediaSmartSearch]（自然语言）区别：
+     * 本端点对媒体文件名、描述、标签等文本字段做**全文检索**（后端 FTS/LIKE），
+     * 并可选叠加位置（经纬度 + 半径）与类型筛选。当后端未建地理位置索引时，
+     * 位置筛选降级为不可用，经 [QueryInfo.locationFilterUnavailable] 透传给前端。
+     *
+     * 响应顶层为 `results`（与 [getMediaSmartSearch] 一致，非 `media`），媒体项字段口径
+     * 复用 [parseMediaItem]（直接序列化 `storage.Media`）。HTTP 非 200 或网络异常返回 null，
+     * 调用方按空态提示。鉴权头由 defaultRequest 统一注入。
+     *
+     * @param q 关键词（原样 URL 编码由 Ktor 处理）；空串直接返回空结果。
+     * @param location 位置筛选，形如 `lat,lon`；null 表示不限位置。
+     * @param radius 位置筛选半径（米）；仅 [location] 非空时有效。
+     * @param type 类型筛选：`IMAGE` / `VIDEO`（与后端口径一致）；null 表示不限类型。
+     * @param limit 返回上限（默认 100）。
+     * @return 解析后的全文搜索结果；失败返回 null。
+     */
+    suspend fun getMediaFullTextSearch(
+        q: String,
+        location: String? = null,
+        radius: Int? = null,
+        type: String? = null,
+        limit: Int = 100
+    ): FullTextSearchResult? {
+        val query = q.trim()
+        if (query.isEmpty()) return FullTextSearchResult(emptyList(), 0, QueryInfo("", false, false, null))
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/media-full-text-search") {
+                parameter("q", query)
+                if (!location.isNullOrBlank()) parameter("location", location)
+                if (radius != null && radius > 0) parameter("radius", radius)
+                if (!type.isNullOrBlank()) parameter("type", type)
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val list = obj["results"]?.jsonArray?.map { item ->
+                    parseMediaItem(item.jsonObject)
+                } ?: emptyList()
+                val total = obj["total"]?.jsonPrimitive?.intOrNull ?: list.size
+                val qi = obj["query_info"]?.jsonObject
+                val queryInfo = QueryInfo(
+                    q = qi?.get("q")?.jsonPrimitive?.contentOrNull ?: query,
+                    locationFilter = qi?.get("location_filter")?.jsonPrimitive?.booleanOrNull ?: false,
+                    typeFilter = qi?.get("type_filter")?.jsonPrimitive?.booleanOrNull ?: false,
+                    locationFilterUnavailable = qi?.get("location_filter_unavailable")?.jsonPrimitive?.booleanOrNull
+                )
+                logger.info(
+                    "MediaService",
+                    "getMediaFullTextSearch q=$query status=${response.status} parsed=${list.size} total=$total locUnavailable=${queryInfo.locationFilterUnavailable}"
+                )
+                FullTextSearchResult(list, total, queryInfo)
+            } else {
+                logger.info("MediaService", "getMediaFullTextSearch q=$query status=${response.status} (non-OK)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getMediaFullTextSearch FAILED q=$query: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    // ---- 运维面板 ----
+
+    /**
+     * 运维可观测面板 —— GET /api/ops/observability-dashboard。
+     *
+     * 返回后端运维概览的**原始 JSON**（[JsonObject]），由前端自行解析展示，不在服务层
+     * 固化字段结构——运维字段会随后端迭代增减，透传原始 JSON 可避免前后端 data class
+     * 频繁同步。预期顶层字段：`metrics_summary`（总请求 / 上传成功率等）、
+     * `top_users_by_storage`（按存储排序的用户列表）、`recent_errors`（近期错误日志）、
+     * `daily_active_trend`（日活趋势序列）。前端按存在性逐项 `jsonObject[key]` 取值，
+     * 缺失字段静默跳过对应展示区。
+     *
+     * HTTP 非 200 或网络异常返回 null，调用方按空态/错误提示处理。鉴权头由 defaultRequest
+     * 统一注入（运维端点通常要求管理员 token）。
+     *
+     * @return 后端运维面板原始 JSON；失败返回 null。
+     */
+    suspend fun getObservabilityDashboard(): JsonObject? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/ops/observability-dashboard")
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                logger.info("MediaService", "getObservabilityDashboard status=${response.status} keys=${o.keys}")
+                o
+            } else {
+                logger.info("MediaService", "getObservabilityDashboard status=${response.status} (non-OK)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getObservabilityDashboard FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /**
      * 把 `YYYY-MM-DD` 补成 RFC3339 当天起始：`YYYY-MM-DDT00:00:00Z`。
      * 非预期格式原样返回，交由后端兜底（不抛错）。
