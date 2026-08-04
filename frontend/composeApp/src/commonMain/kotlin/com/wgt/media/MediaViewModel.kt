@@ -21,6 +21,7 @@ import media.MediaType
 import com.wgt.feature.gallery.gallery
 import com.wgt.feature.gallery.requestMediaDeletion
 import com.wgt.base.network.platform
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.time.Clock
 
 private const val TAG = "MediaViewModel"
@@ -302,6 +303,27 @@ class MediaViewModel {
      * 上传离线队列（弱网失败入队，恢复后重放）。UI 可观察 [UploadQueue.items] 展示待传数。
      */
     val uploadQueue = UploadQueue()
+
+    /**
+     * 后台上传队列管理器（PRD-v8 §2.2）—— expect/actual，Android 端 WorkManager 驱动。
+     *
+     * 由 [enqueueBackgroundUpload] 入队，[backgroundUploadState] 转发其状态流给 UI。
+     * 懒初始化：构造时同 expect 声明无参，actual 自行取 WorkManager 单例。
+     */
+    private val backgroundUploadQueue: UploadQueueManager by lazy { UploadQueueManager() }
+
+    /**
+     * 后台上传状态流（转发自 [backgroundUploadQueue.uploadState]）。
+     *
+     * UI（MediaListScreen 选择底栏"后台上传"按钮）观察此流：入队后 Running 显示进度，
+     * Completed/Failed 触发 Snackbar。Idle 为初态/复位态。
+     *
+     * 与 [isUploading]/[uploadProgress]（前台手动上传进度）区分：本流仅反映 WorkManager
+     * 后台批次；前台 [uploadSelectedLocalMedia] 不经此流。两条上传通路独立，符合
+     * "前台即时反馈 + 后台被杀续传"的并行设计。
+     */
+    val backgroundUploadState: StateFlow<BackgroundUploadState> get() = backgroundUploadQueue.uploadState
+
 
     /**
      * SHA-256 去重集合：增量同步返回的指纹 + 本设备已传指纹，自动备份时据此跳过已传图。
@@ -1081,6 +1103,32 @@ class MediaViewModel {
                 uploadProgress = null
             }
         }
+    }
+
+    /**
+     * 把选中本地媒体加入后台上传队列（PRD-v8 §2.2）。
+     *
+     * 与 [uploadSelectedLocalMedia]（前台即时上传）互补：本方法将选中项打包为
+     * [BackgroundUploadItem] 列表，交由 [UploadQueueManager] 入队 WorkManager，
+     * App 被杀后 WorkManager 持久化续传。入队后立即 deselectAll 并清空选择模式，
+     * UI 经 [backgroundUploadState] 观察进度。
+     *
+     * 仅本地源（selectedTab==0）有意义——云端源无本地上传需求。
+     */
+    fun enqueueBackgroundUpload() {
+        if (selectedMediaIds.isEmpty()) return
+        val items = selectedMediaIds.toList().mapNotNull { mediaId ->
+            val media = mediaList.find { it.id == mediaId } ?: return@mapNotNull null
+            BackgroundUploadItem(
+                mediaId = mediaId,
+                filename = media.filename,
+                isLivePhoto = media.is_live_photo,
+                takenAt = media.created_at
+            )
+        }
+        if (items.isEmpty()) return
+        backgroundUploadQueue.enqueueUploads(items)
+        deselectAll()
     }
 
     /**
