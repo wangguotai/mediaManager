@@ -79,6 +79,10 @@ import media.MediaType
 import mediamanager.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
 /**
  * 相册屏幕 —— 支持两层视图：
@@ -186,6 +190,21 @@ fun AlbumScreen(
     }
 }
 
+/**
+ * V22：相册列表排序模式。
+ *
+ * Album 数据类无 createdAt 字段，故列表页不支持"按日期排序"；
+ * reorderAlbum 的语义是"重排相册内媒体"，不适用于相册列表排序，
+ * 故列表页排序为纯本地展示排序（即时反馈，不调后端）。
+ */
+private enum class AlbumSortMode {
+    DEFAULT,     // 后端返回的原序
+    NAME_ASC,    // 名称 A→Z
+    NAME_DESC,   // 名称 Z→A
+    COUNT_DESC,  // 媒体数 多→少
+    COUNT_ASC    // 媒体数 少→多
+}
+
 // ---- 相册列表页 ----
 
 /**
@@ -203,7 +222,9 @@ private fun AlbumListPage(
 ) {
     val albums = viewModel.albumList
     val isLoading = viewModel.isAlbumLoading
-    var sortByName by remember { mutableStateOf(false) }
+    // V22：相册列表排序模式。Album 无 createdAt 字段，故仅支持按名称 / 媒体数（各升降序）。
+    // reorderAlbum 的语义是"重排相册内媒体"，不适用于相册列表排序，故此处为纯本地展示排序。
+    var sortMode by remember { mutableStateOf(AlbumSortMode.DEFAULT) }
     // V8：批量选择模式
     var selectionMode by remember { mutableStateOf(false) }
     val selectedAlbumIds = remember { mutableStateListOf<String>() }
@@ -215,18 +236,28 @@ private fun AlbumListPage(
     // V9：置顶相册 id 集合（从后端 /api/media/album/pinned 拉取）。空集合表示无置顶
     // 或拉取失败（UI 降级为不显示置顶标记）。长按菜单据此显示"置顶/取消置顶"。
     var pinnedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    // 长按动作菜单：非空时弹出操作对话框（置顶/取消置顶/删除）
+    // 长按动作菜单：非空时弹出操作对话框（置顶/取消置顶/合并到.../导出/删除）
     var pendingActionAlbum by remember { mutableStateOf<MediaService.Album?>(null) }
     val actionScope = rememberCoroutineScope()
+    // V22：合并相册——待选择目标相册的源相册。非空时弹相册选择器。
+    var pendingMergeSource by remember { mutableStateOf<MediaService.Album?>(null) }
+    // V22：导出进行中标记（防止重复点击；成功后用 Snackbar 提示计数）。
+    var exportingAlbumId by remember { mutableStateOf<String?>(null) }
 
     // 进入列表页时拉取置顶相册 id 集合，用于渲染 📌 标记与决定长按菜单动作。
     LaunchedEffect(Unit) {
         pinnedIds = MediaService.getPinnedAlbumIds()
     }
 
-    // 排序后的相册列表：置顶相册 (pinnedIds 命中) 优先排前，再按名称/时间原序。
-    val sortedAlbums = remember(albums, sortByName, pinnedIds) {
-        val base = if (sortByName) albums.sortedBy { it.name.lowercase() } else albums
+    // 排序后的相册列表：置顶相册 (pinnedIds 命中) 优先排前，再按 sortMode 排序。
+    val sortedAlbums = remember(albums, sortMode, pinnedIds) {
+        val base = when (sortMode) {
+            AlbumSortMode.NAME_ASC -> albums.sortedBy { it.name.lowercase() }
+            AlbumSortMode.NAME_DESC -> albums.sortedByDescending { it.name.lowercase() }
+            AlbumSortMode.COUNT_DESC -> albums.sortedByDescending { it.mediaCount }
+            AlbumSortMode.COUNT_ASC -> albums.sortedBy { it.mediaCount }
+            AlbumSortMode.DEFAULT -> albums
+        }
         // 稳定分区：置顶在前，保持区内原序
         base.partition { it.id in pinnedIds }.let { (pinned, rest) -> pinned + rest }
     }
@@ -305,14 +336,45 @@ private fun AlbumListPage(
                             selectedAlbumIds.clear()
                         }) { Text("取消") }
                     } else {
-                        // V7：排序切换按钮
-                        IconButton(onClick = { sortByName = !sortByName }) {
+                        // V22：排序下拉菜单（按名称 A→Z / 名称 Z→A / 媒体数 多→少 / 媒体数 少→多 / 默认）
+                        // Album 无 createdAt，故无"按日期"项；reorderAlbum 语义为相册内媒体排序，
+                        // 不适用于相册列表，故此处仅做本地展示排序（即时反馈，不调后端）。
+                        var showSortMenu by remember { mutableStateOf(false) }
+                        IconButton(onClick = { showSortMenu = true }) {
                             Icon(
                                 painterResource(Res.drawable.ic_sort),
-                                contentDescription = if (sortByName) "按名称排序" else "按时间排序",
-                                tint = if (sortByName) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                contentDescription = "排序",
+                                tint = if (sortMode != AlbumSortMode.DEFAULT)
+                                    MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                             )
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("名称 A→Z") },
+                                onClick = { sortMode = AlbumSortMode.NAME_ASC; showSortMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("名称 Z→A") },
+                                onClick = { sortMode = AlbumSortMode.NAME_DESC; showSortMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("媒体数 多→少") },
+                                onClick = { sortMode = AlbumSortMode.COUNT_DESC; showSortMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("媒体数 少→多") },
+                                onClick = { sortMode = AlbumSortMode.COUNT_ASC; showSortMenu = false }
+                            )
+                            if (sortMode != AlbumSortMode.DEFAULT) {
+                                DropdownMenuItem(
+                                    text = { Text("恢复默认顺序") },
+                                    onClick = { sortMode = AlbumSortMode.DEFAULT; showSortMenu = false }
+                                )
+                            }
                         }
                         IconButton(
                             onClick = { viewModel.loadAlbums(forceRefresh = true) },
@@ -587,7 +649,7 @@ private fun AlbumListPage(
         )
     }
 
-    // V9：长按弹动作对话框 —— 置顶 / 取消置顶 / 删除 / 批量选择
+    // V22：长按弹动作对话框 —— 置顶/取消置顶 / 合并到... / 导出 / 删除 / 批量选择
     pendingActionAlbum?.let { album ->
         val isPinnedNow = album.id in pinnedIds
         AlertDialog(
@@ -597,16 +659,15 @@ private fun AlbumListPage(
                 Column {
                     Text("「${album.name}」", fontWeight = FontWeight.Medium)
                     Spacer(modifier = Modifier.height(12.dp))
-                    // 置顶 / 取消置顶
+                    // 置顶 / 取消置顶 —— 调 batchPinAlbums（批量端点，单条亦走此路）。
                     TextButton(
                         onClick = {
                             pendingActionAlbum = null
                             actionScope.launch {
-                                val ok = if (isPinnedNow) {
-                                    MediaService.unpinAlbum(album.id)
-                                } else {
-                                    MediaService.pinAlbum(album.id)
-                                }
+                                val ok = MediaService.batchPinAlbums(
+                                    listOf(album.id),
+                                    pin = !isPinnedNow
+                                )
                                 if (ok) {
                                     // 刷新置顶 id 集合；列表按 pinnedIds 重排，📌 标记随之变化
                                     pinnedIds = MediaService.getPinnedAlbumIds()
@@ -621,6 +682,48 @@ private fun AlbumListPage(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(if (isPinnedNow) "📌 取消置顶" else "📌 置顶相册")
+                    }
+                    // 合并到... —— 弹出相册选择器选目标，调 mergeAlbums(sourceId=album.id, targetId=选中.id)。
+                    // 源相册合并后会被后端删除，故选择目标后需二次确认。
+                    TextButton(
+                        onClick = {
+                            pendingActionAlbum = null
+                            pendingMergeSource = album
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("🔗 合并到...")
+                    }
+                    // 导出 —— 调 exportAlbum，返回相册元数据 JSON；解析 media_count 后 Snackbar 提示。
+                    TextButton(
+                        onClick = {
+                            val target = album
+                            pendingActionAlbum = null
+                            if (exportingAlbumId != null) return@TextButton
+                            exportingAlbumId = target.id
+                            actionScope.launch {
+                                val json = MediaService.exportAlbum(target.id)
+                                exportingAlbumId = null
+                                if (json != null) {
+                                    // 解析 media_count；失败降级为通用提示。
+                                    val count = try {
+                                        Json
+                                            .parseToJsonElement(json)
+                                            .jsonObject["media_count"]
+                                            ?.jsonPrimitive?.intOrNull
+                                    } catch (e: Exception) { null }
+                                    viewModel.showErrorMessage(
+                                        if (count != null) "已导出 $count 项"
+                                        else "已导出相册「${target.name}」"
+                                    )
+                                } else {
+                                    viewModel.showErrorMessage("导出失败")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (exportingAlbumId == album.id) "导出中…" else "⬆️ 导出")
                     }
                     // 删除单个相册（复用 pendingDeleteAlbum 流程）
                     TextButton(
@@ -648,6 +751,79 @@ private fun AlbumListPage(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { pendingActionAlbum = null }) { Text("关闭") }
+            }
+        )
+    }
+
+    // V22：合并相册——目标相册选择器。列出当前相册列表（排除源相册自身），
+    // 点选目标后弹二次确认，确认调 mergeAlbums(sourceId, targetId)，成功刷新列表。
+    pendingMergeSource?.let { source ->
+        // 候选目标：除源相册外的全部相册（我的相册 + 共享相册去重）。
+        val candidates = (sortedAlbums + viewModel.sharedAlbumList)
+            .filter { it.id != source.id }
+            .distinctBy { it.id }
+        AlertDialog(
+            onDismissRequest = { pendingMergeSource = null },
+            title = { Text("合并相册", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "将「${source.name}」合并到以下相册（源相册合并后删除）：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (candidates.isEmpty()) {
+                        Text(
+                            "没有其他相册可作为合并目标",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else {
+                        candidates.forEach { target ->
+                            var confirmMerge by remember(target.id) { mutableStateOf(false) }
+                            TextButton(
+                                onClick = { confirmMerge = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("→ ${target.name}（${target.mediaCount} 项）")
+                            }
+                            if (confirmMerge) {
+                                AlertDialog(
+                                    onDismissRequest = { confirmMerge = false },
+                                    title = { Text("确认合并") },
+                                    text = {
+                                        Text("确定将「${source.name}」的全部媒体合并到「${target.name}」？\n合并后「${source.name}」将被删除。")
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            val src = source
+                                            val tgt = target
+                                            confirmMerge = false
+                                            pendingMergeSource = null
+                                            actionScope.launch {
+                                                val ok = MediaService.mergeAlbums(src.id, tgt.id)
+                                                if (ok) {
+                                                    viewModel.loadAlbums(forceRefresh = true)
+                                                    viewModel.showErrorMessage("已合并到「${tgt.name}」")
+                                                } else {
+                                                    viewModel.showErrorMessage("合并失败")
+                                                }
+                                            }
+                                        }) { Text("合并", color = MaterialTheme.colorScheme.error) }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { confirmMerge = false }) { Text("取消") }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingMergeSource = null }) { Text("取消") }
             }
         )
     }
