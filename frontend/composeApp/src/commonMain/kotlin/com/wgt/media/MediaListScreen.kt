@@ -216,6 +216,11 @@ fun MediaListScreen(
     // 批量分享进行中标记：防止重复点击，由 onBatchShare 协程读写。
     var isBatchSharing by remember { mutableStateOf(false) }
 
+    // V8 批量下载：调 getBatchDownloadUrls 拿到的 URL 列表，非 null 即弹出对话框供复制。
+    // isBatchDownloading 防止重复点击。
+    var isBatchDownloading by remember { mutableStateOf(false) }
+    var batchDownloadUrls by remember { mutableStateOf<List<com.wgt.feature.media.MediaService.BatchDownloadUrl>?>(null) }
+
     // 批量删除确认对话框：点击删除按钮后先弹确认，避免误删。
 
     // 监听错误信息并显示 Snackbar
@@ -470,6 +475,16 @@ fun MediaListScreen(
         )
     }
 
+    // V8：批量下载 URL 列表对话框 —— 调 getBatchDownloadUrls 成功后弹出，展示每个文件的
+    // 直接下载 URL（/api/media/download/{id}，鉴权有效）供用户复制。URL 为相对路径，
+    // 对话框内拼接 backendBaseUrl 便于完整复制。
+    batchDownloadUrls?.let { urls ->
+        BatchDownloadUrlsDialog(
+            urls = urls,
+            onDismiss = { batchDownloadUrls = null }
+        )
+    }
+
     // V8：媒体详情对话框
     mediaInfoTarget?.let { mediaId ->
         MediaInfoDialog(
@@ -647,10 +662,30 @@ fun MediaListScreen(
                     },
                     showBatchRotateButton = selectedTab != 0, // V8：仅云端源显示批量旋转
                     showBackgroundUploadButton = selectedTab == 0, // V8 §2.2：仅本地源显示后台上传
+                    showBatchDownloadButton = selectedTab != 0, // V8：仅云端源显示批量下载
                     onBackgroundUpload = {
                         viewModel.enqueueBackgroundUpload()
                         advancedSearchScope.launch {
                             snackbarHostState.showSnackbar("已加入后台上传队列")
+                        }
+                    },
+                    onBatchDownload = {
+                        // 批量下载：调 /api/media/batch-download-urls 获取直接下载 URL 列表，
+                        // 成功后弹出对话框供用户复制；失败提示错误。
+                        val ids = viewModel.selectedMediaIds.toList()
+                        if (ids.isEmpty()) {
+                            advancedSearchScope.launch { snackbarHostState.showSnackbar("请先选择媒体") }
+                        } else if (!isBatchDownloading) {
+                            isBatchDownloading = true
+                            advancedSearchScope.launch(dispatchers.io) {
+                                val urls = com.wgt.feature.media.MediaService.getBatchDownloadUrls(ids)
+                                isBatchDownloading = false
+                                if (urls != null) {
+                                    batchDownloadUrls = urls
+                                } else {
+                                    snackbarHostState.showSnackbar("获取下载链接失败，请稍后重试")
+                                }
+                            }
                         }
                     }
                 )
@@ -3757,6 +3792,7 @@ fun SelectionBottomBar(
     onBatchRotate: () -> Unit = {},
     onBatchShare: () -> Unit = {},
     onBackgroundUpload: () -> Unit = {},
+    onBatchDownload: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
@@ -3767,7 +3803,8 @@ fun SelectionBottomBar(
     showBatchUnfavoriteButton: Boolean = false,
     showBatchRotateButton: Boolean = false,
     showBatchShareButton: Boolean = false,
-    showBackgroundUploadButton: Boolean = false
+    showBackgroundUploadButton: Boolean = false,
+    showBatchDownloadButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3881,6 +3918,18 @@ fun SelectionBottomBar(
             }
         }
 
+        // V8 批量下载：调 /api/media/batch-download-urls 获取下载 URL 列表弹窗供复制，
+        // 仅云端源（selectedTab != 0）显示。复用 ic_file_upload 图标（项目内对"下载"操作的既定复用，
+        // 见 AlbumScreen 下载相册按钮），避免引入新 drawable。
+        if (showBatchDownloadButton) {
+            IconButton(onClick = onBatchDownload) {
+                Icon(
+                    painterResource(Res.drawable.ic_file_upload),
+                    contentDescription = "批量下载"
+                )
+            }
+        }
+
         if (showBackgroundUploadButton) {
             IconButton(onClick = onBackgroundUpload) {
                 Icon(
@@ -3921,6 +3970,70 @@ fun SelectionBottomBar(
             }
         }
     }
+}
+
+/**
+ * V8 批量下载 URL 列表对话框。
+ *
+ * 由 SelectionBottomBar 的"批量下载"按钮调 [MediaService.getBatchDownloadUrls] 成功后触发，
+ * 展示每个文件的直接下载 URL（/api/media/download/{id}，鉴权有效）供用户复制。
+ *
+ * 后端返回的 url 为相对路径（/api/media/download/{id}），此处拼接完整后端基址便于复制。
+ * 采用 [AlertDialog] + 可滚动 [Column] 实现，commonMain 全平台兼容。
+ *
+ * @param urls 下载 URL 条目列表
+ * @param onDismiss 关闭回调
+ */
+@Composable
+private fun BatchDownloadUrlsDialog(
+    urls: List<com.wgt.feature.media.MediaService.BatchDownloadUrl>,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("下载链接（${urls.size} 项）", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "以下为直接下载 URL（需登录态有效），可复制到浏览器下载：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                urls.forEach { item ->
+                    val fullUrl = com.wgt.feature.media.MediaService.buildFullDownloadUrl(item.url)
+                    Text(
+                        text = item.filename,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = fullUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (item.size > 0) {
+                        Text(
+                            text = "${item.size} 字节",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 /**
