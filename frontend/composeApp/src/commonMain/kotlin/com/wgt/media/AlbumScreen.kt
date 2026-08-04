@@ -272,6 +272,29 @@ private fun AlbumListPage(
                         }
                         TextButton(onClick = {
                             if (selectedAlbumIds.isNotEmpty()) {
+                                val ids = selectedAlbumIds.toList()
+                                batchScope.launch {
+                                    // 调 batch-set-cover：批量强制为选中相册设封面（首张媒体）。
+                                    // 后端跳过空相册；成功后提示计数并刷新卡片封面。
+                                    val result = MediaService.batchSetAlbumCover(ids)
+                                    if (result != null) {
+                                        selectionMode = false
+                                        selectedAlbumIds.clear()
+                                        viewModel.loadAlbums(forceRefresh = true)
+                                        viewModel.showErrorMessage(
+                                            "已为 ${result.updatedCount} 个相册设封面" +
+                                                if (result.skippedCount > 0) "（${result.skippedCount} 个空相册跳过）" else ""
+                                        )
+                                    } else {
+                                        viewModel.showErrorMessage("批量设封面失败")
+                                    }
+                                }
+                            }
+                        }) {
+                            Text("封面(${selectedAlbumIds.size})")
+                        }
+                        TextButton(onClick = {
+                            if (selectedAlbumIds.isNotEmpty()) {
                                 showBatchDeleteConfirm = true
                             }
                         }) {
@@ -961,6 +984,11 @@ private fun AlbumDetailPage(
     var previewIndex by remember { mutableStateOf<Int?>(null) }
     var showAddMediaDialog by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<String?>(null) } // V7：长按移除目标 media id
+    // 长按媒体弹出的操作菜单目标（设为封面 / 从相册移除）。
+    // 非空时弹 AlertDialog 选择动作——首选"设为相册封面"（调 setAlbumCover），
+    // 次选"从相册移除"（沿用 removeTarget 路径）。
+    var pendingCoverTarget by remember { mutableStateOf<MediaMetadata?>(null) }
+    val coverActionScope = rememberCoroutineScope()
 
     // V9：一键公开共享状态。null=未知（首态，按"未共享"着色），true=已公开共享，false=未共享。
     // share-toggle 为幂等翻转、无独立只读查询端点，故不在进入时探测（探测会副作用翻转状态），
@@ -1458,13 +1486,60 @@ private fun AlbumDetailPage(
                             }
                         },
                         onMediaLongClick = { media ->
-                            removeTarget = media.id
+                            pendingCoverTarget = media // V：长按弹"操作菜单"（设为封面 / 从相册移除）
                         },
                         useBackendLoader = true,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
             }
+        }
+
+        // V7：长按照片 → 操作菜单（设为封面 / 从相册移除）。
+        // 设为封面调 viewModel.setAlbumCover(albumId, mediaId)，成功后刷新详情，
+        // 使卡片封面立即可见；从相册移除沿用 removeTarget 路径单独弹确认。
+        pendingCoverTarget?.let { media ->
+            AlertDialog(
+                onDismissRequest = { pendingCoverTarget = null },
+                title = { Text("照片操作", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text("选择对这张照片的操作：")
+                },
+                confirmButton = {
+                    Column {
+                        // 首选动作：设为相册封面（调 POST /api/media/album/cover）。
+                        TextButton(
+                            onClick = {
+                                val target = media
+                                pendingCoverTarget = null
+                                coverActionScope.launch {
+                                    val ok = MediaService.setAlbumCover(albumId, target.id)
+                                    if (ok) {
+                                        viewModel.showErrorMessage("已设为相册封面")
+                                        // 刷新列表（更新卡片封面）与详情（保持上下文一致）
+                                        viewModel.loadAlbums(forceRefresh = true)
+                                        viewModel.loadAlbumDetail(albumId)
+                                    } else {
+                                        viewModel.showErrorMessage("设为封面失败")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("🖼️ 设为相册封面") }
+                        // 次选动作：从相册移除（转入原 removeTarget 确认流程）。
+                        TextButton(
+                            onClick = {
+                                removeTarget = media.id
+                                pendingCoverTarget = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("➖ 从相册移除", color = MaterialTheme.colorScheme.error) }
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingCoverTarget = null }) { Text("取消") }
+                }
+            )
         }
 
         // V7：长按照片 → 从相册移除确认对话框
