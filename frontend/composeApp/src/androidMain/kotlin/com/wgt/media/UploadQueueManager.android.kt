@@ -84,6 +84,12 @@ actual class UploadQueueManager {
             workManager.getWorkInfoByIdFlow(request.id).collect { info ->
                 if (info == null) return@collect
                 _uploadState.value = mapWorkInfo(info, items.size)
+                // 终态后停止 observe，避免协程泄漏（getWorkInfoByIdFlow 终态后不自动 complete）
+                if (info.state == WorkInfo.State.SUCCEEDED ||
+                    info.state == WorkInfo.State.FAILED ||
+                    info.state == WorkInfo.State.CANCELLED) {
+                    return@collect
+                }
             }
         }
     }

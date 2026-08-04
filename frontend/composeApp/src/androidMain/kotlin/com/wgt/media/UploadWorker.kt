@@ -56,7 +56,9 @@ class UploadWorker(
         }
 
         val galleryFeature = manager.feature.gallery
-        val clientId = SettingsState.deviceId
+        // 直接从 SettingsStorage 读 deviceId，绕过 Compose mutableStateOf（线程安全：
+        // WorkManager 后台线程 / 进程重建场景下 SettingsState 可能未初始化）
+        val clientId = SettingsStorage().getString(SettingsKeys.DEVICE_ID, "")
         val total = items.size
         var completed = 0
         var failed = 0
@@ -116,6 +118,11 @@ class UploadWorker(
         // 达 MAX_RETRY_ATTEMPTS 后 WorkManager 转 FAILED，UploadQueueManager 映射为 Failed 状态。
         return if (failed == 0) {
             Result.success(progressOfWorkData(completed, total))
+        } else if (runAttemptCount >= MAX_RETRY_ATTEMPTS) {
+            // 达重试上限，停止重试，标记失败终态——WorkInfo 进入 FAILED，
+            // UploadQueueManager.mapWorkInfo 映射为 BackgroundUploadState.Failed。
+            logger.warning(TAG, "doWork: max retries ($MAX_RETRY_ATTEMPTS) reached, marking FAILURE")
+            Result.failure(progressOfWorkData(completed, total))
         } else {
             Result.retry()
         }
