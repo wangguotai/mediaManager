@@ -6,7 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
- * RN 页面容器（V7 §3.1）。
+ * RN 页面容器（V7 §3.1 / V8 §1.3 热更新闭环）。
  *
  * 在 Compose 中嵌入一个 React Native 页面。平台实现：
  * - Android：用 AndroidView 嵌入 ReactSurface（见 PlatformRnView actual），
@@ -14,26 +14,43 @@ import androidx.compose.ui.Modifier
  *   并转发 Activity 生命周期到 ReactHost。
  * - iOS：用 UIKitView 嵌入 RCTRootView（待实现）。
  *
- * 远程 bundle 热更新（V7 §3.2）：由各平台 PlatformRnView 内部按需调用
- * ensureBundleWithVersion，失败静默回退 assets 内置 bundle，不阻塞渲染。
- * 此处不再预先 await 热更新——旧实现在此处阻塞调用 ensureBundleWithVersion，
- * 后端不可达时一直 loading 导致白屏。
+ * 热更新闭环（V8 §1.3）：
+ * - 调用方（如 RnActivityScreen）在进入时通过 ensureBundleWithVersion(bundleName)
+ *   检查后端 manifest，有新版本则下载到本地缓存，将返回的本地路径通过
+ *   [bundleFilePath] 传入。平台实现优先用该路径加载（跳过 assets 复制）。
+ * - [bundleFilePath] 为 null 时（网络失败或无缓存），平台回退到 [bundleAssetName]
+ *   指向的 assets 内置 bundle。
+ * - [bundleName] 用于平台侧兜底热更新查询（当调用方未预先解析路径时），
+ *   为 null 时平台用 [bundleAssetName] 作为 manifest 查询 key。
  *
  * @param componentName RN 组件名（如 "MediaManagerApp"）
- * @param bundleAssetName bundle 文件名（如 "index.android.bundle"）
+ * @param bundleAssetName 内置 assets bundle 文件名（如 "index.android.bundle"），热更新失败时回退
  * @param hostId ReactHost 标识
+ * @param bundleFilePath 热更新本地缓存 bundle 路径（非空时优先），null 则回退 assets
+ * @param bundleName 热更新 manifest 查询用的 bundle 名称（如 "activity-bundle"），
+ *   仅当 [bundleFilePath] 为 null 时平台用作兜底查询
  */
 @Composable
 fun RnContainer(
     componentName: String,
     bundleAssetName: String,
     hostId: String = componentName,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    bundleFilePath: String? = null,
+    bundleName: String? = null
 ) {
-    // 直接渲染平台 RN 视图——热更新 / host / surface / 生命周期均由各平台
+    // 直接渲染平台 RN 视图——host / surface / 生命周期由各平台
     // PlatformRnView actual 内部处理（参照 TestAarApp 可工作模式）。
+    // 热更新路径优先级：bundleFilePath（调用方预解析）> 平台内兜底查询 > assets。
     Box(modifier = modifier.fillMaxSize()) {
-        PlatformRnView(componentName, bundleAssetName, hostId, Modifier.fillMaxSize())
+        PlatformRnView(
+            componentName = componentName,
+            bundleAssetName = bundleAssetName,
+            hostId = hostId,
+            modifier = Modifier.fillMaxSize(),
+            bundleFilePath = bundleFilePath,
+            bundleName = bundleName
+        )
     }
 }
 
@@ -48,11 +65,16 @@ fun RnContainer(
  * - LocalLifecycleOwner 转发 ON_RESUME/ON_PAUSE/ON_DESTROY 到 host
  * - BackHandler 转发返回键给 host.onBackPressed()
  * - surface 就绪后 AndroidView 嵌入 surface.view
+ *
+ * @param bundleFilePath 热更新本地缓存路径（优先），null 回退 assets
+ * @param bundleName 热更新 manifest 查询名，null 时用 bundleAssetName 兜底
  */
 @Composable
 expect fun PlatformRnView(
     componentName: String,
     bundleAssetName: String,
     hostId: String,
-    modifier: Modifier
+    modifier: Modifier,
+    bundleFilePath: String? = null,
+    bundleName: String? = null
 )
