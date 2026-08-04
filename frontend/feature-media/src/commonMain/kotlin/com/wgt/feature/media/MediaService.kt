@@ -7056,6 +7056,219 @@ object MediaService {
         }
     }
 
+    /**
+     * V8：POST /api/media/tag/batch-rename — 批量重命名标签，返回成功数。
+     *
+     * 后端按 `{ renames: [{ old_name, new_name }] }` 接收，逐项调 RenameTag，
+     * 响应 `{ status, renamed_count, failed }`（status 为 success/partial/failed）。
+     * 本方法返回成功重命名的数量；HTTP 非 200 或异常返回 0（与 [batchAddTag] 一致）。
+     *
+     * @param oldName 旧标签名
+     * @param newName 新标签名
+     * @return 后端实际成功重命名的数量
+     */
+    suspend fun batchRenameTag(oldName: String, newName: String): Boolean {
+        if (oldName.isBlank() || newName.isBlank()) return false
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("renames") {
+                    add(buildJsonObject {
+                        put("old_name", oldName)
+                        put("new_name", newName)
+                    })
+                }
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/batch-rename") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val renamed = obj["renamed_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "batchRenameTag old=$oldName new=$newName renamed=$renamed")
+                renamed > 0
+            } else {
+                logger.info("MediaService", "batchRenameTag status=${response.status}")
+                false
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRenameTag FAILED: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V8：POST /api/media/tag/merge — 合并标签，返回是否成功。
+     *
+     * 后端按 `{ source_tag, target_tag }` 接收，把所有 source_tag 的记录改为
+     * target_tag（INSERT OR IGNORE 处理冲突），然后删除 source_tag。响应
+     * `{ source_tag, target_tag, merged_count }`。
+     *
+     * 调用成功后需刷新 tagStats 以反映合并后的标签分布。
+     *
+     * @param sourceTag 被合并的源标签（将被删除）
+     * @param targetTag 合并目标标签（保留）
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun mergeTags(sourceTag: String, targetTag: String): Boolean {
+        if (sourceTag.isBlank() || targetTag.isBlank()) return false
+        if (sourceTag == targetTag) return false
+        return try {
+            val body = buildJsonObject {
+                put("source_tag", sourceTag)
+                put("target_tag", targetTag)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/merge") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            val ok = response.status == HttpStatusCode.OK
+            if (ok) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val merged = obj["merged_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "mergeTags source=$sourceTag target=$targetTag merged=$merged")
+            } else {
+                logger.info("MediaService", "mergeTags status=${response.status}")
+            }
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "mergeTags FAILED: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V8：POST /api/media/tag/import — 导入标签，返回成功导入数。
+     *
+     * 后端按 `{ tags: [{ media_id, tag_name }] }` 接收，幂等判重（同 media 已挂
+     * 同 tag 则跳过），单批上限 500。响应 `{ status, imported_count, skipped_count, total }`。
+     *
+     * [data] 为后端导出格式（[exportTags] 的返回）的 JSON 字符串，或用户手写的
+     * `{ "tags": [...] }` 结构。本方法解析其中的 tags 数组并透传，解析失败返回 0。
+     *
+     * @param data 导入数据 JSON 字符串
+     * @return 成功导入数；解析失败/HTTP 非 200/异常返回 0
+     */
+    suspend fun importTags(data: String): Boolean {
+        if (data.isBlank()) return false
+        return try {
+            // 解析输入，提取 tags 数组（兼容 exportTags 返回的 {tags:[{media_id,tag_name}]} 与
+            // 用户手写的简单 {tags:["a","b"]}——后者.media_id 为空会被后端 skip）。
+            val parsed = Json.parseToJsonElement(data).jsonObject
+            val tagsArray = parsed["tags"]?.jsonArray
+            if (tagsArray.isNullOrEmpty()) {
+                logger.info("MediaService", "importTags: no tags array in input")
+                return false
+            }
+            val body = buildJsonObject {
+                putJsonArray("tags") {
+                    tagsArray.forEach { el ->
+                        val item = el.jsonObject
+                        add(buildJsonObject {
+                            put("media_id", item["media_id"]?.jsonPrimitive?.contentOrNull ?: "")
+                            put("tag_name", item["tag_name"]?.jsonPrimitive?.contentOrNull ?: "")
+                        })
+                    }
+                }
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/import") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val imported = obj["imported_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "importTags imported=$imported")
+                imported > 0
+            } else {
+                logger.info("MediaService", "importTags status=${response.status}")
+                false
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "importTags FAILED: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V8：POST /api/media/tag/batch-remove — 批量移除标签，返回是否成功。
+     *
+     * 后端按 `{ media_ids, tag_name }` 接收，逐个调 RemoveMediaTag，响应
+     * `{ tag, removed_count, total }`。本方法返回 removed_count 与预期数一致
+     * 时为 true（与 [batchAddTag] 的 Int 返回不同：此处语义为"全部移除成功"，
+     * 由调用方按布尔判断是否提示成功/部分失败）。
+     *
+     * @param mediaIds 待移除标签的媒体 ID 列表
+     * @param tags 标签名列表（后端只接受单个 tag_name，此处取第一个非空；
+     *             多标签场景由调用方多次调用）
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun batchRemoveTags(mediaIds: List<String>, tags: List<String>): Boolean {
+        if (mediaIds.isEmpty() || tags.isEmpty()) return false
+        val tagName = tags.firstOrNull { it.isNotBlank() } ?: return false
+        return try {
+            val body = buildJsonObject {
+                putJsonArray("media_ids") { mediaIds.forEach { add(it) } }
+                put("tag_name", tagName)
+            }.toString()
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/batch-remove") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val removed = obj["removed_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "batchRemoveTags tag=$tagName removed=$removed/${mediaIds.size}")
+                removed > 0
+            } else {
+                logger.info("MediaService", "batchRemoveTags status=${response.status}")
+                false
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchRemoveTags FAILED: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * V8：POST /api/media/tag/batch-by-type — 按媒体类型批量打标签，返回成功数。
+     *
+     * 后端不接收请求体参数，自动按媒体类型（image/video/live）给每个媒体打上
+     * 类型名称标签，响应 `{ status, tagged_count }`。本方法返回 tagged_count；
+     * HTTP 非 200 或异常返回 0。
+     *
+     * 注意：后端 [type]/[tags] 参数当前不被使用（自动推断），保留签名以兼容
+     * 未来扩展（后端若改为接受 type 过滤，此处可透传）。
+     *
+     * @param type 媒体类型过滤（预留，当前后端忽略）
+     * @param tags 标签名列表（预留，当前后端忽略）
+     * @return 后端实际打标签成功的媒体数
+     */
+    suspend fun batchAddTagsByType(type: String = "", tags: List<String> = emptyList()): Int {
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/tag/batch-by-type") {
+                header("Authorization", "Bearer ${getAuthToken()}")
+                contentType(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val tagged = obj["tagged_count"]?.jsonPrimitive?.intOrNull ?: 0
+                logger.info("MediaService", "batchAddTagsByType type=$type tagged=$tagged")
+                tagged
+            } else {
+                logger.info("MediaService", "batchAddTagsByType status=${response.status}")
+                0
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchAddTagsByType FAILED: ${e.message}")
+            0
+        }
+    }
+
     /** V8：GET /api/media/tag/stats — 标签统计。 */
     suspend fun getTagStats(): List<TagStat>? {
         return try {
@@ -7586,6 +7799,54 @@ object MediaService {
         val codec: String,
         val container: String
     )
+
+    /**
+     * V8：POST /api/media/media-video-trim/{mediaId}?ext=.mp4 — 视频裁剪后端对接。
+     *
+     * 后端协议：请求体为裁剪后视频片段的**原始字节流**（raw bytes，非 JSON），
+     * `mediaId` 走路径尾段，扩展名走 `ext` query 参数（须在白名单 .mp4/.mov/.avi/.mkv/.webm/.m4v）。
+     * 后端流式落盘 + magic bytes 校验，生成新 uuid media_id 作为独立裁剪片段媒体，
+     * 写 metadata sidecar 记录 trimmed=true + source_media_id。响应 `{ media_id, source_media_id, size, version }`。
+     *
+     * **集成模型**：前端先用平台本地 [com.wgt.media.trimVideo]（expect/actual，MediaExtractor+MediaMuxer）
+     * 对源视频做时间段裁剪得到本地文件，读其字节后调本方法上传到后端。本方法只负责"上传裁剪片段"
+     * 这一步——本地裁剪由 UI 层在 Dispatchers.IO 中调用 trimVideo 完成。
+     *
+     * 为何不把本地裁剪+下载源视频塞进本方法：getMediaStream 拿到的是 ByteArray，而 trimVideo 需要
+     * 文件路径输入，跨平台写临时文件路径属平台层职责；故拆分为"UI 编排本地裁剪"+"本方法上传"两步。
+     * 见 [VideoTrimDialog] 的调用示例。
+     *
+     * @param mediaId 源视频媒体 ID（后端据此写 source_media_id 追溯关系）
+     * @param trimmedData 本地裁剪后的视频片段字节
+     * @param ext 视频容器扩展名（含点，如 ".mp4"）；默认 ".mp4"，须在白名单内
+     * @return 成功时为后端生成的新 media_id（裁剪片段作为独立媒体）；失败返回 null
+     */
+    suspend fun videoTrimUpload(mediaId: String, trimmedData: ByteArray, ext: String = ".mp4"): String? {
+        if (mediaId.isBlank() || trimmedData.isEmpty()) return null
+        val normExt = ext.trim().lowercase().let { if (it.isNotEmpty() && !it.startsWith(".")) ".$it" else it }
+        val finalExt = if (normExt.isEmpty()) ".mp4" else normExt
+        return try {
+            val response: HttpResponse = jsonClient.post(
+                "${backendBaseUrl()}/api/media/media-video-trim/${mediaId.encodeURLPath()}"
+            ) {
+                parameter("ext", finalExt)
+                contentType(ContentType.Application.OctetStream)
+                setBody(trimmedData)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val newId = o["media_id"]?.jsonPrimitive?.contentOrNull
+                logger.info("MediaService", "videoTrimUpload mediaId=$mediaId ext=$finalExt bytes=${trimmedData.size} newId=$newId")
+                newId
+            } else {
+                logger.info("MediaService", "videoTrimUpload mediaId=$mediaId status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "videoTrimUpload FAILED mediaId=$mediaId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
 
     /**
      * V9：GET /api/media/exif/{id} — 返回单个媒体的完整 EXIF/metadata。

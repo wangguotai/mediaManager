@@ -458,14 +458,34 @@ fun MediaListScreen(
         )
     }
 
-    // V8：批量标签对话框
+    // V8：批量标签对话框（多模式：打标签/批量重命名/合并标签/批量移除）
     if (showBatchTagDialog) {
         BatchTagDialog(
             selectedCount = viewModel.selectedCount,
             onDismiss = { showBatchTagDialog = false },
-            onConfirm = { tag ->
-                showBatchTagDialog = false
-                viewModel.batchAddTagToSelected(tag)
+            onSnackbar = { msg ->
+                advancedSearchScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onConfirm = { payload ->
+                // payload 为标签名（打标签模式）或 "REMOVE:<tag>"（移除模式，需 ViewModel 持有选中 IDs）
+                if (payload.startsWith("REMOVE:")) {
+                    val tagName = payload.removePrefix("REMOVE:")
+                    showBatchTagDialog = false
+                    advancedSearchScope.launch {
+                        if (viewModel.selectedMediaIds.isEmpty()) {
+                            snackbarHostState.showSnackbar("未选择媒体")
+                            return@launch
+                        }
+                        val ok = MediaService.batchRemoveTags(
+                            viewModel.selectedMediaIds.toList(),
+                            listOf(tagName)
+                        )
+                        snackbarHostState.showSnackbar(if (ok) "已移除标签" else "移除失败")
+                    }
+                } else {
+                    showBatchTagDialog = false
+                    viewModel.batchAddTagToSelected(payload)
+                }
             }
         )
     }
@@ -4780,40 +4800,147 @@ private fun InfoRow(label: String, value: String) {
 }
 
 /**
- * V8：批量标签对话框 — 输入标签名，给选中媒体批量打标签。
+ * V8：批量标签对话框 — 多模式标签操作（打标签 / 批量重命名 / 合并标签 / 批量移除）。
+ *
+ * 模式说明：
+ * - **打标签**：给当前选中的媒体批量添加输入标签（原有行为，调 [MediaService.batchAddTag]）。
+ * - **批量重命名**：把所有媒体上的旧标签名重命名为新名（全局操作，不依赖选中项；
+ *   调 [MediaService.batchRenameTag]，后端逐项 RenameTag，已存在 newName 则合并）。
+ * - **合并标签**：把源标签的所有记录并入目标标签后删除源（全局操作；调 [MediaService.mergeTags]）。
+ * - **批量移除**：从当前选中的媒体上移除输入标签（调 [MediaService.batchRemoveTags]）。
+ *
+ * 重命名/合并是全局标签管理操作（作用域为该标签名下的所有媒体），与选中项无关；
+ * 打标签/移除作用域为选中媒体。弹出位置复用批量入口（[showBatchTagButton]）。
+ *
+ * @param selectedCount 当前选中媒体数（打标签/移除模式启用条件）
+ * @param onDismiss 关闭回调
+ * @param onAddTag 打标签模式确认（给选中媒体加标签）
+ * @param onRemoveTag 移除模式确认（从选中媒体移除标签）
+ * @param onSnackbar 操作结果反馈（成功/失败消息）
  */
 @Composable
 fun BatchTagDialog(
     selectedCount: Int,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onConfirm: (String) -> Unit,
+    onSnackbar: (String) -> Unit = {}
 ) {
+    var mode by remember { mutableStateOf(TagActionMode.ADD) }
     var tag by remember { mutableStateOf("") }
+    var targetTag by remember { mutableStateOf("") } // 重命名/合并的目标标签
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var processing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    LaunchedEffect(tag) {
-        if (tag.length >= 1) {
+
+    // 标签自动补全（打标签/移除模式输入主标签时触发）
+    LaunchedEffect(tag, mode) {
+        if ((mode == TagActionMode.ADD || mode == TagActionMode.REMOVE) && tag.length >= 1) {
             suggestions = MediaService.tagAutocomplete(tag) ?: emptyList()
         } else {
             suggestions = emptyList()
         }
     }
+
+    val title = when (mode) {
+        TagActionMode.ADD -> "批量打标签"
+        TagActionMode.RENAME -> "批量重命名标签"
+        TagActionMode.MERGE -> "合并标签"
+        TagActionMode.REMOVE -> "批量移除标签"
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("批量打标签") },
+        title = { Text(title) },
         text = {
             Column {
-                Text("已选 $selectedCount 个文件", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = tag,
-                    onValueChange = { tag = it },
-                    label = { Text("标签名称") },
-                    singleLine = true,
+                // 模式切换条
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxWidth()
-                )
-                // V8：标签自动补全建议
-                if (suggestions.isNotEmpty() && tag.isNotBlank()) {
+                ) {
+                    items(TagActionMode.entries) { m ->
+                        FilterChip(
+                            selected = mode == m,
+                            onClick = {
+                                mode = m
+                                tag = ""
+                                targetTag = ""
+                                suggestions = emptyList()
+                            },
+                            label = { Text(m.label, fontSize = 12.sp) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+
+                when (mode) {
+                    TagActionMode.ADD, TagActionMode.REMOVE -> {
+                        Text(
+                            "已选 $selectedCount 个文件",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = tag,
+                            onValueChange = { tag = it },
+                            label = { Text("标签名称") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    TagActionMode.RENAME -> {
+                        Text(
+                            "将所有媒体上的标签批量改名（全局操作）",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = tag,
+                            onValueChange = { tag = it },
+                            label = { Text("旧标签名") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = targetTag,
+                            onValueChange = { targetTag = it },
+                            label = { Text("新标签名") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    TagActionMode.MERGE -> {
+                        Text(
+                            "把源标签并入目标标签后删除源（全局操作）",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = tag,
+                            onValueChange = { tag = it },
+                            label = { Text("源标签（将被删除）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = targetTag,
+                            onValueChange = { targetTag = it },
+                            label = { Text("目标标签（保留）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                // V8：标签自动补全建议（仅打标签/移除主输入框）
+                if (suggestions.isNotEmpty() && tag.isNotBlank() &&
+                    (mode == TagActionMode.ADD || mode == TagActionMode.REMOVE)
+                ) {
                     Spacer(modifier = Modifier.height(4.dp))
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -4829,16 +4956,83 @@ fun BatchTagDialog(
                         }
                     }
                 }
+
+                if (processing) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(tag.trim()) },
-                enabled = tag.isNotBlank() && selectedCount > 0
-            ) { Text("添加标签") }
+                onClick = {
+                    when (mode) {
+                        TagActionMode.ADD -> {
+                            onConfirm(tag.trim())
+                        }
+                        TagActionMode.REMOVE -> {
+                            if (tag.isNotBlank() && selectedCount > 0) {
+                                // 选中媒体 ID 由调用方 ViewModel 持有，本对话框经 onConfirm 传
+                                // "REMOVE:<tag>" 出去，交由 ViewModel 解析后调
+                                // batchRemoveTags(selectedIds, listOf(tag))。不在对话框内直接调
+                                // MediaService.batchRemoveTags —— 该方法需 mediaIds 列表，而本对话框
+                                // 只有 selectedCount 计数，拿不到 ID。
+                                onConfirm("REMOVE:${tag.trim()}")
+                            }
+                        }
+                        TagActionMode.RENAME -> {
+                            if (tag.isNotBlank() && targetTag.isNotBlank() && tag != targetTag) {
+                                processing = true
+                                scope.launch {
+                                    val ok = MediaService.batchRenameTag(tag.trim(), targetTag.trim())
+                                    processing = false
+                                    onSnackbar(if (ok) "已重命名标签" else "重命名失败")
+                                    if (ok) onDismiss()
+                                }
+                            }
+                        }
+                        TagActionMode.MERGE -> {
+                            if (tag.isNotBlank() && targetTag.isNotBlank() && tag != targetTag) {
+                                processing = true
+                                scope.launch {
+                                    val ok = MediaService.mergeTags(tag.trim(), targetTag.trim())
+                                    processing = false
+                                    onSnackbar(if (ok) "已合并标签" else "合并失败")
+                                    if (ok) onDismiss()
+                                }
+                            }
+                        }
+                    }
+                },
+                enabled = when (mode) {
+                    TagActionMode.ADD -> tag.isNotBlank() && selectedCount > 0 && !processing
+                    TagActionMode.REMOVE -> tag.isNotBlank() && selectedCount > 0 && !processing
+                    TagActionMode.RENAME -> tag.isNotBlank() && targetTag.isNotBlank() &&
+                        tag != targetTag && !processing
+                    TagActionMode.MERGE -> tag.isNotBlank() && targetTag.isNotBlank() &&
+                        tag != targetTag && !processing
+                }
+            ) {
+                Text(
+                    when (mode) {
+                        TagActionMode.ADD -> "添加标签"
+                        TagActionMode.REMOVE -> "移除标签"
+                        TagActionMode.RENAME -> "重命名"
+                        TagActionMode.MERGE -> "合并"
+                    }
+                )
+            }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss, enabled = !processing) { Text("取消") }
         }
     )
+}
+
+/** 批量标签对话框操作模式。 */
+enum class TagActionMode(val label: String) {
+    ADD("打标签"),
+    RENAME("重命名"),
+    MERGE("合并"),
+    REMOVE("移除")
 }
