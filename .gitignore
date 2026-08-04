@@ -175,3 +175,4 @@ temp/
 .agents/state/
 .agents/*.lock
 frontend/rn-js/node_modules/
+ops-server/ops-data/
