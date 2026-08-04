@@ -574,7 +574,14 @@ fun MediaListScreen(
                             }
                         }
                     },
-                    showBatchRotateButton = selectedTab != 0 // V8：仅云端源显示批量旋转
+                    showBatchRotateButton = selectedTab != 0, // V8：仅云端源显示批量旋转
+                    showBackgroundUploadButton = selectedTab == 0, // V8 §2.2：仅本地源显示后台上传
+                    onBackgroundUpload = {
+                        viewModel.enqueueBackgroundUpload()
+                        advancedSearchScope.launch {
+                            snackbarHostState.showSnackbar("已加入后台上传队列")
+                        }
+                    }
                 )
             } else {
                 // 正常模式：5-Tab 底部导航栏（MIUI 风格 + 中间圆形凸起"活动"Tab）
@@ -3591,6 +3598,7 @@ fun SelectionBottomBar(
     onBatchUnfavorite: () -> Unit = {},
     onBatchRotate: () -> Unit = {},
     onBatchShare: () -> Unit = {},
+    onBackgroundUpload: () -> Unit = {},
     isDeleting: Boolean,
     isUploading: Boolean,
     showUploadButton: Boolean,
@@ -3600,7 +3608,8 @@ fun SelectionBottomBar(
     showBatchTagButton: Boolean = false,
     showBatchUnfavoriteButton: Boolean = false,
     showBatchRotateButton: Boolean = false,
-    showBatchShareButton: Boolean = false
+    showBatchShareButton: Boolean = false,
+    showBackgroundUploadButton: Boolean = false
 ) {
     val isAllSelected = selectedCount == totalCount && totalCount > 0
 
@@ -3710,6 +3719,15 @@ fun SelectionBottomBar(
                 Icon(
                     painterResource(Res.drawable.ic_star_outline),
                     contentDescription = "批量取消收藏"
+                )
+            }
+        }
+
+        if (showBackgroundUploadButton) {
+            IconButton(onClick = onBackgroundUpload) {
+                Icon(
+                    painterResource(Res.drawable.ic_cloud_upload),
+                    contentDescription = "后台上传"
                 )
             }
         }

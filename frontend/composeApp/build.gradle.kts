@@ -36,6 +36,8 @@ kotlin {
             implementation(libs.androidx.core)
             // EncryptedSharedPreferences：安全存储 JWT token（见 SettingsStorage.android.kt）
             implementation(libs.androidx.security.crypto)
+            // WorkManager：后台上传队列（PRD-v8 §2.2，UploadWorker / UploadQueueManager.android.kt）
+            implementation(libs.androidx.work.runtime)
 //            implementation(project(":rn-plugin:rn-android"))
 
             // ================================================================

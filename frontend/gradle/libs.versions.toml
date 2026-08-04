@@ -11,6 +11,9 @@ androidx-espresso = "3.7.0"
 androidx-lifecycle = "2.9.6"
 androidx-testExt = "1.3.0"
 androidx-security = "1.1.0-alpha06"
+# WorkManager —— 后台上传队列（PRD-v8 §2.2）。2.9+ 提供 Flow API（getWorkInfoByIdFlow），
+# 供 UploadQueueManagerAndroid observe WorkInfo 进度反馈到 UI StateFlow。
+androidx-work = "2.9.1"
 composeHotReload = "1.0.0"
 composeMultiplatform = "1.10.0"
 junit = "4.13.2"
@@ -43,6 +46,8 @@ androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "a
 androidx-core = { module = "androidx.core:core", version.ref = "androidx-core" }
 # EncryptedSharedPreferences —— 用于安全存储 JWT token（Android Keystore 支撑）
 androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "androidx-security" }
+# WorkManager —— 后台上传队列实现（UploadWorker / UploadQueueManager.android.kt）
+androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "androidx-work" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }
 compose-uiTooling = { module = "org.jetbrains.compose.ui:ui-tooling", version.ref = "composeMultiplatform" }
 androidx-lifecycle-viewmodelCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
