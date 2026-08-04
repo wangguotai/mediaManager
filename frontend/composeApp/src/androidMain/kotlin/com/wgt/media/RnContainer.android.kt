@@ -35,7 +35,7 @@ import com.wgt.rn_module.RNModuleInit
 private const val TAG = "RnContainer"
 
 /**
- * Android 平台 RN 视图嵌入（V7 §3.1）。
+ * Android 平台 RN 视图嵌入（V7 §3.1 / V8 §1.3 热更新闭环）。
  *
  * 参照 TestAarApp 可工作实现：
  * 1. RNModuleInit.initialize(app) — Application.onCreate 中已调用（幂等）
@@ -47,13 +47,20 @@ private const val TAG = "RnContainer"
  * 6. 生命周期转发 ON_RESUME→host.onHostResume, ON_PAUSE→host.onHostPause, ON_DESTROY→host.destroy
  *    （旧实现无生命周期转发，RN UIManager 不运行 → 白屏）
  * 7. Composable dispose / ON_DESTROY 时 surface.stop() + detach 清理
+ *
+ * 热更新路径解析（V8 §1.3）：
+ * - [bundleFilePath] 非空（调用方 RnActivityScreen 预解析）→ 直接作为 override path
+ * - [bundleFilePath] 为 null → 用 [bundleName]（回退 bundleAssetName）做兜底
+ *   ensureBundleWithVersion 查询；查询失败 RNContainerManager 内部回退 assets
  */
 @Composable
 actual fun PlatformRnView(
     componentName: String,
     bundleAssetName: String,
     hostId: String,
-    modifier: Modifier
+    modifier: Modifier,
+    bundleFilePath: String?,
+    bundleName: String?
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -68,7 +75,7 @@ actual fun PlatformRnView(
     var reactContextListener by remember { mutableStateOf<ReactInstanceEventListener?>(null) }
 
     // 初始化 RN Host + 启动；surface 创建延后到 onReactContextInitialized 回调
-    LaunchedEffect(componentName, bundleAssetName, hostId) {
+    LaunchedEffect(componentName, bundleAssetName, hostId, bundleFilePath) {
         val app = runCatching {
             if (AppContext.isInitialized) AppContext.application else null
         }.getOrNull()
@@ -81,11 +88,18 @@ actual fun PlatformRnView(
         // 幂等初始化 SoLoader + Bridgeless FeatureFlags
         runCatching { RNModuleInit.initialize(app) }
 
-        // 热更新：尝试从后端拉取 bundle 到 cache（非阻塞渲染——失败回退 assets）
-        // 注意：bundle 名与调用方一致（bundleAssetName），不再写死 "activity-bundle"
-        var overridePath: String? = null
-        runCatching {
-            overridePath = ensureBundleWithVersion(bundleAssetName)?.path
+        // 热更新路径解析（V8 §1.3）：
+        // 优先用调用方预解析的 bundleFilePath（RnActivityScreen 已查 manifest）；
+        // 为空时用 bundleName 做兜底查询（常驻 Tab 等未预解析场景）。
+        val overridePath: String? = bundleFilePath ?: runCatching {
+            val queryName = bundleName ?: bundleAssetName
+            ensureBundleWithVersion(queryName)?.path
+        }.getOrNull()
+
+        if (overridePath != null) {
+            android.util.Log.i(TAG, "热更新 bundle: $overridePath (bundleName=${bundleName ?: bundleAssetName})")
+        } else {
+            android.util.Log.i(TAG, "无热更新缓存，回退 assets: $bundleAssetName")
         }
 
         val manager = RNContainerManager.getInstance(app)
