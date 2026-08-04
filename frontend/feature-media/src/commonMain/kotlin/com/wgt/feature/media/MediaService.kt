@@ -3602,6 +3602,234 @@ object MediaService {
         }
     }
 
+    // ============ V8 批量下载 + 相册管理 API ============
+
+    /**
+     * 将后端返回的相对下载 URL（如 `/api/media/download/{id}`）拼接为完整 URL。
+     *
+     * 后端 [getBatchDownloadUrls] 返回的 url 字段为相对路径，前端展示/复制时需拼接
+     * [backendBaseUrl]。若 [relativeUrl] 已是绝对 URL（含 scheme），则原样返回。
+     */
+    fun buildFullDownloadUrl(relativeUrl: String): String {
+        if (relativeUrl.isEmpty()) return ""
+        if (relativeUrl.startsWith("http://") || relativeUrl.startsWith("https://")) return relativeUrl
+        val base = backendBaseUrl()
+        return if (relativeUrl.startsWith("/")) "$base$relativeUrl" else "$base/$relativeUrl"
+    }
+
+    /**
+     * 批量下载 URL 条目（与后端 handleMediaBatchDownloadUrls 响应对齐）。
+     *
+     * @param mediaId 媒体 ID
+     * @param filename 原始文件名
+     * @param url 直接下载 URL（/api/media/download/{id}，鉴权后有效）
+     * @param size 文件字节数
+     */
+    data class BatchDownloadUrl(
+        val mediaId: String,
+        val filename: String,
+        val url: String,
+        val size: Long
+    )
+
+    /**
+     * POST /api/media/batch-download-urls — 批量获取多个媒体的直接下载 URL 列表。
+     *
+     * 与 [batchDownload]（zip 流式打包）不同，本端点不打包文件，仅返回临时直接下载 URL
+     * （/api/media/download/{id}），前端可据此渲染"复制链接"或并发批量下载。
+     *
+     * 请求体: `{"media_ids": ["id1","id2",...]}`（单批最多 100，超限后端整体拒绝）。
+     * 响应: `{"urls": [{"media_id","filename","url","size"}], "count": N}`。
+     *
+     * @param mediaIds 媒体 ID 列表（≤100）
+     * @return 下载 URL 条目列表；HTTP 非 200 / 异常返回 null
+     */
+    suspend fun getBatchDownloadUrls(mediaIds: List<String>): List<BatchDownloadUrl>? {
+        if (mediaIds.isEmpty()) return emptyList()
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-download-urls") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_ids", Json.encodeToJsonElement(mediaIds))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["urls"]?.jsonArray?.mapNotNull { el ->
+                    val item = el.jsonObject
+                    val id = item["media_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    BatchDownloadUrl(
+                        mediaId = id,
+                        filename = item["filename"]?.jsonPrimitive?.contentOrNull ?: "",
+                        url = item["url"]?.jsonPrimitive?.contentOrNull ?: "",
+                        size = item["size"]?.jsonPrimitive?.longOrNull ?: 0L
+                    )
+                }
+            } else {
+                logger.info("MediaService", "getBatchDownloadUrls count=${mediaIds.size} status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "getBatchDownloadUrls FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * POST /api/media/batch-download — 批量下载多个媒体文件，后端打包成 zip 流式返回。
+     *
+     * 与 [getBatchDownloadUrls]（仅返回 URL）不同，本端点直接返回 application/zip 字节流，
+     * 前端可写入本地文件。单批最多 100 个 media_ids。
+     *
+     * 请求体: `{"media_ids": ["id1","id2",...]}`。
+     * 响应: `application/zip` 字节流（Content-Disposition: attachment; filename="media-batch-{ts}.zip"）。
+     *
+     * @param mediaIds 媒体 ID 列表（≤100）
+     * @return zip 字节流；HTTP 非 200 / 异常返回 null
+     */
+    suspend fun batchDownload(mediaIds: List<String>): ByteArray? {
+        if (mediaIds.isEmpty()) return null
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/batch-download") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("media_ids", Json.encodeToJsonElement(mediaIds))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val bytes = response.body<ByteArray>()
+                logger.info("MediaService", "batchDownload count=${mediaIds.size} status=${response.status} bytes=${bytes.size}")
+                bytes
+            } else {
+                logger.info("MediaService", "batchDownload count=${mediaIds.size} status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchDownload FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * POST /api/media/album/reorder — 调整相册内照片顺序。
+     *
+     * 请求体: `{"album_id": "x", "media_ids": ["id1","id2",...]}`。
+     * 响应: `{"status":"success","album_id":"x","reordered": N}`。
+     *
+     * @param albumId 目标相册 ID
+     * @param mediaIds 新顺序的媒体 ID 列表（须为相册内全部媒体，后端按此顺序覆写）
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun reorderAlbum(albumId: String, mediaIds: List<String>): Boolean {
+        if (albumId.isBlank() || mediaIds.isEmpty()) return false
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/reorder") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("album_id", albumId)
+                    put("media_ids", Json.encodeToJsonElement(mediaIds))
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "reorderAlbum id=$albumId count=${mediaIds.size} status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "reorderAlbum FAILED id=$albumId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * POST /api/media/album/batch-pin 或 /api/media/album/batch-unpin — 批量置顶/取消置顶相册。
+     *
+     * [pin]=true 走 batch-pin，false 走 batch-unpin。请求体: `{"album_ids": [...]}`。
+     * 响应: batch-pin `{"status","pinned_count","skipped_count"}`；
+     *       batch-unpin `{"status","unpinned_count","skipped_count"}`。
+     * 对不存在/非当前用户所属的相册跳过，不中断整体流程。
+     *
+     * @param albumIds 相册 ID 列表
+     * @param pin true=置顶，false=取消置顶
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun batchPinAlbums(albumIds: List<String>, pin: Boolean): Boolean {
+        if (albumIds.isEmpty()) return false
+        val path = if (pin) "/api/media/album/batch-pin" else "/api/media/album/batch-unpin"
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}$path") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("album_ids", Json.encodeToJsonElement(albumIds))
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "batchPinAlbums pin=$pin count=${albumIds.size} status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchPinAlbums FAILED pin=$pin: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * POST /api/media/album/merge — 合并两个相册。
+     *
+     * 把 [sourceId] 的所有 media 移到 [targetId]，然后删除 source 相册。
+     * 请求体: `{"source_album_id": "x", "target_album_id": "y"}`。
+     * 响应: `{"status":"success","merged_count": N,"target_album_id":"y","deleted_source":"x"}`。
+     *
+     * @param sourceId 源相册 ID（合并后删除）
+     * @param targetId 目标相册 ID（合并后保留）
+     * @return 后端是否成功处理（HTTP 200）
+     */
+    suspend fun mergeAlbums(sourceId: String, targetId: String): Boolean {
+        if (sourceId.isBlank() || targetId.isBlank() || sourceId == targetId) return false
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/merge") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("source_album_id", sourceId)
+                    put("target_album_id", targetId)
+                })
+            }
+            val ok = response.status == HttpStatusCode.OK
+            logger.info("MediaService", "mergeAlbums source=$sourceId target=$targetId status=${response.status}")
+            ok
+        } catch (e: Exception) {
+            logger.error("MediaService", "mergeAlbums FAILED source=$sourceId target=$targetId: ${e::class.simpleName} ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * GET /api/media/album/export?album_id=xxx — 导出相册元数据为 JSON。
+     *
+     * 返回相册基本信息（id/name/cover_media_id/created_at）及内含媒体的完整 metadata 列表。
+     * 注意：本端点返回 JSON 元数据（非文件字节流），与 [batchDownload] 的 zip 字节流不同。
+     * 响应: `{"album": {id,name,cover_media_id,created_at}, "media_count": N, "media": [...]}`
+     *
+     * @param albumId 目标相册 ID
+     * @return 导出的 JSON 字符串（调用方可直接展示或保存）；HTTP 非 200 / 异常返回 null
+     */
+    suspend fun exportAlbum(albumId: String): String? {
+        if (albumId.isBlank()) return null
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/album/export") {
+                parameter("album_id", albumId)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                logger.info("MediaService", "exportAlbum id=$albumId status=${response.status} bytes=${body.length}")
+                body
+            } else {
+                logger.info("MediaService", "exportAlbum id=$albumId status=${response.status} (non-200)")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "exportAlbum FAILED id=$albumId: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     /** V8：GET /api/media/sync-status — 同步状态摘要。 */
     suspend fun getSyncStatus(): SyncStatus? {
         return try {
