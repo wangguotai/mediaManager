@@ -10,6 +10,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
@@ -161,6 +163,25 @@ fun MediaListScreen(
     // 命中结果经 onResults 回调灌入 viewModel.applyAdvancedSearchResults 替换列表。
     // 复用 advancedSearchScope 即可（同为后台搜索协程，无并发冲突）。
     var showSmartSearch by remember { mutableStateOf(false) }
+
+    // ── 离线模式状态（PRD-v8 §1.5）──
+    // 每 5 秒轮询 OfflineCacheManager.isOfflineMode()，驱动离线 banner 显隐。
+    // 用户可手动关 banner（offlineBannerDismissed），但网络恢复后 dismissed 标记自动复位，
+    // 下次再断网 banner 会重新出现。banner 不自动消失——只在网络恢复后自动消失。
+    var isOffline by remember { mutableStateOf(OfflineCacheManager.isOfflineMode()) }
+    var offlineBannerDismissed by remember { mutableStateOf(false) }
+    // 离线上传队列待传项数：与 isOffline 同一 5 秒轮询周期刷新，供"我的"Tab 队列指示器展示。
+    var offlineQueueSize by remember { mutableStateOf(OfflineQueueStore.size()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val current = OfflineCacheManager.isOfflineMode()
+            // 网络恢复时自动复位 dismissed 标记，使下次断网 banner 重新可显示。
+            if (!current) offlineBannerDismissed = false
+            isOffline = current
+            offlineQueueSize = OfflineQueueStore.size()
+            kotlinx.coroutines.delay(5_000L)
+        }
+    }
 
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
@@ -625,7 +646,8 @@ fun MediaListScreen(
                     onNavigateToSettings = onNavigateToSettings,
                     onNavigateToAlbums = onNavigateToAlbums,
                     onNavigateToFileManagement = onNavigateToFileManagement,
-                    onNavigateToInsights = onNavigateToInsights
+                    onNavigateToInsights = onNavigateToInsights,
+                    offlineQueueSize = offlineQueueSize
                 )
                 return@Box
             }
@@ -700,6 +722,48 @@ fun MediaListScreen(
                         onSelect = { type -> viewModel.applyFilterType(type) }
                     )
                 } // end if (selectedTab != 2 && selectedTab != 4)
+
+                // ── 离线模式 banner（PRD-v8 §1.5）──
+                // 离线且未被用户手动关闭时显示。网络恢复后 isOffline 变 false 自动消失。
+                // 用户可点击关闭按钮暂时隐藏，但 offlineBannerDismissed 在网络恢复时自动复位。
+                AnimatedVisibility(
+                    visible = isOffline && !offlineBannerDismissed,
+                    enter = fadeIn(tween(280)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(220)) + shrinkVertically(tween(220))
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Dimens.spacingLarge, vertical = Dimens.spacingSmall),
+                        shape = RoundedCornerShape(Dimens.cardCornerRadius),
+                        color = MaterialTheme.colorScheme.tertiaryContainer
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "📱 离线模式——显示已缓存内容",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { offlineBannerDismissed = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Text(
+                                    "✕",
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    fontSize = 16.sp
+                                )
+                            }
+                        }
+                    }
+                }
 
                 // ── 回忆卡片横滚区域（PRD-v7 §1.4 时光相册）──
                 // 仅在「已上传」Tab 顶部、网格之上展示：基于 cloudMedia 按月份自动生成的
@@ -1066,7 +1130,8 @@ private fun MyTabContent(
     onNavigateToSettings: () -> Unit,
     onNavigateToAlbums: () -> Unit,
     onNavigateToFileManagement: () -> Unit,
-    onNavigateToInsights: () -> Unit = {}
+    onNavigateToInsights: () -> Unit = {},
+    offlineQueueSize: Int = 0
 ) {
     val scope = rememberCoroutineScope()
     Column(
@@ -1114,6 +1179,35 @@ private fun MyTabContent(
                             )
                         }
                     }
+                }
+            }
+        }
+
+        // ── 离线上传队列指示器（PRD-v8 §1.5）──
+        // 待传项数 > 0 时显示提示行，告知用户弱网期间积压的上传任务会在网络恢复后自动重传。
+        // 用 AnimatedVisibility 做平滑进出场，避免队列清空时突兀消失。
+        AnimatedVisibility(
+            visible = offlineQueueSize > 0,
+            enter = fadeIn(tween(280)) + expandVertically(tween(280)),
+            exit = fadeOut(tween(220)) + shrinkVertically(tween(220))
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(Dimens.cardCornerRadius),
+                color = MaterialTheme.colorScheme.tertiaryContainer
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "⏳ $offlineQueueSize 项待上传（网络恢复后自动重传）",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }

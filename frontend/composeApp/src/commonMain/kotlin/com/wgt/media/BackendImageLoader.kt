@@ -109,13 +109,27 @@ object BackendImageLoader {
      * 内存占用降至原来的 1/4，配合 [MAX_THUMBNAIL_CACHE_ENTRIES]=60
      * 把缩略图缓存总内存控制在 ~3.7MB。
      *
+     * **离线感知（PRD-v8 §1.5）**：加载前先检查 [OfflineCacheManager.isOfflineMode]。
+     * 离线时不走 HTTP（必失败），改用 [OfflineCacheManager.getCachedThumbnailPath] 取
+     * 本地磁盘缓存路径，经 [platformReadBytes] 读字节后走 [decodeImageBitmap] 解码，
+     * 命中即返回 [ImageBitmap]，未命中返回 null（UI 显示占位图）。在线时保持原有
+     * HTTP 加载逻辑不变。
+     *
      * @param mediaId 后端媒体 id（网盘图片为去扩展名的文件名）
-     * @return 解码后的 [ImageBitmap]；网络失败或解码失败返回 null
+     * @return 解码后的 [ImageBitmap]；网络失败/离线未缓存/解码失败返回 null
      */
     suspend fun loadThumbnail(mediaId: String): ImageBitmap? {
-        // 命中缓存直接返回（并提升为最近使用），避免滚动/回滑重复请求。
+        // 命中内存缓存直接返回（并提升为最近使用），避免滚动/回滑重复请求。
+        // 内存缓存在在线/离线两条路径间共享，离线时若该缩略图已在内存缓存中则直接复用。
         val cached = cacheLock.withLock { thumbnailCache.access(mediaId) }
         if (cached != null) return cached
+
+        // ── 离线模式：优先从本地磁盘缓存加载，不走 HTTP ──
+        if (OfflineCacheManager.isOfflineMode()) {
+            return loadThumbnailFromOfflineCache(mediaId)
+        }
+
+        // ── 在线模式：原有 HTTP 加载逻辑 ──
         return try {
             val bytes = MediaService.getThumbnail(mediaId, size = "small")
             val decoded = decodeImageBitmap(bytes)
@@ -125,6 +139,48 @@ object BackendImageLoader {
             logger.error(TAG, "loadThumbnail failed for $mediaId: ${e.message}")
             null
         }
+    }
+
+    /**
+     * 离线模式下从 [OfflineCacheManager] 磁盘缓存加载缩略图字节并解码。
+     *
+     * 走 [platformReadBytes] → [decodeImageBitmap]，与在线路径的解码逻辑一致
+     * （同一 [decodeImageBitmap] 平台实现），保证离线/在线缩略图画质无差异。
+     * 命中后同样写入内存 LRU 缓存，使滚动回滑时直接命中内存、不再读磁盘。
+     *
+     * @return 缓存命中并解码成功的 [ImageBitmap]；未缓存/读取失败/解码失败返回 null
+     */
+    private suspend fun loadThumbnailFromOfflineCache(mediaId: String): ImageBitmap? {
+        val localPath = OfflineCacheManager.getCachedThumbnailPath(mediaId) ?: run {
+            logger.info(TAG, "loadThumbnail offline miss (no cache) for $mediaId")
+            return null
+        }
+        val bytes = platformReadBytes(localPath)
+        if (bytes == null || bytes.isEmpty()) {
+            logger.info(TAG, "loadThumbnail offline miss (read failed) for $mediaId")
+            return null
+        }
+        val decoded = decodeImageBitmap(bytes)
+        if (decoded != null) {
+            cacheLock.withLock { thumbnailCache.putBounded(mediaId, decoded, MAX_THUMBNAIL_CACHE_ENTRIES) }
+        }
+        logger.info(TAG, "loadThumbnail offline hit for $mediaId, decoded=${decoded != null}")
+        return decoded
+    }
+
+    /**
+     * 取离线缓存缩略图的本地磁盘路径（供 UI 层直接用路径加载器显图，而非解码到内存）。
+     *
+     * 在线时返回 null（应走 [loadThumbnail] 的 HTTP 路径）；离线且缓存命中时返回
+     * [OfflineCacheManager.getCachedThumbnailPath] 结果。调用方可据此选择是否显示
+     * 离线占位图或用平台路径图片加载器。
+     *
+     * @param mediaId 后端媒体 id
+     * @return 本地缓存文件绝对路径；在线或未缓存返回 null
+     */
+    fun loadThumbnailPath(mediaId: String): String? {
+        if (!OfflineCacheManager.isOfflineMode()) return null
+        return OfflineCacheManager.getCachedThumbnailPath(mediaId)
     }
 
     /**

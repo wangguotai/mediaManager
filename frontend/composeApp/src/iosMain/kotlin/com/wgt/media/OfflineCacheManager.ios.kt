@@ -9,6 +9,7 @@ import platform.Foundation.NSURL
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.createDirectoryAtURL
 import platform.Foundation.dataWithBytes
+import platform.Foundation.dataWithContentsOfFile
 import platform.Foundation.fileExistsAtPath
 import platform.Foundation.writeToFile
 
@@ -62,6 +63,24 @@ actual fun platformWriteBytes(path: String, bytes: ByteArray) {
         nsData.writeToFile(path, atomically = true)
     } catch (_: Exception) {
         // 静默：与 android actual 一致，由上层 downloadOne 的 try/catch 兜底日志。
+    }
+}
+
+/**
+ * iOS 读取本地缓存文件字节 —— 供 [OfflineCacheManager] 离线缩略图加载链路。
+ * NSData → ByteArray 经 usePinned 拷贝；文件不存在或读取失败返回 null。
+ */
+@OptIn(ExperimentalForeignApi::class)
+actual fun platformReadBytes(path: String): ByteArray? {
+    return try {
+        if (!NSFileManager.defaultManager().fileExistsAtPath(path)) return null
+        val nsData = NSData.dataWithContentsOfFile(path) ?: return null
+        val length = nsData.length.toInt()
+        ByteArray(length).usePinned { pinned ->
+            nsData.getBytes(pinned.addressOf(0), length = length.toULong())
+        }
+    } catch (_: Exception) {
+        null
     }
 }
 
