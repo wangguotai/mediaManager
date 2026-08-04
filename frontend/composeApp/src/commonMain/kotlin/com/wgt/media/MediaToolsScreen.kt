@@ -1,6 +1,7 @@
 package com.wgt.media
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,6 +13,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -26,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
@@ -85,6 +90,35 @@ fun MediaToolsScreen(
     // 自动打标签状态
     var autoTagResult by remember { mutableStateOf<String?>(null) }
     var autoTagging by remember { mutableStateOf(false) }
+
+    // 标签管理状态
+    var tagStats by remember { mutableStateOf<List<MediaService.TagStat>?>(null) }
+    var tagStatsLoading by remember { mutableStateOf(false) }
+    var tagStatsError by remember { mutableStateOf<String?>(null) }
+    // 重命名 Dialog
+    var renameTarget by remember { mutableStateOf<String?>(null) }
+    var renameNewName by remember { mutableStateOf("") }
+    var renaming by remember { mutableStateOf(false) }
+    // 删除确认 Dialog
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
+    var deleting by remember { mutableStateOf(false) }
+    // 清理无用标签
+    var cleaningUp by remember { mutableStateOf(false) }
+    // 导出 / 导入 Dialog
+    var exportDialogVisible by remember { mutableStateOf(false) }
+    var exportJson by remember { mutableStateOf<String?>(null) }
+    var exporting by remember { mutableStateOf(false) }
+    var importDialogVisible by remember { mutableStateOf(false) }
+    var importText by remember { mutableStateOf("") }
+    var importing by remember { mutableStateOf(false) }
+
+    // 进入标签区段自动拉取一次统计
+    LaunchedEffect(Unit) {
+        tagStatsLoading = true
+        tagStats = MediaService.getTagStats()
+        tagStatsLoading = false
+        if (tagStats == null) tagStatsError = "加载标签统计失败"
+    }
 
     Scaffold(
         topBar = {
@@ -226,8 +260,341 @@ fun MediaToolsScreen(
                 }
             })
 
+            // V8：标签管理（删除/重命名/清理/导入/导出，对接 MediaService）
+            CardScaffold(title = "标签管理", content = {
+                // 顶部 action 行：清理无用标签 + 导出 + 导入
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = {
+                        if (cleaningUp) return@TextButton
+                        cleaningUp = true
+                        scope.launch {
+                            val result = MediaService.cleanupUnusedTags()
+                            cleaningUp = false
+                            if (result == null) {
+                                snackbarHostState.showSnackbar("清理失败")
+                            } else {
+                                snackbarHostState.showSnackbar(
+                                    "已清理 ${result.removedCount} 个无用标签"
+                                )
+                                tagStatsLoading = true
+                                tagStats = MediaService.getTagStats()
+                                tagStatsLoading = false
+                            }
+                        }
+                    }) {
+                        if (cleaningUp) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("清理无用标签")
+                        }
+                    }
+                    TextButton(onClick = {
+                        if (exporting) return@TextButton
+                        exporting = true
+                        scope.launch {
+                            val data = MediaService.exportTags()
+                            exporting = false
+                            if (data == null) {
+                                scope.launch { snackbarHostState.showSnackbar("导出失败") }
+                            } else {
+                                exportJson = data
+                                exportDialogVisible = true
+                            }
+                        }
+                    }) {
+                        if (exporting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("导出标签")
+                        }
+                    }
+                    TextButton(onClick = {
+                        importText = ""
+                        importDialogVisible = true
+                    }) { Text("导入标签") }
+                }
+
+                // 标签列表
+                if (tagStatsLoading) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                } else if (tagStatsError != null && tagStats == null) {
+                    Text(
+                        tagStatsError!!,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                } else if (tagStats.isNullOrEmpty()) {
+                    Text(
+                        "暂无标签",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                } else {
+                    tagStats!!.forEach { stat ->
+                        var menuExpanded by remember { mutableStateOf(false) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "#${stat.tag}（${stat.count}）",
+                                fontSize = 13.sp,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Box {
+                                TextButton(onClick = { menuExpanded = true }) { Text("操作") }
+                                DropdownMenu(
+                                    expanded = menuExpanded,
+                                    onDismissRequest = { menuExpanded = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("重命名") },
+                                        onClick = {
+                                            menuExpanded = false
+                                            renameTarget = stat.tag
+                                            renameNewName = stat.tag
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                "删除",
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        },
+                                        onClick = {
+                                            menuExpanded = false
+                                            deleteTarget = stat.tag
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
+    }
+
+    // 重命名 Dialog
+    renameTarget?.let { oldName ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!renaming) renameTarget = null
+            },
+            title = { Text("重命名标签") },
+            text = {
+                Column {
+                    Text("原标签：#$oldName", fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = renameNewName,
+                        onValueChange = { renameNewName = it },
+                        label = { Text("新标签名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !renaming && renameNewName.isNotBlank() && renameNewName != oldName,
+                    onClick = {
+                        renaming = true
+                        scope.launch {
+                            val ok = MediaService.renameTag(oldName, renameNewName.trim())
+                            renaming = false
+                            if (ok) {
+                                renameTarget = null
+                                snackbarHostState.showSnackbar("已重命名")
+                                tagStatsLoading = true
+                                tagStats = MediaService.getTagStats()
+                                tagStatsLoading = false
+                            } else {
+                                snackbarHostState.showSnackbar("重命名失败")
+                            }
+                        }
+                    }
+                ) {
+                    if (renaming) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("确定")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !renaming,
+                    onClick = { renameTarget = null }
+                ) { Text("取消") }
+            }
+        )
+    }
+
+    // 删除确认 Dialog
+    deleteTarget?.let { tagName ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!deleting) deleteTarget = null
+            },
+            title = { Text("删除标签") },
+            text = {
+                Text("确定要删除标签 #$tagName 吗？该标签将从所有媒体上移除。")
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !deleting,
+                    onClick = {
+                        deleting = true
+                        scope.launch {
+                            val count = MediaService.deleteTag(tagName)
+                            deleting = false
+                            deleteTarget = null
+                            if (count > 0) {
+                                snackbarHostState.showSnackbar("已删除 #$tagName（$count）")
+                                tagStatsLoading = true
+                                tagStats = MediaService.getTagStats()
+                                tagStatsLoading = false
+                            } else {
+                                snackbarHostState.showSnackbar("删除失败")
+                            }
+                        }
+                    }
+                ) {
+                    if (deleting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !deleting,
+                    onClick = { deleteTarget = null }
+                ) { Text("取消") }
+            }
+        )
+    }
+
+    // 导出 Dialog：显示 JSON 文本供复制
+    if (exportDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { exportDialogVisible = false },
+            title = { Text("导出标签") },
+            text = {
+                Column {
+                    Text(
+                        "复制以下 JSON：",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        exportJson ?: "",
+                        fontSize = 11.sp,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { exportDialogVisible = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    // 导入 Dialog：粘贴 JSON
+    if (importDialogVisible) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!importing) importDialogVisible = false
+            },
+            title = { Text("导入标签") },
+            text = {
+                Column {
+                    Text(
+                        "贴入 {\"tags\":[...]} 格式 JSON：",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = importText,
+                        onValueChange = { importText = it },
+                        label = { Text("JSON") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !importing && importText.isNotBlank(),
+                    onClick = {
+                        importing = true
+                        scope.launch {
+                            val ok = MediaService.importTags(importText.trim())
+                            importing = false
+                            importDialogVisible = false
+                            if (ok) {
+                                snackbarHostState.showSnackbar("导入成功")
+                                tagStatsLoading = true
+                                tagStats = MediaService.getTagStats()
+                                tagStatsLoading = false
+                            } else {
+                                snackbarHostState.showSnackbar("导入失败")
+                            }
+                        }
+                    }
+                ) {
+                    if (importing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("导入")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !importing,
+                    onClick = { importDialogVisible = false }
+                ) { Text("取消") }
+            }
+        )
     }
 }
