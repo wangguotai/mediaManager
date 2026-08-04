@@ -23,3 +23,15 @@ actual fun trimVideo(
         errorMessage = "iOS video trimming not yet supported"
     )
 }
+
+/** iOS：用 NSFileManager.defaultManager.removeItem，忽略不存在。 */
+actual fun platformDeleteFile(path: String) {
+    try {
+        val fm = platform.Foundation.NSFileManager.defaultManager()
+        if (fm.fileExistsAtPath(path)) {
+            fm.removeItemAtPath(path)
+        }
+    } catch (_: Exception) {
+        // 忽略：临时文件清理失败不影响主流程
+    }
+}

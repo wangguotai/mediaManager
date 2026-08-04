@@ -150,3 +150,12 @@ actual fun trimVideo(
         }
     }
 }
+
+/** Android：java.io.File.delete()。 */
+actual fun platformDeleteFile(path: String) {
+    try {
+        java.io.File(path).delete()
+    } catch (_: Exception) {
+        // 忽略：临时文件清理失败不影响主流程
+    }
+}

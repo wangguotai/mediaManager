@@ -137,6 +137,12 @@ fun MediaListScreen(
     // 与图片预览互斥：视频项点击直接进播放器，不走 [ImagePreviewDialog]。
     var videoPlayerMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
+    // 视频裁剪器状态：视频播放器顶部「裁剪」按钮点击后填充，非空即渲染全屏 [VideoTrimDialog]。
+    // 仅云端源显示裁剪入口——裁剪需下载原片并上传片段，本地相册无后端通道。
+    var trimmerMedia by remember { mutableStateOf<MediaMetadata?>(null) }
+    // 顶层协程 scope：供裁剪上传等异步动作触发 snackbar 用。
+    val mediaListScope = rememberCoroutineScope()
+
     // 图片编辑器状态：预览操作栏点「编辑」时填充，非空即渲染全屏 [ImageEditor]。
     var editorMedia by remember { mutableStateOf<MediaMetadata?>(null) }
 
@@ -326,13 +332,79 @@ fun MediaListScreen(
 
     // 视频播放器：点击视频项时填充 videoPlayerMedia，全屏播放。
     // 初始时长取 ViewModel 预取缓存（若有），让进度条立即显示总时长；无则在播放器内按实际播放获取。
+    // V9：在播放器上层叠加「裁剪」入口（仅云端源），点击进入 [VideoTrimDialog]——
+    // 视频项不走 ImagePreviewDialog，其操作栏需独立挂载于播放器之上。
     videoPlayerMedia?.let { media ->
-        VideoPlayer(
+        val useBackend = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL
+        Box(modifier = Modifier.fillMaxSize()) {
+            VideoPlayer(
+                media = media,
+                initialDurationSeconds = viewModel.videoDurations[media.id],
+                onDismiss = { videoPlayerMedia = null }
+            )
+            // 裁剪入口：右上角悬浮按钮，避免遮挡播放器原生控件（底部进度/顶部标题）。
+            if (useBackend) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 60.dp, end = 12.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable {
+                            videoPlayerMedia = null
+                            trimmerMedia = media
+                        }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_crop_reset),
+                            contentDescription = "裁剪",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("裁剪", color = Color.White, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
+
+    // 视频裁剪对话框：裁剪完毕回调里调 MediaService.videoTrimUpload 上传片段，
+    // 成功后 Snackbar 提示并刷新当前源列表（与「旋转/删除」交互闭环一致）。
+    trimmerMedia?.let { media ->
+        VideoTrimDialog(
             media = media,
-            initialDurationSeconds = viewModel.videoDurations[media.id],
-            onDismiss = { videoPlayerMedia = null }
+            durationSeconds = viewModel.videoDurations[media.id],
+            onResult = { trimmed ->
+                trimmerMedia = null
+                if (trimmed == null) {
+                    mediaListScope.launch { snackbarHostState.showSnackbar("视频裁剪失败，请重试") }
+                    return@VideoTrimDialog
+                }
+                mediaListScope.launch {
+                    snackbarHostState.showSnackbar("正在上传裁剪片段…")
+                    val newId = MediaService.videoTrimUpload(media.id, trimmed, ".mp4")
+                    if (newId != null) {
+                        snackbarHostState.showSnackbar("视频裁剪已保存")
+                        // 按当前源触发强制刷新，使新片段出现在列表中。
+                        when (viewModel.currentSource) {
+                            com.wgt.feature.media.MediaService.MediaSource.LOCAL -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                            else -> viewModel.loadCloudMediaList(forceRefresh = true)
+                        }
+                    } else {
+                        snackbarHostState.showSnackbar("裁剪片段上传失败，请重试")
+                    }
+                }
+            },
+            onDismiss = { trimmerMedia = null }
         )
     }
+
 
     // 图片编辑器：预览操作栏点「编辑」进入，全屏编辑（裁剪/旋转/滤镜）后保存到相册。
     editorMedia?.let { media ->
