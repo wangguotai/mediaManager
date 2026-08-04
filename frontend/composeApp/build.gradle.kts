@@ -45,9 +45,9 @@ kotlin {
             // composeApp 需直接声明这些依赖，RnContainer.android.kt 才能引用
             // ReactHost / ReactRootView / Surface 等 RN API。
             // ================================================================
-            // RN SDK AAR（经 settings.gradle.kts flatDir 仓库引用）
-            // 与 rn-module 同款写法：flatDir 仓库按 name 匹配 rn-sdk-debug.aar
-            implementation("rn-sdk-debug:rn-sdk-debug:@aar")
+            // RN SDK AAR 由 rn-module 经 androidMainApi 传递暴露（不再直接声明，
+            // 避免同一 AAR 被 resolve 两次导致 duplicate class）。
+            // com.facebook.* 依赖仍需在此显式声明（rn-module 用 implementation 不传递）。
             implementation("com.facebook.fbjni:fbjni:0.7.0")
             implementation("com.facebook.soloader:soloader:0.12.1")
             implementation("com.facebook.yoga:proguard-annotations:1.19.0")

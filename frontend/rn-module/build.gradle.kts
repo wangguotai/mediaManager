@@ -130,9 +130,11 @@ dependencies {
 
     // RN SDK (AAR)：经 settings.gradle.kts 的 flatDir 仓库（指向 rn-module/libs）以“外部依赖”
     // 形式引用。rn-module 是 com.android.library（产 AAR），AGP 的 hasLocalAarDeps 校验禁止
-    // 用 fileTree 直接依赖本地 .aar；改用原生 add(mapOf) 走 androidMainImplementation 配置，
+    // 用 fileTree 直接依赖本地 .aar；改用原生 add(mapOf) 走 androidMainApi 配置，
     // 使其作为仓库解析的外部依赖，绕过该校验。flatDir 按 name 匹配 rn-sdk-debug.aar。
-    add("androidMainImplementation", mapOf("group" to "", "name" to "rn-sdk-debug", "ext" to "aar"))
+    // 用 api（非 implementation）使依赖传递给 composeApp，避免 composeApp 再声明一次导致
+    // duplicate class（同一 AAR 被 resolve 两次）。
+    add("androidMainApi", mapOf("group" to "", "name" to "rn-sdk-debug", "ext" to "aar"))
 }
 
 // 彻底禁用 KSP metadata 任务的构建缓存与 UP-TO-DATE 旁路。
