@@ -1247,6 +1247,51 @@ object MediaService {
     }
 
     /**
+     * V12：批量强制设置相册封面 — POST /api/media/album/batch-set-cover。
+     *
+     * 后端遍历 [albumIds] 中每个相册，用其首张媒体作为封面**覆盖**已有封面；
+     * 空相册跳过。区别于 [autoPickAlbumCover]（智能挑选最佳，单个）与 auto-cover
+     * （仅在封面为空时取首张），本端点接受显式 album_ids 列表且**无论是否已有封面都重设**。
+     *
+     * 请求体: `{album_ids: [...]}`；响应: `{status, updated_count, skipped_count}`。
+     * 用于相册列表页批量选择模式下的"智能选封面"批量入口——选中多个空封面相册一键设封面。
+     *
+     * @param albumIds 目标相册 id 列表
+     * @return 成功时的批量结果（含成功/跳过计数）；HTTP 非 200 / 异常返回 null（stat 失败姿态，不抛）
+     */
+    suspend fun batchSetAlbumCover(albumIds: List<String>): BatchCoverResult? {
+        if (albumIds.isEmpty()) return BatchCoverResult(0, 0)
+        return try {
+            val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/media/album/batch-set-cover") {
+                contentType(ContentType.Application.Json)
+                getAuthToken()?.let { header("Authorization", "Bearer $it") }
+                setBody(buildJsonObject {
+                    put("album_ids", Json.encodeToJsonElement(albumIds))
+                })
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                BatchCoverResult(
+                    updatedCount = obj["updated_count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    skippedCount = obj["skipped_count"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } else {
+                logger.info("MediaService", "batchSetAlbumCover status=${response.status} count=${albumIds.size}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "batchSetAlbumCover FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /** 批量设封面结果（与后端 batch-set-cover 响应对齐）。updatedCount=成功设封面数；skippedCount=空相册跳过数。 */
+    data class BatchCoverResult(
+        val updatedCount: Int,
+        val skippedCount: Int
+    )
+
+    /**
      * 智能选封面：POST /api/media/album/cover-auto-pick。
      *
      * 后端遍历相册内所有媒体，按优先级「图片类型 > 最大尺寸(width*height) >
