@@ -66,6 +66,11 @@ class UploadWorker(
         logger.info(TAG, "doWork start: total=$total attempt=$runAttemptCount clientId=$clientId")
 
         for ((index, item) in items.withIndex()) {
+            // WorkManager 取消信号检查：系统/用户取消时及时停止，不跑完整批。
+            if (isStopped) {
+                logger.info(TAG, "doWork cancelled by WorkManager at ${index + 1}/$total")
+                return Result.failure(progressOfWorkData(completed, total))
+            }
             try {
                 val data = galleryFeature.getMediaData(item.mediaId)
                 if (data == null) {

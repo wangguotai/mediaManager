@@ -111,8 +111,8 @@ actual class UploadQueueManager {
             WorkInfo.State.RUNNING ->
                 BackgroundUploadState.Running(completed = completed, total = total)
             WorkInfo.State.ENQUEUED ->
-                // 已入队待调度：维持入队时设的 Running(0, total)，不回退。
-                _uploadState.value
+                // 已入队待调度：显式返回 Running(0, total)，不依赖可变状态（避免多批交叉时读到其他批的值）。
+                BackgroundUploadState.Running(completed = 0, total = fallbackTotal)
             WorkInfo.State.SUCCEEDED ->
                 BackgroundUploadState.Completed(total = total.coerceAtLeast(completed))
             WorkInfo.State.FAILED ->
@@ -123,7 +123,7 @@ actual class UploadQueueManager {
             WorkInfo.State.CANCELLED ->
                 BackgroundUploadState.Idle
             WorkInfo.State.BLOCKED ->
-                _uploadState.value
+                BackgroundUploadState.Running(completed = 0, total = fallbackTotal)
         }
     }
 
