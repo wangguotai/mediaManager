@@ -51,4 +51,4 @@ jwt_ttl_seconds: 604800
 #
 # 首次启动引导：当本项为 off 且 user 表为空时，后端会自动创建一个超管账号
 # (admin) 并在启动日志中打印一次性登录凭据与 token，避免无人能登录的死锁。
-allow_signup: off
+allow_signup: first
