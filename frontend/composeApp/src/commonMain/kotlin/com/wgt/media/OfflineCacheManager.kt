@@ -153,6 +153,16 @@ expect fun platformFileExists(path: String): Boolean
 expect fun platformWriteBytes(path: String, bytes: ByteArray)
 
 /**
+ * 平台从指定路径读取全部字节。common 不能依赖 `java.io.File`，
+ * 故收敛为 expect。供 [BackendImageLoader] 在离线模式下从 [getCachedThumbnailPath]
+ * 返回的本地缓存路径读取缩略图字节，再走已有 [decodeImageBitmap] 解码。
+ *
+ * @param path 文件绝对路径
+ * @return 文件字节；文件不存在或读取失败返回 null（调用方按缓存未命中处理）
+ */
+expect fun platformReadBytes(path: String): ByteArray?
+
+/**
  * 平台网络可达性探测。Android 用 ConnectivityManager 检查是否有可用网络；
  * iOS 当前简单返回 true（详见各 actual 注释与降级策略）。
  */

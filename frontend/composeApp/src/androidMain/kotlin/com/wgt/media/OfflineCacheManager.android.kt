@@ -44,6 +44,20 @@ actual fun platformWriteBytes(path: String, bytes: ByteArray) {
 }
 
 /**
+ * Android 读取本地缓存文件字节 —— 供 [OfflineCacheManager] 离线缩略图加载链路。
+ * 文件不存在或 IO 异常返回 null，调用方按缓存未命中处理（回退 HTTP 或占位图）。
+ */
+actual fun platformReadBytes(path: String): ByteArray? {
+    return try {
+        val f = File(path)
+        if (!f.exists() || !f.isFile) return null
+        f.readBytes()
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/**
  * 探测 Android 当前是否具有可用的网络连接。
  *
  * Android 6.0+ 不再用 `getActiveNetworkInfo().isConnected`（已废弃），改用
