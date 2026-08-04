@@ -6,5 +6,7 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This app needs access to your photo library to manage and organize your media files.</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
 </dict>
 </plist>

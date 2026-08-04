@@ -1,0 +1,5 @@
+language = Objective-C
+
+// RNSDK Bridge — ObjC C 函数接口
+// 通过 iosApp/RNSDKBridge.h + .m 暴露给 Kotlin/Native
+headers = "RNSDKBridge.h"
