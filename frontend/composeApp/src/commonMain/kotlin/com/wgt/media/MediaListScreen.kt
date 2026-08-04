@@ -183,6 +183,14 @@ fun MediaListScreen(
         }
     }
 
+    // ── 离线队列冲突解决对话框状态（PRD-v8 §1.5 离线模式完整化）──
+    // 来自 MediaViewModel 的 StateFlow：对话框显隐 / 待传项列表 / 重试中标志。
+    // 顶部「⏳ N 项待上传」指示器点击 → viewModel.showOfflineQueueDialog() 置 showOfflineQueueDialog，
+    // 这里据此渲染 OfflineQueueDialog。items/isRetrying 由 ViewModel 在打开/移除/重试后即时刷新。
+    val showOfflineQueueDialog by viewModel.showOfflineQueueDialog.collectAsState()
+    val offlineQueueItems by viewModel.offlineQueueItems.collectAsState()
+    val isRetryingOfflineQueue by viewModel.isRetryingOfflineQueue.collectAsState()
+
     // 长按上下文菜单：非空时弹出 DropdownMenu，值为触发的 MediaMetadata。
     // 仅在非选择模式下使用——选择模式下长按直接选中/预览，不走此菜单。
 
@@ -461,6 +469,20 @@ fun MediaListScreen(
         MediaInfoDialog(
             mediaId = mediaId,
             onDismiss = { mediaInfoTarget = null }
+        )
+    }
+
+    // ── 离线队列冲突解决对话框（PRD-v8 §1.5 离线模式完整化）──
+    // 由「我的」Tab 的「⏳ N 项待上传」指示器点击触发（MyTabContent 的 onShowOfflineQueue）。
+    // 列表/重试态由 ViewModel 的 StateFlow 驱动；关闭调 dismissOfflineQueueDialog 停轮询。
+    // items 实时反映 OfflineQueueStore 快照（打开时取一次 + 5s 轮询 + 移除/重试后即时刷新）。
+    if (showOfflineQueueDialog) {
+        OfflineQueueDialog(
+            items = offlineQueueItems,
+            isRetrying = isRetryingOfflineQueue,
+            onDismiss = { viewModel.dismissOfflineQueueDialog() },
+            onRemoveItem = { id -> viewModel.removeOfflineQueueItem(id) },
+            onRetryAll = { viewModel.retryOfflineQueue() }
         )
     }
 
@@ -1131,7 +1153,9 @@ private fun MyTabContent(
     onNavigateToAlbums: () -> Unit,
     onNavigateToFileManagement: () -> Unit,
     onNavigateToInsights: () -> Unit = {},
-    offlineQueueSize: Int = 0
+    offlineQueueSize: Int = 0,
+    // 「⏳ N 项待上传」指示器点击 → 打开离线队列冲突解决对话框（PRD-v8 §1.5）。
+    onShowOfflineQueue: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     Column(
@@ -1185,6 +1209,8 @@ private fun MyTabContent(
 
         // ── 离线上传队列指示器（PRD-v8 §1.5）──
         // 待传项数 > 0 时显示提示行，告知用户弱网期间积压的上传任务会在网络恢复后自动重传。
+        // 点击打开 OfflineQueueDialog，列出待传项并支持逐项移除 / 全部重试 / 关闭
+        // （冲突解决 UI，PRD-v8 §1.5 离线模式完整化）。
         // 用 AnimatedVisibility 做平滑进出场，避免队列清空时突兀消失。
         AnimatedVisibility(
             visible = offlineQueueSize > 0,
@@ -1192,7 +1218,9 @@ private fun MyTabContent(
             exit = fadeOut(tween(220)) + shrinkVertically(tween(220))
         ) {
             Surface(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onShowOfflineQueue() },
                 shape = RoundedCornerShape(Dimens.cardCornerRadius),
                 color = MaterialTheme.colorScheme.tertiaryContainer
             ) {
@@ -1206,7 +1234,14 @@ private fun MyTabContent(
                         "⏳ $offlineQueueSize 项待上传（网络恢复后自动重传）",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 可点击示意角标，提示用户可展开查看/解决冲突。
+                    Text(
+                        "查看 ›",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
                     )
                 }
             }

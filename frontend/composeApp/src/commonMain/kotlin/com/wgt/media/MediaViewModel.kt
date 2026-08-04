@@ -21,7 +21,9 @@ import media.MediaType
 import com.wgt.feature.gallery.gallery
 import com.wgt.feature.gallery.requestMediaDeletion
 import com.wgt.base.network.platform
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.time.Clock
 
 private const val TAG = "MediaViewModel"
@@ -323,6 +325,146 @@ class MediaViewModel {
      * "前台即时反馈 + 后台被杀续传"的并行设计。
      */
     val backgroundUploadState: StateFlow<BackgroundUploadState> get() = backgroundUploadQueue.uploadState
+
+    // ---- 离线队列冲突解决 UI（PRD-v8 §1.5 离线模式完整化）----
+
+    /**
+     * 离线上传队列待传项快照（供 [OfflineQueueDialog] 渲染列表）。
+     *
+     * 数据源是持久化 [OfflineQueueStore.snapshot()]——与 [MediaListScreen] 顶部
+     * 「⏳ N 项待上传」指示器读的同一份队列。这里暴露为 [StateFlow] 给对话框订阅，
+     * 在以下时点刷新（[refreshOfflineQueueItems]）：
+     * - 对话框打开时（[showOfflineQueueDialog]）即时取一次，保证用户看到最新积压；
+     * - [removeOfflineQueueItem] / [retryOfflineQueue] 之后即时刷新，使 UI 同步反映增删；
+     * - 对话框显示期间以 5s 周期轮询，捕捉自动备份轮询 ([replayOfflineUploads]) 在后台
+     *   撤离/入队带来的变化（用户开着对话框时也能看到队列自然消减）。
+     *
+     * 对话框关闭后停止轮询（[offlineQueueRefreshJob] 取消），避免无人观察时空转读盘。
+     */
+    private val _offlineQueueItems = MutableStateFlow<List<OfflineQueueItem>>(emptyList())
+    val offlineQueueItems: StateFlow<List<OfflineQueueItem>> = _offlineQueueItems.asStateFlow()
+
+    /**
+     * 离线队列对话框是否显示。由 [showOfflineQueueDialog] / [dismissOfflineQueueDialog]
+     * 翻转；MediaListScreen 据此决定是否渲染 [OfflineQueueDialog]。
+     */
+    private val _showOfflineQueueDialog = MutableStateFlow(false)
+    val showOfflineQueueDialog: StateFlow<Boolean> = _showOfflineQueueDialog.asStateFlow()
+
+    /**
+     * 「全部重试」进行中（驱动对话框内 loading 蒙层 + 禁用移除/重试按钮，防竞态）。
+     * 仅在 [retryOfflineQueue] 执行期间为 true，完成即复位。
+     */
+    private val _isRetryingOfflineQueue = MutableStateFlow(false)
+    val isRetryingOfflineQueue: StateFlow<Boolean> = _isRetryingOfflineQueue.asStateFlow()
+
+    /** 对话框显示期间的队列轮询协程句柄，[showOfflineQueueDialog]/[dismiss...] 管理生命周期。 */
+    private var offlineQueueRefreshJob: Job? = null
+
+    /**
+     * 离线队列列表刷新频率（对话框显示期间）。
+     *
+     * 与 [MediaListScreen] 顶部 banner/指示器的 5s 轮询同节拍，这样对话框开着时队列的
+     * 自然消减（自动备份重放撤离）与顶部「⏳ N」计数同步变化，不会出现两边数字对不上的观感。
+     * 关闭对话框即取消轮询，无空转读盘。
+     */
+    private val offlineQueueRefreshIntervalMs = 5_000L
+
+    /**
+     * 打开离线队列对话框：置显示态并立即拉取最新队列快照，随后启动周期轮询。
+     *
+     * 由 MediaListScreen「⏳ N 项待上传」指示器点击调用。幂等：已显示时重复调用仅续刷新。
+     */
+    fun showOfflineQueueDialog() {
+        _showOfflineQueueDialog.value = true
+        refreshOfflineQueueItems()
+        startOfflineQueueRefreshIfNeeded()
+    }
+
+    /** 关闭对话框并停止周期轮询（队列不变，自动备份重放照旧）。 */
+    fun dismissOfflineQueueDialog() {
+        _showOfflineQueueDialog.value = false
+        offlineQueueRefreshJob?.cancel()
+        offlineQueueRefreshJob = null
+    }
+
+    /**
+     * 从 [OfflineQueueStore] 取最新快照灌入 [_offlineQueueItems]。
+     *
+     * 读盘发生在调用线程（同步、轻量——队列文件通常数十项以内），故直接在 Main 调用
+     * 即可，无需切 IO；移除/重试后即时调用确保 UI 同步。
+     */
+    private fun refreshOfflineQueueItems() {
+        _offlineQueueItems.value = OfflineQueueStore.snapshot()
+    }
+
+    /**
+     * 对话框显示期间启动 5s 周期轮询；已运行则不重复起。
+     *
+     * 用 [viewModelScope]（Dispatchers.Main）：launch 内挂起于 [delay]，挂起期释放主线程。
+     * 每轮 [refreshOfflineQueueItems] 是同步快盘读，不阻塞 UI。对话框关闭时由
+     * [dismissOfflineQueueDialog] 取消本协程。
+     */
+    private fun startOfflineQueueRefreshIfNeeded() {
+        if (offlineQueueRefreshJob?.isActive == true) return
+        offlineQueueRefreshJob = viewModelScope.launch {
+            while (isActive) {
+                delay(offlineQueueRefreshIntervalMs)
+                refreshOfflineQueueItems()
+            }
+        }
+    }
+
+    /**
+     * 从离线队列移除单项（用户在对话框点「移除」）。
+     *
+     * 直接调 [OfflineQueueStore.remove]（按 localMediaId 幂等撤离），随即刷新快照使对话框
+     * 列表即时减项。不移除时若队列变空，对话框侧会观察到 items 为空（[OfflineQueueDialog]
+     * 兜底显示"暂无待上传项"），调用方 MediaListScreen 也会因指示器计数归零后续关闭——
+     * 但这里不主动关对话框，让用户自行确认/关闭，避免突兀消失。
+     *
+     * @param localMediaId 待移除项的 [OfflineQueueItem.localMediaId]
+     */
+    fun removeOfflineQueueItem(localMediaId: String) {
+        OfflineQueueStore.remove(localMediaId)
+        refreshOfflineQueueItems()
+        logger.info(TAG, "offline queue item removed: $localMediaId, remain=${_offlineQueueItems.value.size}")
+    }
+
+    /**
+     * 手动触发一次离线队列全量重放（对话框「全部重试」）。
+     *
+     * 转发到 [replayOfflineUploads]（复用自动备份同一条重放通路：[SyncManager.replayOfflineQueue]
+     * + galleryFeature 取字节 + 成功撤离/源删撤离/失败保留）。重放期间置
+     * [_isRetryingOfflineQueue] 为 true，禁用对话框内的移除与重试按钮并发刷新，避免用户
+     * 在重放改队列时同时手动移除造成竞态。完成后刷新快照，UI 即时反映撤离结果。
+     *
+     * 网络未恢复时重放会逐项失败并保留项（[SyncManager.uploadLocal] 失败重新入队，幂等），
+     * 对话框列表不变，用户可稍后再试——与自动备份轮询行为一致。
+     */
+    fun retryOfflineQueue() {
+        if (_isRetryingOfflineQueue.value) return // 防重复点击
+        if (OfflineQueueStore.size() == 0) {
+            refreshOfflineQueueItems()
+            return
+        }
+        _isRetryingOfflineQueue.value = true
+        viewModelScope.launch {
+            try {
+                replayOfflineUploads()
+            } catch (e: Exception) {
+                // replayOfflineUploads 内部已吞逐项异常；能抛到这里是意外，记日志不崩。
+                logger.error(TAG, "retryOfflineQueue failed: ${e::class.simpleName} ${e.message}")
+            } finally {
+                refreshOfflineQueueItems()
+                _isRetryingOfflineQueue.value = false
+                // 队列重放后若已清空，顺手关对话框（无待传项可展示）。
+                if (_offlineQueueItems.value.isEmpty()) {
+                    dismissOfflineQueueDialog()
+                }
+            }
+        }
+    }
 
 
     /**
