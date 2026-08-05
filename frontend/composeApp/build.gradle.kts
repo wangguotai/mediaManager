@@ -1,5 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -137,12 +138,31 @@ android {
 
     buildToolsVersion = libs.versions.android.buildToolsVersion.get().toString()
 
+    // ================================================================
+    // Release 签名配置 (PRD-v8 §release)
+    // - keystore: frontend/composeApp/release.keystore (本仓库提交)
+    // - 密码从 local.properties 读取 (不提交)，fallback 到默认值
+    //   (开源项目，默认值即 release.keystore 的真实密码)
+    // ================================================================
+    val signingProps = Properties().apply {
+        val f = rootProject.file("local.properties")
+        if (f.exists()) load(f.inputStream())
+    }
+    signingConfigs {
+        create("release") {
+            storeFile = file("release.keystore")
+            storePassword = signingProps.getProperty("RELEASE_STORE_PASSWORD", "media-manager-release-2026")
+            keyAlias = signingProps.getProperty("RELEASE_KEY_ALIAS", "media-manager")
+            keyPassword = signingProps.getProperty("RELEASE_KEY_PASSWORD", "media-manager-release-2026")
+        }
+    }
+
     defaultConfig {
         applicationId = "com.wgt"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.0"
     }
     packaging {
         resources {
@@ -154,7 +174,13 @@ android {
             isDebuggable = true
         }
         getByName("release") {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
