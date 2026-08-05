@@ -1766,6 +1766,258 @@ private fun MyTabContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // ── 即将过期分享卡片（V8：调 MediaService.getShareExpiring()）──
+        // 调 GET /api/media/share-expiring，展示最近 7 天内即将过期的分享链接列表。
+        // 每条：token（截断）+ daysLeft（带颜色警示）+ expiresAt（原始 RFC3339 截断显示）。
+        // daysLeft<=1 红、<=3 橙、其他正常色。空列表隐藏整张卡片，加载中转圈，失败静默跳过。
+        // 与「最近活动」卡片同风格：surfaceVariant 背景 + Card + 标题行，列表用 Column（≤7 条）。
+        var shareExpiring by remember { mutableStateOf<List<MediaService.ShareExpiringItem>?>(null) }
+        var shareExpiringLoaded by remember { mutableStateOf(false) }
+        var shareExpiringFailed by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            val result = MediaService.getShareExpiring()
+            if (result == null) {
+                shareExpiringFailed = true
+            } else {
+                shareExpiring = result
+            }
+            shareExpiringLoaded = true
+        }
+        // 空列表 / 加载失败（请求出错）→ 隐藏卡片；仅加载中 + 有数据时显示
+        if (!(shareExpiringLoaded && (shareExpiringFailed || shareExpiring.isNullOrEmpty()))) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "即将过期分享",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "提醒",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (!shareExpiringLoaded) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                "加载中…",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else if (shareExpiringFailed) {
+                        Text(
+                            "加载失败",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    } else if (shareExpiring.isNullOrEmpty()) {
+                        Text(
+                            "暂无即将过期的分享",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        shareExpiring!!.forEach { item ->
+                            // daysLeft 颜色警示：<=1 红、<=3 橙、其他正常
+                            val daysColor = when {
+                                item.daysLeft <= 1 -> MaterialTheme.colorScheme.error
+                                item.daysLeft <= 3 -> Color(0xFFE65100)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    "🔗",
+                                    fontSize = 14.sp
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        item.token.take(12),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    // expiresAt 为后端 RFC3339 UTC 字符串，直接截断显示前 16 字符得到"YYYY-MM-DDTHH:MM"。
+                                    Text(
+                                        "过期：${item.expiresAt.take(16).replace("T", " ")}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                                Text(
+                                    "${item.daysLeft} 天",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = daysColor
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // ── 最近上传卡片（V8：调 MediaService.getRecentUploads()）──
+        // 调 GET /api/media/recent-uploads，展示最近上传的媒体列表，每条：
+        // filename + type emoji 图标 + size 格式化 + createdAt 时间。最多显示 10 条。空列表隐藏卡片。
+        var recentUploads by remember { mutableStateOf<List<MediaService.RecentUpload>?>(null) }
+        var recentUploadsLoaded by remember { mutableStateOf(false) }
+        var recentUploadsFailed by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            val result = MediaService.getRecentUploads()
+            if (result == null) {
+                recentUploadsFailed = true
+            } else {
+                recentUploads = result
+            }
+            recentUploadsLoaded = true
+        }
+        if (!(recentUploadsLoaded && (recentUploadsFailed || recentUploads.isNullOrEmpty()))) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "最近上传",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "新文件",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (!recentUploadsLoaded) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                "加载中…",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else if (recentUploadsFailed) {
+                        Text(
+                            "加载失败",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    } else if (!recentUploads.isNullOrEmpty()) {
+                        recentUploads!!.take(10).forEach { item ->
+                            // type → emoji 图标，沿用 activityTypeEmoji 风格简单映射
+                            val typeEmoji = when (item.type.lowercase()) {
+                                "image" -> "🖼️"
+                                "video" -> "🎬"
+                                "audio" -> "🎵"
+                                else -> "📄"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    typeEmoji,
+                                    fontSize = 14.sp
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        item.filename,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        "${formatFileSize(item.size)} · ${item.type}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                                Text(
+                                    item.createdAt.take(10),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         Text(
             "我的",
             style = MaterialTheme.typography.headlineSmall,
