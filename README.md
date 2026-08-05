@@ -316,6 +316,42 @@ cd frontend
 ./gradlew :composeApp:compileKotlinIosArm64  # iOS Kotlin 编译（需 Xcode）
 ```
 
+#### iOS App 完整构建
+
+iOS App = Kotlin/Native framework (Gradle 编译) + Xcode 原生壳 + React Native SDK (通过 rn_test monorepo 引入)。由于 RN 源码跨项目引用，fresh clone 后需先运行初始化脚本。
+
+**前置条件**
+
+- **Xcode 26.1+**（含 iOS 18.2 SDK）
+- **CocoaPods** 1.16+（`sudo gem install cocoapods` 或 `brew install cocoapods`）
+- **Node.js**（rn_test monorepo 依赖解析需要）
+- **rn_test 项目** clone 到 `../rn_test`（与 media-manager 同级目录，提供 RN + Expo + RNSDK 源码）
+
+**一键初始化**
+
+```bash
+./setup-ios.sh
+# 脚本会：检查环境 → 创建 rn-sdk-test-link symlink → pod install
+# 幂等，可重复运行
+```
+
+**完整构建命令（模拟器 Debug）**
+
+```bash
+cd frontend/iosApp
+unset CC CXX   # 避免 shell 环境(conda/nvm)注入的 CC/CXX 导致 RN 编译用错 clang
+xcodebuild build \
+  -workspace iosApp.xcworkspace \
+  -scheme iosApp \
+  -sdk iphonesimulator \
+  -configuration Debug \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+或在 Xcode 中打开 `frontend/iosApp/iosApp.xcworkspace` 直接构建运行（真机需在 Config.xcconfig 配置 TEAM_ID）。
+
+> ⚠️ `rn-sdk-test-link` 符号链接被 `.gitignore` 排除（指向外部 rn_test 项目），因此 fresh clone / worktree 后**必须运行 `./setup-ios.sh`** 才能执行 `pod install`。
+
 ### Docker 构建镜像
 
 ```bash
@@ -432,12 +468,34 @@ docker run --rm -v media-data:/data -v $(pwd):/backup alpine tar xzf /backup/med
 
 ### Q: iOS 怎么编译运行？
 
+iOS App 构建分两步：先 Gradle 编译 Kotlin/Native framework，再 Xcode 构建原生壳 + RN SDK。
+
 ```bash
+# 1. 首次运行：初始化 iOS 环境（创建 symlink + pod install）
+./setup-ios.sh
+
+# 2. 编译 Kotlin framework（iOS）
 cd frontend
 ./gradlew :composeApp:compileKotlinIosArm64
+
+# 3. Xcode 构建（模拟器 Debug）
+cd frontend/iosApp
+unset CC CXX
+xcodebuild build \
+  -workspace iosApp.xcworkspace \
+  -scheme iosApp \
+  -sdk iphonesimulator \
+  -configuration Debug \
+  CODE_SIGNING_ALLOWED=NO
 ```
 
-完整 iOS App 需在 Xcode 中打开 `frontend/composeApp/iosApp/` 项目配置签名后构建到真机。
+真机构建需在 `frontend/iosApp/Configuration/Config.xcconfig` 设置 `TEAM_ID` 并配置签名。
+
+**常见问题**
+
+- **`pod install` 报 `No podspec found`**：`rn-sdk-test-link` symlink 缺失，运行 `./setup-ios.sh` 创建。
+- **编译报 clang/CC 错误**：shell 环境（conda/nvm）注入了 `CC`/`CXX` 导致 RN 用错编译器，构建前执行 `unset CC CXX`。
+- **Pods 版本冲突**：`rm -rf frontend/iosApp/Pods frontend/iosApp/Podfile.lock && ./setup-ios.sh`。
 
 ### Q: 如何更新到新版本？
 
