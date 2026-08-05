@@ -11,11 +11,8 @@ class MediaAppDelegateWrapper: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         // 初始化 RNSDK (对标 Android TestAarApplication.onCreate)
-        #if DEBUG
-        RNSDK.initialize(useDevSupport: true)
-        #else
+        // 模拟器无 Metro server, 统一用离线 jsbundle (main.jsbundle)
         RNSDK.initialize(useDevSupport: false)
-        #endif
 
         // Call Kotlin initializer
         return MediaAppInitializer().onApplicationDidFinishLaunching(application: application)
