@@ -2,10 +2,21 @@
 # 拷贝为 config.yaml 后按需修改。所有字段均可省略，省略时使用代码内默认值。
 #
 # 覆盖优先级：代码默认 < config.yaml < MM_* 环境变量。
-# 即任何字段都可用同名 MM_* 环境变量临时覆盖（参见 internal/config/config.go::ApplyEnv）：
-#   MM_PORT / MM_DATA_DIR / MM_DB_PATH / MM_JWT_SECRET / MM_JWT_TTL_SECONDS
-#   / MM_ALLOW_SIGNUP / MM_OPS_SERVER_URL
-# Docker 部署时通过 docker-compose 的 environment 段注入这些变量。
+# 即任何字段都可用同名 MM_* 环境变量临时覆盖（参见 internal/config/config.go::ApplyEnv）。
+#
+# 环境变量一览：
+#   MM_PORT                  -> port              REST gateway 端口（纯数字，如 8080）
+#   MM_DATA_DIR              -> data_dir          数据根目录（uploads/thumbnails/cloud-images/media.db 的父目录）
+#   MM_DB_PATH               -> db_path           SQLite 数据库路径（留空则 <data_dir>/media.db）
+#   MM_JWT_SECRET            -> jwt_secret        JWT HS256 签名密钥【生产必填，见下】
+#   MM_JWT_TTL_SECONDS       -> jwt_ttl_seconds   JWT 有效期（秒），默认 604800
+#   MM_ALLOW_SIGNUP          -> allow_signup      注册模式 off/first/open
+#   MM_OPS_SERVER_URL        -> ops_server_url    运营服务端地址（OpenClaw 桥接转发 + WS 注册）
+#   MM_BOOTSTRAP_ADMIN_USERNAME   -> (无yaml字段) 首次启动超管用户名，留空默认 admin
+#   MM_BOOTSTRAP_ADMIN_PASSWORD   -> (无yaml字段) 首次启动超管密码，留空则生成一次性随机密码
+#
+# Docker 部署时通过 docker-compose 的 environment 段注入这些变量；
+# 本地开发可用 backend/.env.example 模板（source .env && go run ./cmd/server）。
 
 # REST gateway 监听端口（仅端口号，如 "8080"）。默认 8080。
 # Note: gRPC 端口(:50051) 仅在进程内部使用，不在此配置、不对容器外暴露。
@@ -25,20 +36,20 @@ data_dir: ./data
 db_path: ./data/media.db
 
 # ---- OpenClaw 运维面（可选）----
-# 运维管理面 / ops-server 地址，供 POST /api/openclaw/command 转发请求；
-# 同时配置后 backend 启动会自动 POST /op/server/register 拿 token 并维持 WS 长连
-# （路径 B 中继，PRD §3.2）。
-# 留空时回退到环境变量 OPENCLAW_GATEWAY_URL，再回退 http://127.0.0.1:8090。
-# ops-server 默认 HTTP 8090 + TCP relay 18791（见 ops-server/docker-compose.yml）。
+# 运维管理面 / ops-server 地址，供 POST /api/openclaw/command 转发请求；同时配置后
+# backend 启动会自动 POST /op/server/register 拿 token 并维持 WS 长连（路径 B 中继）。
+# Docker Compose 联合部署时用 http://ops-server:8090（service 名即主机名）。
 # 若未部署 ops-server，保持留空即可——桥接端点会返回 502，不影响媒体主功能。
 ops_server_url: ""
 
 # ---- JWT 用户认证 ----
 
-# JWT HS256 签名密钥。生产环境必须显式配置一段足够随机的长字符串；留空时
-# 服务启动会生成一份内存随机密钥（重启后失效、已签发的 token 全部作废），
-# 仅适合本地开发。
-jwt_secret: ""
+# JWT HS256 签名密钥。⚠️ 生产环境必须替换为一段足够随机的长字符串（≥32 字节）！
+# 留空 / 保持 "CHANGE_ME" 时，服务启动会生成一份内存随机密钥（重启后失效、已签发的
+# token 全部作废），仅适合本地开发。
+# 生成建议：openssl rand -hex 32
+# 生产部署推荐通过 MM_JWT_SECRET 环境变量注入，而非写死在配置文件中。
+jwt_secret: "CHANGE_ME"
 
 # JWT 有效期（秒）。默认 604800（7 天）。
 jwt_ttl_seconds: 604800
@@ -51,4 +62,5 @@ jwt_ttl_seconds: 604800
 #
 # 首次启动引导：当本项为 off 且 user 表为空时，后端会自动创建一个超管账号
 # (admin) 并在启动日志中打印一次性登录凭据与 token，避免无人能登录的死锁。
+# 也可用 MM_BOOTSTRAP_ADMIN_USERNAME / MM_BOOTSTRAP_ADMIN_PASSWORD 环境变量预设凭据。
 allow_signup: off
