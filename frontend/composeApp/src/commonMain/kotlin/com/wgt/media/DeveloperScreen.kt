@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -85,6 +86,13 @@ fun DeveloperScreen(
     var sharesRevoking by remember { mutableStateOf(false) }
     val sharesScope = rememberCoroutineScope()
 
+    // 分享分析统计三态。getShareAnalytics 返回 null=失败。
+    // 与分享列表独立加载（互不阻塞），失败时静默跳过卡片，不影响列表区。
+    var shareAnalyticsLoading by remember { mutableStateOf(true) }
+    var shareAnalytics by remember { mutableStateOf<MediaService.ShareAnalytics?>(null) }
+    var shareAnalyticsError by remember { mutableStateOf<String?>(null) }
+    val shareAnalyticsScope = rememberCoroutineScope()
+
     // 设备管理数据三态。listDevices 返回 null=失败、空列表=无设备。
     var devicesLoading by remember { mutableStateOf(true) }
     var devices by remember { mutableStateOf<List<MediaService.DeviceInfo>?>(null) }
@@ -122,6 +130,20 @@ fun DeveloperScreen(
                 shares = result
             }
             sharesLoading = false
+        }
+    }
+
+    // 分享分析统计：进入页面拉取一次。getShareAnalytics 返回 null 视为错误。
+    // 与分享列表独立并发，互不阻塞。
+    LaunchedEffect(Unit) {
+        shareAnalyticsScope.launch {
+            val result = MediaService.getShareAnalytics()
+            if (result == null) {
+                shareAnalyticsError = "分享分析加载失败"
+            } else {
+                shareAnalytics = result
+            }
+            shareAnalyticsLoading = false
         }
     }
 
@@ -267,6 +289,20 @@ fun DeveloperScreen(
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant)
 
+            // ============ 分享分析统计 ============
+            // 位于「分享管理」区段上方，对接 MediaService.getShareAnalytics()。
+            // 六大指标：总分享 / 活跃 / 已过期 / 密码保护 / 即将过期 / 活跃率(带进度条)。
+            SectionHeader("分享分析", icon = null)
+            if (shareAnalyticsLoading) {
+                LoadingCard(label = "加载分享分析…")
+            } else if (shareAnalyticsError != null) {
+                ErrorCard(shareAnalyticsError!!)
+            } else {
+                shareAnalytics?.let { ShareAnalyticsCard(it) }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             // ============ 分享管理 ============
             SectionHeader("分享管理", icon = null)
             if (sharesLoading) {
@@ -322,6 +358,131 @@ fun DeveloperScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(color = androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant)
+        }
+    }
+}
+
+/**
+ * 分享分析统计卡片 —— 渲染 [MediaService.getShareAnalytics] 返回的六项指标。
+ *
+ * 六大指标以 2 行 × 3 列网格展示，每格为一张小 Card（数字 + 标签）：
+ *   1. 总分享数(total)        2. 活跃分享(active)      3. 已过期(expired)
+ *   4. 密码保护(passwordProtected)  5. 即将过期(expiringSoon)  6. 活跃率(activePercentage)
+ *
+ * 「活跃率」格底部加 [LinearProgressIndicator]（clamped 0..1），
+ * 颜色按活跃率分级：≥80% primary、50-80% tertiary、<50% error，
+ * 提供一眼可读的健康度信号。其余五格仅展示数字 + 标签。
+ *
+ * @param analytics 分享分析统计（非 null 由调用方保证）
+ */
+@Composable
+private fun ShareAnalyticsCard(analytics: MediaService.ShareAnalytics) {
+    // 活跃率进度条颜色分级：≥80% 主色 / 50-80% 三色 / <50% 错误色。
+    val pct = analytics.activePercentage
+    val progressColor = when {
+        pct >= 80.0 -> MaterialTheme.colorScheme.primary
+        pct >= 50.0 -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.error
+    }
+    // activePercentage 后端保留两位小数（0..100），手动格式化为 "82.30%"。
+    val pctInt = pct.toInt()
+    val pctDec = ((pct - pctInt) * 100).toInt()
+    val pctStr = "$pctInt.$pctDec%"
+    // 进度条 fraction 钳制到 [0,1]（防 NaN/负值）。
+    val progressFraction = (pct / 100.0).coerceIn(0.0, 1.0).toFloat()
+
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // 第 1 行：总分享 / 活跃 / 已过期
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ShareStatCell(
+                value = analytics.total.toString(),
+                label = "总分享",
+                modifier = Modifier.weight(1f)
+            )
+            ShareStatCell(
+                value = analytics.active.toString(),
+                label = "活跃",
+                valueColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f)
+            )
+            ShareStatCell(
+                value = analytics.expired.toString(),
+                label = "已过期",
+                valueColor = MaterialTheme.colorScheme.error,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        // 第 2 行：密码保护 / 即将过期 / 活跃率(带进度条)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ShareStatCell(
+                value = analytics.passwordProtected.toString(),
+                label = "密码保护",
+                modifier = Modifier.weight(1f)
+            )
+            ShareStatCell(
+                value = analytics.expiringSoon.toString(),
+                label = "即将过期",
+                valueColor = if (analytics.expiringSoon > 0) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            ShareStatCell(
+                value = pctStr,
+                label = "活跃率",
+                valueColor = progressColor,
+                modifier = Modifier.weight(1f),
+                progress = { progressFraction to progressColor }
+            )
+        }
+    }
+}
+
+/**
+ * 单格统计 Cell —— 数字 + 标签，[Card] 包裹。
+ *
+ * @param value 大号粗体数字（或百分比串）
+ * @param label 灰色小号标签
+ * @param valueColor 数字颜色（默认 onSurface；活跃/过期等可高亮）
+ * @param progress 可选：返回 `(fraction, color)` 的 lambda，非 null 时在底部渲染
+ *                [LinearProgressIndicator]（仅活跃率格使用）
+ */
+@Composable
+private fun ShareStatCell(
+    value: String,
+    label: String,
+    modifier: Modifier = Modifier,
+    valueColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    progress: (() -> Pair<Float, androidx.compose.ui.graphics.Color>)? = null
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                value,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = valueColor
+            )
+            Text(
+                label,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (progress != null) {
+                val (fraction, color) = progress()
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    color = color,
+                    trackColor = MaterialTheme.colorScheme.outlineVariant,
+                    modifier = Modifier.fillMaxWidth().height(4.dp)
+                )
+            }
         }
     }
 }
