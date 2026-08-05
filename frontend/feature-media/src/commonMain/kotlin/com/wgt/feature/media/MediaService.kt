@@ -104,6 +104,19 @@ private val jsonClient = HttpClient {
             }
         }
     }
+    // 上架前 UX 打磨：网络超时保护。
+    // 此前 HttpClient 未配置任何超时，弱网/后端无响应时请求会无限挂起，UI 永久卡在 loading。
+    // - connectTimeout 10s：TCP 连接建立上限（覆盖 DNS+握手）。超过则抛 ConnectTimeoutException，
+    //   由各调用方 catch 后展示「无法连接服务器」友好提示。
+    // - requestTimeout 20s：整个请求（含连接+收发）上限。大文件流式下载（getMediaStream）可能超此值，
+    //   但媒体流走单独的 stream 端点且已在调用侧做容错；常规 list/auth/rotate 等小请求 20s 足够。
+    // - socketTimeout 15s：单次读写空闲上限，防止连接建立后服务端挂起不回包。
+    // 三个值均 ≤20s，保证任何失败路径在 20s 内有可感知的错误反馈，不会黑屏/白屏卡死。
+    install(HttpTimeout) {
+        connectTimeoutMillis = 10_000
+        requestTimeoutMillis = 20_000
+        socketTimeoutMillis = 15_000
+    }
 }
 
 /**
@@ -360,7 +373,14 @@ object MediaService {
             }
         } catch (e: Exception) {
             logger.error("MediaService", "auth $path exception: ${e::class.simpleName} ${e.message}")
-            AuthOutcome(success = false, error = "无法连接服务器：${e.message ?: e::class.simpleName}")
+            // 友好错误提示：区分「连接超时」「其他网络异常」，避免用户看到裸异常类名。
+            // 超时类异常（ConnectTimeout/SocketTimeout/HttpRequestTimeout）统一提示「连接超时」，
+            // 其余连接失败仍走「无法连接服务器」+ 简短原因。
+            val friendly = when {
+                e::class.simpleName?.contains("Timeout", ignoreCase = true) == true -> "连接超时，请检查网络或后端地址后重试"
+                else -> "无法连接服务器：${e.message ?: e::class.simpleName}"
+            }
+            AuthOutcome(success = false, error = friendly)
         }
     }
 
@@ -454,7 +474,15 @@ object MediaService {
             }
         } catch (e: Exception) {
             logger.error("MediaService", "getMediaListPaged FAILED cloud=$cloud: ${e::class.simpleName} ${e.message}")
-            if (cloud) throw e
+            if (cloud) {
+                // 友好错误消息：超时类异常给「连接超时」提示，其余给「无法连接后端」+ 原因。
+                // ViewModel 据此设置 listLoadError，驱动 ErrorStateView 展示可重试占位。
+                val msg = when {
+                    e::class.simpleName?.contains("Timeout", ignoreCase = true) == true -> "连接超时，请检查网络后重试"
+                    else -> "无法连接后端：${e.message ?: e::class.simpleName}"
+                }
+                throw RuntimeException(msg, e)
+            }
             PagedMediaList(mockMediaList(page), page, pageSize, 0, false)
         }
     }

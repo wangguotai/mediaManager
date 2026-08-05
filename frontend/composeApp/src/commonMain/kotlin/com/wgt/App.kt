@@ -38,6 +38,7 @@ import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
 import com.wgt.media.AppTheme
 import com.wgt.applyAmoledOverride
+import com.wgt.platform.logger.logger
 
 private val viewModel = MediaViewModel()
 
@@ -108,6 +109,18 @@ fun App() {
     }
 
     var showSplash by remember { mutableStateOf(true) }
+    // 上架前 UX 打磨：启动超时兜底。
+    // SplashScreen 内部 delay(2000)+delay(420)≈2.4s 后回调 onFinish。正常路径没问题，
+    // 但若因任何原因（重组打断 LaunchedEffect、回调异常等）onFinish 未触发，App 会永久卡白屏。
+    // 此处独立兜底：3.5s 后若 showSplash 仍为 true，强制翻转为 false 进入主界面。
+    // 时间略大于 splash 自身 2.4s，正常情况下不会抢跑；仅作保险，避免卡白屏阻断用户。
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(3_500L)
+        if (showSplash) {
+            logger.info("App", "splash timeout fallback — forcing entry to main")
+            showSplash = false
+        }
+    }
     var screen by remember { mutableStateOf(Screen.MEDIA) }
     // 回忆详情页选中的年/月：从「已上传」Tab 月份卡片点击时填充，
     // 进入 Screen.MEMORY_DETAIL 后由 MemoryDetailScreen 读取渲染整月图片。
