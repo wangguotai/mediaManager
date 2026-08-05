@@ -7,10 +7,9 @@ import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSURL
 import platform.Foundation.NSTemporaryDirectory
-import platform.Foundation.createDirectoryAtURL
 import platform.Foundation.dataWithBytes
-import platform.Foundation.dataWithContentsOfFile
-import platform.Foundation.fileExistsAtPath
+import platform.Foundation.dataWithContentsOfURL
+import platform.Foundation.getBytes
 import platform.Foundation.writeToFile
 
 /**
@@ -66,22 +65,18 @@ actual fun platformWriteBytes(path: String, bytes: ByteArray) {
     }
 }
 
-/**
- * iOS 读取本地缓存文件字节 —— 供 [OfflineCacheManager] 离线缩略图加载链路。
- * NSData → ByteArray 经 usePinned 拷贝；文件不存在或读取失败返回 null。
- */
 @OptIn(ExperimentalForeignApi::class)
 actual fun platformReadBytes(path: String): ByteArray? {
-    return try {
-        if (!NSFileManager.defaultManager().fileExistsAtPath(path)) return null
-        val nsData = NSData.dataWithContentsOfFile(path) ?: return null
-        val length = nsData.length.toInt()
-        ByteArray(length).usePinned { pinned ->
-            nsData.getBytes(pinned.addressOf(0), length = length.toULong())
-        }
-    } catch (_: Exception) {
-        null
+    val url = NSURL.fileURLWithPath(path)
+    val nsData: NSData? = NSData.dataWithContentsOfURL(url)
+    if (nsData == null) return null
+    val length = nsData.length.toInt()
+    if (length == 0) return ByteArray(0)
+    val bytes = ByteArray(length)
+    bytes.usePinned { pinned ->
+        nsData.getBytes(pinned.addressOf(0), length = length.toULong())
     }
+    return bytes
 }
 
 /**

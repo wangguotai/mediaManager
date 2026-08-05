@@ -29,6 +29,16 @@ kotlin {
             baseName = "ComposeApp"
             isStatic = true
         }
+
+        // RNSDK ObjC Bridge (调用 RNSDK Swift 类 via ObjC runtime)
+        iosTarget.compilations.getByName("main").cinterops {
+            create("RNSDKBridge") {
+                defFile = project.file("src/iosMain/cinterop/RNSDKBridge.def")
+                packageName = "rnsdk.bridge"
+                // RNSDKBridge.h 在 iosApp 目录, 需要指向
+                includeDirs(project.file("../iosApp/iosApp"))
+            }
+        }
     }
 
     sourceSets {

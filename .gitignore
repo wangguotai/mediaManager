@@ -176,3 +176,9 @@ temp/
 .agents/*.lock
 frontend/rn-js/node_modules/
 ops-server/ops-data/
+Pods/
+frontend/iosApp/Pods/
+frontend/iosApp/Podfile.lock
+frontend/iosApp/build/
+rn-sdk-test-link
+build/

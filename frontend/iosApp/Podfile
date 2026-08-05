@@ -1,0 +1,51 @@
+source 'https://cdn.cocoapods.org/'
+
+# RN + Expo 源码在 rn_test monorepo, 通过 symlink 引用 (跨项目)
+RN_LINK = File.expand_path('../../rn-sdk-test-link', __dir__)
+RN_PATH = '../../rn-sdk-test-link/packages/react-native'
+RN_PATH_ABS = "#{RN_LINK}/packages/react-native"
+
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', RN_LINK]).strip
+
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "expo/scripts/autolinking.rb",
+    {paths: [process.argv[1]]},
+  )', RN_LINK]).strip
+
+platform :ios, '18.2'
+prepare_react_native_project!
+
+ENV['EXPO_PROJECT_ROOT'] = RN_LINK
+ENV['REACT_NATIVE_PATH'] = RN_PATH
+
+target 'iosApp' do
+  # 手动声明 Expo + safe-area-context (autolinking 路径跨项目不兼容)
+  pod 'Expo', :path => '../../rn-sdk-test-link/node_modules/expo'
+  pod 'ExpoLogBox', :path => '../../rn-sdk-test-link/node_modules/@expo/log-box'
+  pod 'ExpoModulesCore', :path => '../../rn-sdk-test-link/node_modules/expo-modules-core'
+  pod 'ExpoModulesJSI', :path => '../../rn-sdk-test-link/node_modules/expo-modules-core'
+  pod 'react-native-safe-area-context', :path => '../../rn-sdk-test-link/node_modules/react-native-safe-area-context'
+
+  # RNSDK
+  pod 'RNSDK', :path => '../../rn-sdk-test-link/ios-sdk', :modular_headers => true
+
+  # use_react_native! 用相对路径 (installation_root=iosApp, pwd=iosApp, relative=".")
+  # File.join(".", "../../rn-sdk-test-link/packages/react-native") = 正确路径
+  use_react_native!(
+    :path => RN_PATH,
+    :app_path => '../../rn-sdk-test-link'
+  )
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      RN_PATH,
+      :mac_catalyst_enabled => false,
+    )
+  end
+end
