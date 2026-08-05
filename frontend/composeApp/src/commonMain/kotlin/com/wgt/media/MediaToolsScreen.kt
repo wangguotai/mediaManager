@@ -1,5 +1,6 @@
 package com.wgt.media
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -111,6 +113,12 @@ fun MediaToolsScreen(
     var importDialogVisible by remember { mutableStateOf(false) }
     var importText by remember { mutableStateOf("") }
     var importing by remember { mutableStateOf(false) }
+
+    // 标签搜索状态
+    var searchTag by remember { mutableStateOf<String?>(null) }
+    var searchResult by remember { mutableStateOf<List<String>?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
 
     // 进入标签区段自动拉取一次统计
     LaunchedEffect(Unit) {
@@ -360,7 +368,25 @@ fun MediaToolsScreen(
                             Text(
                                 "#${stat.tag}（${stat.count}）",
                                 fontSize = 13.sp,
-                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        if (searching) return@clickable
+                                        searchTag = stat.tag
+                                        searchResult = null
+                                        searchError = null
+                                        searching = true
+                                        scope.launch {
+                                            val ids = MediaService.searchByTag(stat.tag)
+                                            searching = false
+                                            if (ids != null) {
+                                                searchResult = ids
+                                            } else {
+                                                searchError = "搜索 #$${stat.tag} 失败"
+                                            }
+                                        }
+                                    },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -594,6 +620,95 @@ fun MediaToolsScreen(
                     enabled = !importing,
                     onClick = { importDialogVisible = false }
                 ) { Text("取消") }
+            }
+        )
+    }
+
+    // 标签搜索结果 Dialog
+    searchTag?.let { tagName ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!searching) searchTag = null
+            },
+            title = { Text("搜索标签 #$tagName") },
+            text = {
+                Column {
+                    when {
+                        searching -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.size(8.dp))
+                                Text("搜索中…", fontSize = 13.sp)
+                            }
+                        }
+                        searchError != null -> {
+                            Text(
+                                searchError!!,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            )
+                        }
+                        else -> {
+                            val ids = searchResult.orEmpty()
+                            Text(
+                                "找到 ${ids.size} 个匹配媒体",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            if (ids.isEmpty()) {
+                                Text(
+                                    "该标签下暂无媒体",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                Text(
+                                    "媒体 ID（前 ${minOf(ids.size, 10)} 个）：",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 240.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    ids.take(10).forEachIndexed { index, id ->
+                                        Text(
+                                            "${index + 1}. $id",
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(vertical = 2.dp)
+                                        )
+                                    }
+                                    if (ids.size > 10) {
+                                        Text(
+                                            "… 其余 ${ids.size - 10} 个未显示",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !searching,
+                    onClick = { searchTag = null }
+                ) { Text("关闭") }
             }
         )
     }
