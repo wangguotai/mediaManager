@@ -118,6 +118,21 @@ class MediaViewModel {
     var favoriteIds by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    // —— 服务端收藏筛选（对接 MediaService.getFavorites()）——
+    // favoritesOnly=true 时，列表只展示从后端 GET /api/media/favorites 拉取的收藏媒体，
+    // 与本地 FavoriteStore 的客户端收藏标记（favoriteIds）互补：后者只记录 id 状态，
+    // 前者直接给出完整 MediaMetadata，使"仅看收藏"视图无需依赖当前 Tab 的 mediaList 命中。
+    var favoritesOnly by mutableStateOf(false)
+        private set
+
+    // 服务端收藏列表快照：[loadFavorites] 拉取后填充，favoritesOnly 激活时拷给 mediaList 渲染。
+    var favoritesList by mutableStateOf<List<MediaMetadata>>(emptyList())
+        private set
+
+    // 服务端收藏加载中（驱动筛选 chip 的 loading 态与防重入）。
+    var isLoadingFavorites by mutableStateOf(false)
+        private set
+
     /**
      * 经搜索关键词 + 类型筛选后的媒体列表，供网格直接渲染。
      *
@@ -965,6 +980,69 @@ class MediaViewModel {
      * 判断指定媒体是否已收藏。
      */
     fun isFavorite(mediaId: String): Boolean = favoriteIds.contains(mediaId)
+
+    /**
+     * 从后端拉取服务端收藏列表（GET /api/media/favorites）并刷新 [favoritesList]。
+     *
+     * 不改变 [favoritesOnly] 开关态——仅负责取数与缓存。调用方一般在
+     * [toggleFavoritesOnly] 打开筛选时调用，使列表即时上屏；也可在 toggleFavorite
+     * 后台同步后悄悄刷新，保证下次打开看到最新收藏集。
+     *
+     * 失败时 [favoritesList] 保持原值不变（不置空），避免弱网下把已缓存收藏清掉；
+     * [listLoadError] 不写——收藏筛选是次要视图，错误用 [errorMessage] 轻提示即可。
+     * 防重入：[isLoadingFavorites] 为 true 时直接返回。
+     */
+    fun loadFavorites() {
+        if (isLoadingFavorites) return
+        isLoadingFavorites = true
+        viewModelScope.launch {
+            try {
+                val list = MediaService.getFavorites()
+                favoritesList = list
+                // favoritesOnly 已激活时，同步把新结果灌入 mediaList，使网格即时刷新。
+                if (favoritesOnly) {
+                    mediaList = list
+                }
+                logger.info(TAG, "loadFavorites ok, size=${list.size}")
+            } catch (e: Exception) {
+                logger.error(TAG, "loadFavorites failed: ${e::class.simpleName} ${e.message}")
+                errorMessage = "加载收藏列表失败: ${e.message}"
+            } finally {
+                isLoadingFavorites = false
+            }
+        }
+    }
+
+    /**
+     * 切换"仅显示服务端收藏"筛选。
+     *
+     * - 打开（false→true）：先置 [favoritesOnly]=true 并把 [currentSource] 切到 BACKEND
+     *   （收藏列表来自后端，缩略图/原图须走 HTTP 加载器而非本地相册加载器）；随即把
+     *   [favoritesList]（若有缓存）拷给 [mediaList] 秒开，同时 [loadFavorites] 续拉最新。
+     *   并把 [filterType] 复位为 ALL——收藏视图本身已是收藏集，再叠本地 FAVORITE 类型
+     *   过滤会与"服务端收藏未必全在本地 favoriteIds"的事实冲突导致空列表。
+     * - 关闭（true→false）：复位 [favoritesOnly]，恢复本地类型筛选为 ALL，并按当前 Tab
+     *   重新加载对应媒体源（本地相册 / 云端增量 / 网盘图片），回到筛选前的正常列表。
+     *
+     * 不在"活动"(2)/"我的"(4) Tab 调用——那两个 Tab 无媒体视图，UI 不应暴露此切换。
+     */
+    fun toggleFavoritesOnly() {
+        if (favoritesOnly) {
+            // 关闭：复位开关与类型筛选，交由 Screen 侧按 selectedTab 重新触发加载。
+            favoritesOnly = false
+            filterType = MediaFilterType.ALL
+            searchQuery = ""
+        } else {
+            // 打开：切换到后端源（收藏元数据来自 /api/media/favorites），
+            // 复位本地类型筛选避免叠加冲突，秒开已有缓存后续拉最新。
+            favoritesOnly = true
+            currentSource = MediaSource.BACKEND
+            filterType = MediaFilterType.ALL
+            listLoadError = null
+            mediaList = favoritesList
+            loadFavorites()
+        }
+    }
 
     /**
      * 从网络加载媒体列表

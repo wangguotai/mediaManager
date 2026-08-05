@@ -273,6 +273,11 @@ fun MediaListScreen(
         // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
         // 串到新 Tab 造成“列表为空/对不上”的困惑。
         viewModel.clearSearchAndFilter()
+        // 切换 Tab 自动退出"服务端收藏"筛选：收藏视图是跨 Tab 的临时筛选态，
+        // 进入新 Tab 应回到该 Tab 的正常媒体源，避免收藏列表串到新 Tab。
+        if (viewModel.favoritesOnly) {
+            viewModel.toggleFavoritesOnly()
+        }
         searchExpanded = false
         if (selectedTab == 0 && viewModel.canAccessGallery) {
             viewModel.loadMediaFromGallery(forceRefresh = false)
@@ -282,6 +287,23 @@ fun MediaListScreen(
             viewModel.loadCloudViewForTab(forceRefresh = false)
         } else if (selectedTab == 3) {
             viewModel.loadCloudMediaList(forceRefresh = false)
+        }
+    }
+
+    // 关闭"服务端收藏"筛选时，按当前 Tab 重新加载正常媒体源，恢复筛选前列表。
+    // 打开时由 toggleFavoritesOnly 内部已处理（秒开 favoritesList + loadFavorites），
+    // 故此 effect 只对 false 转换生效。Tab 切换那条路径会先 toggle 关闭再 loadXxx，
+    // 此 effect 也会触发一次 loadXxx——幂等且都走缓存秒开,重复一次无副作用。
+    LaunchedEffect(viewModel.favoritesOnly) {
+        if (!viewModel.favoritesOnly) {
+            // 仅对媒体 Tab 触发恢复；活动/我的 Tab 无媒体源,跳过。
+            if (selectedTab != 2 && selectedTab != 4) {
+                when (selectedTab) {
+                    0 -> if (viewModel.canAccessGallery) viewModel.loadMediaFromGallery(forceRefresh = false)
+                    1 -> viewModel.loadCloudViewForTab(forceRefresh = false)
+                    3 -> viewModel.loadCloudMediaList(forceRefresh = false)
+                }
+            }
         }
     }
 
@@ -925,6 +947,49 @@ fun MediaListScreen(
                         selected = viewModel.filterType,
                         onSelect = { type -> viewModel.applyFilterType(type) }
                     )
+
+                    // —— 服务端收藏筛选切换（对接 MediaService.getFavorites()）——
+                    // 激活时列表只展示后端 GET /api/media/favorites 返回的收藏媒体，
+                    // 与上面的本地 FAVORITE 类型筛选互补：后者只在当前 Tab mediaList 内按
+                    // favoriteIds 过滤，本切换直接拉取服务端收藏全集。仅在媒体 Tab（0/1/3）
+                    // 显示——活动/我的 Tab 无媒体视图。
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = viewModel.favoritesOnly,
+                            onClick = { viewModel.toggleFavoritesOnly() },
+                            label = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("★ 服务端收藏")
+                                    if (viewModel.isLoadingFavorites) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(14.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
+                                }
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                labelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        )
+                        if (viewModel.favoritesOnly) {
+                            Text(
+                                "仅显示服务端收藏 · ${viewModel.favoritesList.size} 项",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 } // end if (selectedTab != 2 && selectedTab != 4)
 
                 // ── 离线模式 banner（PRD-v8 §1.5）──
@@ -1071,10 +1136,19 @@ fun MediaListScreen(
                         3 -> viewModel.isCloudLoading
                         else -> viewModel.isLoading
                     }
+                    // 服务端收藏筛选激活时，loading 态改用收藏加载指示，
+                    // 下拉刷新改为续拉收藏列表（而非该 Tab 的正常媒体源）。
+                    val effectiveLoading = if (viewModel.favoritesOnly) {
+                        isLoading || viewModel.isLoadingFavorites
+                    } else {
+                        isLoading
+                    }
                     val mediaList = viewModel.mediaList
                     val filtered = viewModel.filteredList
                     val onRefresh = {
-                        when (selectedTab) {
+                        if (viewModel.favoritesOnly) {
+                            viewModel.loadFavorites()
+                        } else when (selectedTab) {
                             0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
                             1 -> viewModel.loadCloudViewForTab(forceRefresh = true)
                             else -> viewModel.loadCloudMediaList(forceRefresh = true)
@@ -1083,20 +1157,20 @@ fun MediaListScreen(
 
                     val listError = viewModel.listLoadError
                     when {
-                        mediaList.isEmpty() && listError != null && !isLoading -> {
+                        mediaList.isEmpty() && listError != null && !effectiveLoading -> {
                             ErrorStateView(
                                 message = listError,
                                 onRetry = onRefresh
                             )
                         }
 
-                        mediaList.isEmpty() && isLoading -> {
+                        mediaList.isEmpty() && effectiveLoading -> {
                             FullScreenLoading()
                         }
 
                         mediaList.isEmpty() -> {
                             PullToRefreshBox(
-                                isRefreshing = isLoading,
+                                isRefreshing = effectiveLoading,
                                 onRefresh = onRefresh,
                                 modifier = Modifier.fillMaxSize()
                             ) {
@@ -1117,7 +1191,7 @@ fun MediaListScreen(
 
                         else -> {
                             PullToRefreshBox(
-                                isRefreshing = isLoading,
+                                isRefreshing = effectiveLoading,
                                 onRefresh = onRefresh,
                                 modifier = Modifier.fillMaxSize()
                             ) {
@@ -1155,7 +1229,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (viewModel.favoritesOnly) null else if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 } else {
@@ -1169,7 +1243,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (viewModel.favoritesOnly) null else if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
