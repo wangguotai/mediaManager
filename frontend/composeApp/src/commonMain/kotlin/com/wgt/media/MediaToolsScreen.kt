@@ -106,6 +106,9 @@ fun MediaToolsScreen(
     var deleting by remember { mutableStateOf(false) }
     // 清理无用标签
     var cleaningUp by remember { mutableStateOf(false) }
+    // 智能合并相似标签（中英映射 / 简繁 / 大小写）
+    var merging by remember { mutableStateOf(false) }
+    var mergeResult by remember { mutableStateOf<MediaService.MergeSmartResult?>(null) }
     // 导出 / 导入 Dialog
     var exportDialogVisible by remember { mutableStateOf(false) }
     var exportJson by remember { mutableStateOf<String?>(null) }
@@ -276,6 +279,33 @@ fun MediaToolsScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 智能合并：自动合并相似标签（中英映射/简繁/大小写）
+                    TextButton(onClick = {
+                        if (merging) return@TextButton
+                        merging = true
+                        scope.launch {
+                            val result = MediaService.mergeSmartTags()
+                            merging = false
+                            if (result == null) {
+                                snackbarHostState.showSnackbar("智能合并失败")
+                            } else {
+                                mergeResult = result
+                                // 成功后刷新标签列表，使合并反映到 UI
+                                tagStatsLoading = true
+                                tagStats = MediaService.getTagStats()
+                                tagStatsLoading = false
+                            }
+                        }
+                    }) {
+                        if (merging) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("智能合并")
+                        }
+                    }
                     TextButton(onClick = {
                         if (cleaningUp) return@TextButton
                         cleaningUp = true
@@ -620,6 +650,71 @@ fun MediaToolsScreen(
                     enabled = !importing,
                     onClick = { importDialogVisible = false }
                 ) { Text("取消") }
+            }
+        )
+    }
+
+    // 智能合并结果 Dialog
+    mergeResult?.let { r ->
+        AlertDialog(
+            onDismissRequest = { mergeResult = null },
+            title = { Text("智能合并结果") },
+            text = {
+                Column {
+                    if (r.mergedCount == 0) {
+                        Text(
+                            "没有需要合并的相似标签",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            "合并了 ${r.mergedCount} 对相似标签",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        Text(
+                            "标签总数：${r.totalTagsBefore} → ${r.totalTagsAfter}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        if (r.merges.isNotEmpty()) {
+                            Text(
+                                "合并明细（前 ${minOf(r.merges.size, 5)} 对）：",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 220.dp)
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                r.merges.take(5).forEach { pair ->
+                                    Text(
+                                        "#${pair.from} → #${pair.to}（${pair.count}）${pair.reason.ifEmpty { "" }}",
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                                if (r.merges.size > 5) {
+                                    Text(
+                                        "… 其余 ${r.merges.size - 5} 对未显示",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { mergeResult = null }) { Text("关闭") }
             }
         )
     }
