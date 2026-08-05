@@ -579,6 +579,13 @@ fun SearchBar(
     // SearchBar 自身无 ViewModel，故就地持有一个 scope 调 MediaService 挂起方法。
     val tagScope = rememberCoroutineScope()
 
+    // 纯字符串搜索建议：对接 MediaService.getSearchSuggestions(q)（GET
+    // /api/media/search-suggestions），返回 List<String>。与 V24 增强建议
+    // (EnhancedSuggestion，带 source) 和 V26 前缀补全（带完整文件名）互补，
+    // 本状态驱动 DropdownMenu 下拉式建议。search-suggestions 后端按文件名
+    // 前缀匹配返回去扩展名的纯文本片段，适合下拉快速选取。
+    var simpleSuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+
     // debounce：监听 queryText 变化，停顿 300ms 后上抛去抖后的查询。
     // distinctUntilChanged 避免相同值重复触发过滤重组。
     LaunchedEffect(Unit) {
@@ -589,6 +596,19 @@ fun SearchBar(
                 delay(SEARCH_DEBOUNCE_MS)
                 onDebouncedQueryChange(it.trim())
             }
+    }
+
+    // 纯字符串建议去抖拉取：queryText 变化即重启协程（取消上一次 delay），
+    // 天然实现 300ms 去抖。仅展开态 + 非空输入时请求；其余清空避免无谓请求。
+    // 与下方 V24/V26 的 LaunchedEffect(queryText) 并行，三者 endpoint 不同、互不干扰。
+    LaunchedEffect(queryText) {
+        val trimmed = queryText.trim()
+        if (expanded && trimmed.isNotEmpty()) {
+            delay(SEARCH_DEBOUNCE_MS)
+            simpleSuggestions = MediaService.getSearchSuggestions(trimmed) ?: emptyList()
+        } else {
+            simpleSuggestions = emptyList()
+        }
     }
 
     // 展开瞬间请求焦点，让输入框立即可输入、键盘自动弹出。
@@ -648,42 +668,71 @@ fun SearchBar(
                 if (expanded) {
                     Spacer(modifier = Modifier.width(4.dp))
 
-                    // 输入框：BasicTextField 自定义样式，与动态色调协调。
-                    BasicTextField(
-                        value = queryText,
-                        onValueChange = { queryText = it },
+                    // 输入框 + 建议下拉：用 Box 包裹 BasicTextField，DropdownMenu 锚定在
+                    // Box 下方，随 simpleSuggestions 变化显隐。点击建议 → 填入输入框、
+                    // 立即上抛去抖查询、写入搜索历史、触发 onSearchSubmit 提交一次搜索。
+                    // weight 放在 Box 上（RowScope），BasicTextField 仅 fillMaxWidth——
+                    // 这样 Box 在行内占满剩余空间，输入框又受 DropdownMenu 锚点正确约束。
+                    Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { state ->
-                                // 仅清空查询，不自动收起——收起由 IconButton 返回箭头控制
-                                if (!state.isFocused && queryText.isEmpty()) {
-                                    onDebouncedQueryChange("")
+                    ) {
+                        BasicTextField(
+                            value = queryText,
+                            onValueChange = { queryText = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester)
+                                .onFocusChanged { state ->
+                                    // 仅清空查询，不自动收起——收起由 IconButton 返回箭头控制
+                                    if (!state.isFocused && queryText.isEmpty()) {
+                                        onDebouncedQueryChange("")
+                                    }
+                                },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = {
+                                onSearchSubmit()
+                            }),
+                            decorationBox = { innerTextField ->
+                                // placeholder：无文案时显示灰色提示。
+                                if (queryText.isEmpty()) {
+                                    Text(
+                                        "搜索媒体名称",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                        fontSize = 15.sp
+                                    )
                                 }
-                            },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(
-                            color = MaterialTheme.colorScheme.onSurface
-                        ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = {
-                            onSearchSubmit()
-                        }),
-                        decorationBox = { innerTextField ->
-                            // placeholder：无文案时显示灰色提示。
-                            if (queryText.isEmpty()) {
-                                Text(
-                                    "搜索媒体名称",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                    fontSize = 15.sp
+                                innerTextField()
+                            }
+                        )
+
+                        // 建议下拉：仅在有建议且输入非空时展开。DropdownMenu 内部自管
+                        // popup 位置与 dismiss（外部点击/IME backtrack 自动关闭）。
+                        DropdownMenu(
+                            expanded = simpleSuggestions.isNotEmpty() && queryText.isNotEmpty(),
+                            onDismissRequest = { /* 建议由 queryText 控制，不主动清空 */ }
+                        ) {
+                            simpleSuggestions.forEach { suggestion ->
+                                DropdownMenuItem(
+                                    text = { Text(suggestion, fontSize = 14.sp, maxLines = 1) },
+                                    onClick = {
+                                        queryText = suggestion
+                                        queryVisible = true
+                                        onDebouncedQueryChange(suggestion)
+                                        SearchHistory.add(suggestion)
+                                        onSearchSubmit()
+                                    }
                                 )
                             }
-                            innerTextField()
                         }
-                    )
+                    }
 
                     // 清除按钮：仅在有文案时淡入显示；点击清空输入并立即上抛空串。
                     AnimatedVisibility(
