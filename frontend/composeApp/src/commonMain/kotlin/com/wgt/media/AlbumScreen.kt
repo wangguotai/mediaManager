@@ -1595,6 +1595,17 @@ private fun AlbumDetailPage(
                                         shareError = msg
                                     }
                                 )
+                            },
+                            onUnshare = { username ->
+                                shareToggleScope.launch {
+                                    val ok = MediaService.unshareAlbum(albumId, username)
+                                    if (ok) {
+                                        viewModel.showErrorMessage("已取消共享：$username")
+                                        showShareDialog = false
+                                    } else {
+                                        shareError = "取消共享失败"
+                                    }
+                                }
                             }
                         )
                     }
@@ -1838,17 +1849,20 @@ private fun CreateAlbumDialog(
 @Composable
 private fun ShareAlbumDialog(
     onDismiss: () -> Unit,
-    onShare: (String) -> Unit
+    onShare: (String) -> Unit,
+    onUnshare: (String) -> Unit
 ) {
     var username by remember { mutableStateOf("") }
+    var isUnshareMode by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("共享相册") },
+        title = { Text(if (isUnshareMode) "取消共享" else "共享相册") },
         text = {
             Column {
                 Text(
-                    "输入要邀请的用户名，共享后对方可查看和添加图片。",
+                    if (isUnshareMode) "输入要取消共享的用户名，取消后对方将无法再访问此相册。"
+                    else "输入要邀请的用户名，共享后对方可查看和添加图片。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1860,16 +1874,28 @@ private fun ShareAlbumDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { isUnshareMode = !isUnshareMode; username = "" }) {
+                        Text(if (isUnshareMode) "← 返回共享" else "取消共享→")
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onShare(username.trim()) },
+                onClick = {
+                    if (isUnshareMode) onUnshare(username.trim())
+                    else onShare(username.trim())
+                },
                 enabled = username.trim().isNotEmpty()
-            ) { Text("共享") }
+            ) { Text(if (isUnshareMode) "取消共享" else "共享") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("关闭") }
         }
     )
 }
