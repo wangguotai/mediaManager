@@ -182,3 +182,4 @@ frontend/iosApp/Podfile.lock
 frontend/iosApp/build/
 rn-sdk-test-link
 build/
+.run/
