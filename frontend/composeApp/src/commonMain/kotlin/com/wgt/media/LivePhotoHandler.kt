@@ -92,9 +92,8 @@ object LivePhotoHandler {
             },
             dismissButton = {
                 if (videoUrl != null) {
-                    Button(onClick = { 
-                        // TODO: 播放视频
-                        println("播放视频: $videoUrl")
+                    Button(onClick = {
+                        // Live Photo 视频播放待实现
                         onDismiss()
                     }) {
                         Text("播放视频")
