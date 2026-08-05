@@ -153,11 +153,12 @@ docker compose --env-file .env up -d
 ```bash
 # 从源码构建 APK（需 JDK 17 + Android SDK）
 cd frontend
-./gradlew :composeApp:assembleDebug
+./gradlew :composeApp:assembleDebug          # Debug APK
+./gradlew :composeApp:assembleRelease        # Release APK（签名+minify，可上架）
 
 # APK 输出位置：
-# frontend/composeApp/build/outputs/apk/debug/composeApp-debug.apk
-```
+# frontend/composeApp/build/outputs/apk/debug/app-debug.apk
+# frontend/composeApp/build/outputs/apk/release/app-release.apk
 
 安装到设备：
 
