@@ -1282,7 +1282,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"db_health":      dbHealth,
 		"disk_health":    diskHealth,
 		"network_health": netHealth,
-		"version":        "v0.4.0",
+		"version":        "v1.0.0",
 		"media_count":    mediaCount,
 		"uptime":         fmt.Sprintf("%ds", int(uptime.Seconds())),
 		"cache":          cacheStatus,
