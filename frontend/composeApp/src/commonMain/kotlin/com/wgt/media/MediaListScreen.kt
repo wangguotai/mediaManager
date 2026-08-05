@@ -81,6 +81,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -1614,6 +1615,151 @@ private fun MyTabContent(
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                     )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ── 最近活动时间线卡片（V7：调 MediaService.getRecentActivity()）──
+        // 展示当前用户最近 20 条媒体操作（上传/收藏/分享/删除…），每行：
+        // type emoji + filename（详情）+ 格式化时间。空列表显示"暂无活动"，
+        // 加载中转圈、请求失败显示"加载失败"。getRecentActivity 返回 null 统一归为失败。
+        // 不引入 LazyColumn——MyTabContent 外层已是 verticalScroll 的 Column，
+        // 嵌套同方向滚动会冲突；条目数固定 ≤20，Column 足够，且复用外层滚动。
+        var recentActivity by remember { mutableStateOf<List<MediaService.ActivityInfo>?>(null) }
+        var recentActivityLoaded by remember { mutableStateOf(false) }
+        var recentActivityFailed by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            val result = MediaService.getRecentActivity()
+            if (result == null) {
+                recentActivityFailed = true
+            } else {
+                recentActivity = result
+            }
+            recentActivityLoaded = true
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "最近活动",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "时间线",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                when {
+                    !recentActivityLoaded -> {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                "加载中…",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    recentActivityFailed -> {
+                        Text(
+                            "加载失败",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    recentActivity.isNullOrEmpty() -> {
+                        Text(
+                            "暂无活动",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    else -> {
+                        val list = recentActivity!!.take(20)
+                        val total = recentActivity!!.size
+                        list.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    activityTypeEmoji(item.type),
+                                    fontSize = 14.sp
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        item.filename.ifEmpty { item.detail.ifEmpty { item.type } },
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (item.detail.isNotBlank() && item.detail != item.filename) {
+                                        Text(
+                                            item.detail,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                Text(
+                                    msToDateTimeStr(item.timestamp),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                        if (total > 20) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "查看更多（共 $total 条）",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -5391,3 +5537,62 @@ enum class TagActionMode(val label: String) {
     MERGE("合并"),
     REMOVE("移除")
 }
+
+/**
+ * 「最近活动」卡片用的活动类型 → emoji 映射。
+ *
+ * 键为 [MediaService.ActivityInfo.type]（后端 recent-activity 接口的 `type` 字段，
+ * 取值如 upload/delete/share/favorite/rename/tag/restore/rotate/download/move）。
+ * 未知类型回退圆点，保证不空白。与项目内既有映射（SearchBar.kt 的 actionEmoji、
+ * InsightsDashboardScreen.kt 的 auditActionEmoji）口径一致但各自私有，
+ * 避免跨文件依赖与命名冲突。
+ */
+private fun activityTypeEmoji(type: String): String = when (type.lowercase()) {
+    "upload" -> "📤"
+    "delete" -> "🗑️"
+    "share" -> "🔗"
+    "favorite" -> "⭐"
+    "rename" -> "✏️"
+    "tag" -> "🏷️"
+    "restore" -> "♻️"
+    "rotate" -> "🔄"
+    "download" -> "⬇️"
+    "move" -> "📦"
+    else -> "•"
+}
+
+/**
+ * 把 epoch 毫秒格式化为 `YYYY-MM-DD HH:MM`（本地，commonMain 不依赖 java.time）。
+ *
+ * 复刻自 DeveloperScreen.kt 的同名实现（那里是 private，无法跨文件复用）。手工
+ * 平年/闰年推算公历日期，两位补零——展示用途足够，不引入 kotlinx-datetime 依赖。
+ */
+private fun msToDateTimeStr(ms: Long): String {
+    if (ms <= 0) return "-"
+    val totalSec = ms / 1000
+    val days = totalSec / 86400
+    val remSec = totalSec % 86400
+    val hours = remSec / 3600
+    val mins = (remSec % 3600) / 60
+    var year = 1970
+    var dayCount = days.toInt()
+    while (true) {
+        val daysInYear = if (isLeapYear(year)) 366 else 365
+        if (dayCount < daysInYear) break
+        dayCount -= daysInYear
+        year++
+    }
+    val monthDays = if (isLeapYear(year)) intArrayOf(31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    else intArrayOf(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    var month = 0
+    while (dayCount >= monthDays[month]) {
+        dayCount -= monthDays[month]
+        month++
+    }
+    val day = dayCount + 1
+    fun two(n: Int) = if (n < 10) "0$n" else n.toString()
+    return "$year-${two(month + 1)}-${two(day)} ${two(hours.toInt())}:${two(mins.toInt())}"
+}
+
+private fun isLeapYear(y: Int): Boolean =
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
