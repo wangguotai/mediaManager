@@ -104,7 +104,7 @@ fun RnActivityScreen(onBack: () -> Unit) {
                 is RnUpdateState.Ready -> {
                     // 热更新就绪：用本地缓存路径加载
                     RnContainer(
-                        componentName = "MediaManagerApp",
+                        componentName = "rndemo",
                         bundleAssetName = "index.android.bundle",
                         hostId = "activity-center",
                         modifier = Modifier.fillMaxSize(),
@@ -115,7 +115,7 @@ fun RnActivityScreen(onBack: () -> Unit) {
                 RnUpdateState.Fallback -> {
                     // 回退 assets 内置 bundle——已预解析失败，不再兜底查询（避免重复网络请求）
                     RnContainer(
-                        componentName = "MediaManagerApp",
+                        componentName = "rndemo",
                         bundleAssetName = "index.android.bundle",
                         hostId = "activity-center",
                         modifier = Modifier.fillMaxSize(),

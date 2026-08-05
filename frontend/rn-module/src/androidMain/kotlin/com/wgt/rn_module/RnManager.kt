@@ -60,7 +60,7 @@ internal actual class RnManager private actual constructor() : IRnManager {
     // ========== 当前 Host 状态 ==========
     private var currentHostId: String = "default"
     private var currentBundleName: String = "index.android.bundle"
-    private var currentComponentName: String = "MediaManagerApp"
+    private var currentComponentName: String = "rndemo"
 
     // ========== ReactContext 初始化等待器 ==========
     private var contextInitializedDeferred = CompletableDeferred<ReactContext?>()

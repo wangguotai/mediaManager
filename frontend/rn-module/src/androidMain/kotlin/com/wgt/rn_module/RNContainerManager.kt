@@ -160,7 +160,7 @@ class RNContainerManager private constructor(private val application: Applicatio
     fun getOrCreateReactHost(
         hostId: String = "default",
         bundleAssetName: String = "index.android.bundle",
-        mainComponentName: String = "MediaManagerApp",
+        mainComponentName: String = "rndemo",
         jsMainModulePath: String = "index",
         useDevelopmentSupport: Boolean? = null,
         // V7 §3.2：热更新 bundle 路径（优先于 assets）

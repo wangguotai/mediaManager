@@ -23,7 +23,7 @@ import androidx.compose.ui.Modifier
  * - [bundleName] 用于平台侧兜底热更新查询（当调用方未预先解析路径时），
  *   为 null 时平台用 [bundleAssetName] 作为 manifest 查询 key。
  *
- * @param componentName RN 组件名（如 "MediaManagerApp"）
+ * @param componentName RN 组件名（如 "rndemo"）
  * @param bundleAssetName 内置 assets bundle 文件名（如 "index.android.bundle"），热更新失败时回退
  * @param hostId ReactHost 标识
  * @param bundleFilePath 热更新本地缓存 bundle 路径（非空时优先），null 则回退 assets

@@ -854,11 +854,11 @@ fun MediaListScreen(
         Box(modifier = Modifier.padding(paddingValues)) {
             // "活动" Tab(index=2)：直接嵌入 RN 活动中心页面（无 TopAppBar/返回按钮，
             // 由底部 Tab 切换进出）。RnContainer 加载 assets/index.android.bundle，
-            // 组件名 "MediaManagerApp"。hostId 用独立标识避免与导航到 RnActivityScreen 的
+            // 组件名 "rndemo"。hostId 用独立标识避免与导航到 RnActivityScreen 的
             // 那个 host 复用（两者场景不同：此为常驻 Tab，彼为 push 页）。
             if (selectedTab == 2) {
                 RnContainer(
-                    componentName = "MediaManagerApp",
+                    componentName = "rndemo",
                     bundleAssetName = "index.android.bundle",
                     hostId = "activity-tab",
                     modifier = Modifier.fillMaxSize().statusBarsPadding()

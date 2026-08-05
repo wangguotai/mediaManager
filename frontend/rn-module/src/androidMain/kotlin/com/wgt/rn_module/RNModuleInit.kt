@@ -55,7 +55,7 @@ object RNModuleInit {
     fun preloadReactContext(
         application: Application,
         bundleAssetName: String = "index.android.bundle",
-        mainComponentName: String = "MediaManagerApp"
+        mainComponentName: String = "rndemo"
     ) {
         val containerManager = RNContainerManager.getInstance(application)
         val host = containerManager.getOrCreateReactHost(
