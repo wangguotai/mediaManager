@@ -1,6 +1,7 @@
 package com.wgt.media
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,10 +14,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -34,9 +37,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.wgt.common.util.formatBytesToMB
+import com.wgt.feature.media.MediaService
+import com.wgt.feature.media.MediaService.UserQuota
 import com.wgt.platform.logger.logger
 import kotlinx.coroutines.launch
 import mediamanager.composeapp.generated.resources.Res
@@ -49,8 +56,8 @@ import mediamanager.composeapp.generated.resources.ic_openclaw
 import mediamanager.composeapp.generated.resources.ic_palette
 import mediamanager.composeapp.generated.resources.ic_settings
 import org.jetbrains.compose.resources.DrawableResource
-import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
+import org.jetbrains.compose.resources.painterResource
 
 private const val TAG = "SettingsScreen"
 
@@ -417,6 +424,17 @@ fun SettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
 
+            // ---- 存储配额 ----
+            // 对接 MediaService.getUserQuota()（V8：GET /api/media/user-quota）。
+            // 登录态下展示已用 / 总配额、可用空间与使用率进度条；颜色预警：
+            // <80% 绿、80–95% 橙、>95% 红。仅 SettingsScreen 本页内一次性加载，
+            // 不下沉到 MediaViewModel —— 配额为低频只读展示，无需与云同步/备份
+            // 等状态联动，避免污染 ViewModel 职责边界。
+            if (AuthState.isLoggedIn) {
+                SectionTitle("存储配额", iconRes = Res.drawable.ic_cloud)
+                StorageQuotaCard()
+            }
+
             // ---- 子页入口 ----
             SectionTitle("更多设置", iconRes = Res.drawable.ic_info)
 
@@ -499,6 +517,179 @@ private fun EntryRow(
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 存储配额卡片（对接 MediaService.getUserQuota()）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 配额使用率预警色阶阈值（百分比 0–100）。 */
+private const val QUOTA_WARN_ORANGE_THRESHOLD = 80.0
+private const val QUOTA_WARN_RED_THRESHOLD = 95.0
+
+/**
+ * 纯 Kotlin 整数四舍五入到 1 位小数（commonMain 无 `String.format`）。
+ * 例：1.25 → "1.3"，0 → "0"。
+ */
+private fun Double.fmt1(): String {
+    val rounded = ((this * 10).toLong()) / 10.0
+    val intPart = rounded.toLong()
+    val frac = ((rounded - intPart) * 10).toLong()
+    return if (frac == 0L) intPart.toString() else "$intPart.$frac"
+}
+
+/**
+ * 配额使用率→预警色。
+ * <80% 绿、80–95% 橙（含 80）、>95% 红（含 95）。
+ * 用固定 ARGB 色值（与 [ColorSchemes] 主题色板解耦，预警语义需跨浅/暗色一致可读）。
+ */
+private fun quotaWarningColor(percent: Double): Color = when {
+    percent >= QUOTA_WARN_RED_THRESHOLD -> Color(0xFFE53935)   // 红
+    percent >= QUOTA_WARN_ORANGE_THRESHOLD -> Color(0xFFFF9800) // 橙
+    else -> Color(0xFF43A047)                                   // 绿
+}
+
+/**
+ * 把字节数格式化为 "XX MB" / "XX GB"：<1GB 显示 MB，≥1GB 显示 GB。
+ * 用于「已用空间」「可用空间」展示；总配额用 [MediaService.UserQuota.quotaGB]。
+ */
+private fun formatBytesAdaptive(bytes: Long): String {
+    val mb = bytes.toDouble() / (1024.0 * 1024.0)
+    return if (mb < 1024.0) "${mb.fmt1()} MB"
+    else "${(mb / 1024.0).fmt1()} GB"
+}
+
+/**
+ * 存储配额卡片：登录态展示用户存储配额信息。
+ *
+ * 数据源 [MediaService.getUserQuota]（V8：GET /api/media/user-quota），
+ * 返回 [UserQuota](quotaBytes/usedBytes/freeBytes/usagePercent)。
+ *
+ * 状态机：loading（CircularProgressIndicator）→ 成功展示进度条卡片 /
+ * 失败「加载失败」Text / 未登录不渲染（由外层 [AuthState.isLoggedIn] 守卫）。
+ *
+ * 设计要点：
+ * - 进度条用 [LinearProgressIndicator] 的 lambda-progress 重载（M3 1.10+），
+ *   `progress` 取 [UserQuota.usagePercent] / 100f，颜色随阈值变红/橙/绿；
+ * - 已用 / 总配额大字加粗，可用空间次级灰字，百分比右对齐呼应进度条颜色；
+ * - 配额 API 失败（网络/token/空响应）显示一行错误文字，不阻塞页面其余区。
+ *
+ * 不下沉到 [MediaViewModel]：配额为 SettingsScreen 内只读一次性展示，无跨页
+ * 联动诉求，下沉会徒增 ViewModel 状态字段与生命周期维护成本。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StorageQuotaCard() {
+    // 三态：null+loading=true 加载中；quota!=null 成功；quota=null+loading=false 失败。
+    var quota by remember { mutableStateOf<UserQuota?>(null) }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        loading = true
+        val result = MediaService.getUserQuota()
+        quota = result
+        loading = false
+        if (result == null) {
+            logger.error(TAG, "getUserQuota returned null in SettingsScreen")
+        }
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            when {
+                loading -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "加载配额中…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                quota == null -> {
+                    Text(
+                        "加载失败",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                else -> {
+                    val q = quota!!
+                    val pct = q.usagePercent
+                    val warnColor = quotaWarningColor(pct)
+
+                    // 已用 / 总配额（大字主信息）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Text(
+                            "已用 ${formatBytesAdaptive(q.usedBytes)} / ${q.quotaGB.fmt1()} GB",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "${pct.fmt1()}%",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = warnColor
+                        )
+                    }
+
+                    // 进度条：M3 1.10 lambda-progress 重载。
+                    LinearProgressIndicator(
+                        progress = { (pct / 100.0).coerceIn(0.0, 1.0).toFloat() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp),
+                        color = warnColor,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        gapSize = 0.dp,
+                        drawStopIndicator = {}
+                    )
+
+                    // 可用空间（次级信息）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            "可用空间",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            formatBytesAdaptive(q.freeBytes),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
