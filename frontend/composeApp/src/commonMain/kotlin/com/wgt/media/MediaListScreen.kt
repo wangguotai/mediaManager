@@ -45,6 +45,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridS
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.*
@@ -1273,22 +1274,20 @@ private fun ActivityBottomBar(
     selectedTab: Int,
     onSelect: (Int) -> Unit
 ) {
-    // M3 Expressive：底部 Tab 栏容器用 expressiveShape（28dp 超圆角）包裹，
-    // 浮于内容之上 + 微 elevation；外层留 horizontal padding 使容器不贴边。
-    // 选中态由 NavTab 内部用 pillShape 胶囊背景 + animateColorAsState 渐变体现。
+    // 贴底导航栏：去除浮卡圆角与外层 padding，直接贴边贴底，
+    // 顶部 0.5dp outlineVariant 分隔线 + 8dp shadowElevation 营造稳重浮起感。
+    // 对标 Google Photos / iOS：导航栏应为一整条贴底面板，而非悬浮卡片。
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Dimens.spacingMedium, vertical = Dimens.spacingSmall),
-        shape = expressiveShape,
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = Dimens.cardElevationFlat,
-        shadowElevation = Dimens.cardElevationFlat
+        modifier = Modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shadowElevation = 8.dp,
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(60.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1325,7 +1324,12 @@ private fun ActivityBottomBar(
 }
 
 /**
- * 普通底部导航 Tab（无凸起）。图标 + 文案纵向排列，选中时着 primary 色。
+ * 普通底部导航 Tab（无凸起）。图标 + 文案纵向排列。
+ *
+ * 简洁选中态（去胶囊、去圆点）：
+ * - 选中：图标/文字 primary 色 100% alpha，文字 SemiBold
+ * - 未选中：图标/文字 onSurfaceVariant 60% alpha，文字 Normal
+ * - 选中时图标微放大 1.0→1.1，灵动反馈
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -1335,81 +1339,69 @@ private fun NavTab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    // M3 Expressive：选中态用 pillShape 胶囊背景（primaryContainer 半透明），
-    // 颜色与 alpha 均走 animateColorAsState tween(200) 柔和渐变。
-    val baseTint = if (selected) MaterialTheme.colorScheme.primary
+    val baseColor = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
+    // 选中 100% / 未选中 60%：未选中保持可读，避免过度淡化。
     val alpha by animateFloatAsState(
-        targetValue = if (selected) 1f else 0.42f,
+        targetValue = if (selected) 1f else 0.6f,
         animationSpec = tween(200),
         label = "navTabAlpha"
     )
-    // 选中胶囊背景色：primaryContainer → 透明，tween 渐变。
-    val pillColor by animateColorAsState(
-        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer
-        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0f),
-        animationSpec = tween(200),
-        label = "navPillColor"
+    // 选中态图标微放大：1.0→1.1，柔顺 spring 反馈，不喧宾夺主。
+    val iconScale by animateFloatAsState(
+        targetValue = if (selected) 1.1f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "navTabIconScale"
     )
     Column(
         modifier = Modifier
-            // 选中态胶囊背景：pillShape + primaryContainer，仅选中时显现。
-            .clip(pillShape)
-            .background(pillColor)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = ripple(),
                 onClick = onClick
             )
-            .padding(horizontal = Dimens.spacingMedium, vertical = Dimens.spacingSmall),
+            .padding(horizontal = Dimens.spacingMedium),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
             painter = painterResource(icon),
             contentDescription = label,
-            tint = baseTint.copy(alpha = alpha),
-            modifier = Modifier.size(Dimens.navIconSize)
+            tint = baseColor.copy(alpha = alpha),
+            modifier = Modifier
+                .size(Dimens.navIconSize)
+                .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             label,
-            fontSize = 11.sp,
-            color = baseTint.copy(alpha = alpha),
+            fontSize = 12.sp,
+            color = baseColor.copy(alpha = alpha),
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        // 选中指示圆点：动画 alpha 过渡，选中时显现 primary 色小圆点，
-        // 未选中时完全透明不占视觉位。比顶部指示线更精致、不破坏扁平观感。
-        val dotAlpha by animateFloatAsState(
-            targetValue = if (selected) 1f else 0f,
-            animationSpec = tween(200),
-            label = "navDotAlpha"
-        )
-        Box(
-            modifier = Modifier
-                .size(Dimens.navIndicatorDotSize)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = dotAlpha))
         )
     }
 }
 
 /**
- * 中间"活动"Tab：圆形凸起按钮。56dp 圆，offset(y=-12dp) 上凸。
- * 选中时圆背景改 primaryContainer + 加 onPrimaryContainer 边框，未选中时 primary 实心。
+ * 中间"活动"Tab：精致圆形凸起 FAB。
+ *
+ * - 尺寸 48dp（更精致），elevation 始终 4dp
+ * - 选中：primary 背景 + onPrimary 图标
+ * - 未选中：primaryContainer 背景 + onPrimaryContainer 图标
+ * - 颜色 tween(200) 柔和过渡；图标 24dp
  */
 @Composable
 private fun CenterActivityFab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
-    else MaterialTheme.colorScheme.primary
-    val iconColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
-    else MaterialTheme.colorScheme.onPrimary
-    // M3 Expressive：中间凸起 FAB 用 expressiveShape（28dp 超圆角）替代纯圆形，
-    // 视觉更柔和现代；elevation 保留凸起感。颜色用 animateColorAsState 柔和过渡。
+    val containerColor = if (selected) MaterialTheme.colorScheme.primary
+    else MaterialTheme.colorScheme.primaryContainer
+    val iconColor = if (selected) MaterialTheme.colorScheme.onPrimary
+    else MaterialTheme.colorScheme.onPrimaryContainer
     val animContainerColor by animateColorAsState(
         targetValue = containerColor,
         animationSpec = tween(200),
@@ -1420,8 +1412,6 @@ private fun CenterActivityFab(
         animationSpec = tween(200),
         label = "fabIcon"
     )
-    val borderColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
-    else Color.Transparent
     Column(
         modifier = Modifier
             .clickable(
@@ -1432,13 +1422,12 @@ private fun CenterActivityFab(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Surface(
-            shape = expressiveShape,
+            shape = CircleShape,
             color = animContainerColor,
-            border = androidx.compose.foundation.BorderStroke(2.dp, borderColor),
+            shadowElevation = 4.dp,
             modifier = Modifier
-                .size(Dimens.centerFabSize)
-                .offset(y = (-12).dp)
-                .shadow(Dimens.centerFabElevation, expressiveShape)
+                .size(48.dp)
+                .offset(y = (-10).dp)
         ) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -1448,18 +1437,19 @@ private fun CenterActivityFab(
                     painter = painterResource(Res.drawable.ic_cloud),
                     contentDescription = "活动",
                     tint = animIconColor,
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
-        // 下方文案不偏移，与左右 Tab 文案对齐（凸起部分占上方 12dp）
+        // 文案回补凸起位移，与左右 Tab 文案视觉齐平。
         Text(
             "活动",
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = if (selected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
-            modifier = Modifier.offset(y = (-8).dp)  // 回补凸起位移，使文案视觉与左右齐平
+            modifier = Modifier.offset(y = (-6).dp)
         )
     }
 }
