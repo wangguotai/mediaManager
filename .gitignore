@@ -183,3 +183,8 @@ frontend/iosApp/build/
 rn-sdk-test-link
 build/
 .run/
+
+# iOS RN integration (Phase 2)
+frontend/iosApp/Vendor/React.xcframework/
+frontend/iosApp/iosApp/main.jsbundle
+frontend/iosApp/iosApp.xcworkspace/

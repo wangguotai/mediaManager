@@ -1,51 +1,82 @@
+# Self-contained Podfile for media-manager iosApp.
+#
+# Goal: make Swift `import React` compile against the prebuilt React.xcframework,
+# WITHOUT require_relative-ing the rn_test React Native source tree (media-manager
+# and rn_test are separate git repos; iosApp must not depend on rn_test source).
+#
+# Strategy:
+#   - React-Core-prebuilt: vendored React.xcframework (copied from rn_test Phase 0
+#     output) + a self-contained .podspec (no RN helper require_relative).
+#   - Third-party C++ header/source pods (glog, boost, DoubleConversion, fast_float,
+#     fmt, RCT-Folly): the prebuilt React.framework binary already links folly+hermes
+#     statically, but its public headers still #include <folly/...> <glog/...> etc.
+#     We consume FULLY-RESOLVED podspec JSON files (copied from rn_test's
+#     Pods/Local Podspecs, where RN helpers like get_folly_config / min_supported_versions
+#     are already expanded) so we don't need to load any RN source helpers.
+#   - SocketRocket: public trunk pod (0.7.1).
+#
+# Xcode 26.1 compat: global CLANG_ENABLE_MODULES=NO (verified required in Phase 0).
+
 source 'https://cdn.cocoapods.org/'
 
-# RN + Expo 源码在 rn_test monorepo, 通过 symlink 引用 (跨项目)
-RN_LINK = File.expand_path('../../rn-sdk-test-link', __dir__)
-RN_PATH = '../../rn-sdk-test-link/packages/react-native'
-RN_PATH_ABS = "#{RN_LINK}/packages/react-native"
+platform :ios, '15.1'
+install! 'cocoapods', :deterministic_uuids => false, :warn_for_unused_master_specs_repo => false
 
-require Pod::Executable.execute_command('node', ['-p',
-  'require.resolve(
-    "react-native/scripts/react_native_pods.rb",
-    {paths: [process.argv[1]]},
-  )', RN_LINK]).strip
-
-require Pod::Executable.execute_command('node', ['-p',
-  'require.resolve(
-    "expo/scripts/autolinking.rb",
-    {paths: [process.argv[1]]},
-  )', RN_LINK]).strip
-
-platform :ios, '18.2'
-prepare_react_native_project!
-
-ENV['EXPO_PROJECT_ROOT'] = RN_LINK
-ENV['REACT_NATIVE_PATH'] = RN_PATH
+# Proxy for git/curl operations (CocoaPods net ops)
+ENV['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
+ENV['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 
 target 'iosApp' do
-  # 手动声明 Expo + safe-area-context (autolinking 路径跨项目不兼容)
-  pod 'Expo', :path => '../../rn-sdk-test-link/node_modules/expo'
-  pod 'ExpoLogBox', :path => '../../rn-sdk-test-link/node_modules/@expo/log-box'
-  pod 'ExpoModulesCore', :path => '../../rn-sdk-test-link/node_modules/expo-modules-core'
-  pod 'ExpoModulesJSI', :path => '../../rn-sdk-test-link/node_modules/expo-modules-core'
-  pod 'react-native-safe-area-context', :path => '../../rn-sdk-test-link/node_modules/react-native-safe-area-context'
+  use_frameworks! :linkage => :static
 
-  # RNSDK
-  pod 'RNSDK', :path => '../../rn-sdk-test-link/ios-sdk', :modular_headers => true
+  # Prebuilt React core: local development pod. Using :path (not :podspec) makes
+  # CocoaPods treat it as a local pod and skip git source download - the
+  # vendored_frameworks React.xcframework lives in the pod dir already.
+  pod 'React-Core-prebuilt', :path => 'Vendor'
 
-  # use_react_native! 用相对路径 (installation_root=iosApp, pwd=iosApp, relative=".")
-  # File.join(".", "../../rn-sdk-test-link/packages/react-native") = 正确路径
-  use_react_native!(
-    :path => RN_PATH,
-    :app_path => '../../rn-sdk-test-link'
-  )
+  # Third-party C++ pods referenced by React.framework public headers.
+  # Using resolved .podspec.json (RN helpers pre-expanded) so no RN source needed.
+  pod 'glog',            :podspec => 'Vendor/ThirdPartyPods/glog.podspec.json'
+  pod 'boost',           :podspec => 'Vendor/ThirdPartyPods/boost.podspec.json'
+  pod 'DoubleConversion', :podspec => 'Vendor/ThirdPartyPods/DoubleConversion.podspec.json'
+  pod 'fast_float',      :podspec => 'Vendor/ThirdPartyPods/fast_float.podspec.json'
+  pod 'fmt',             :podspec => 'Vendor/ThirdPartyPods/fmt.podspec.json'
+  pod 'RCT-Folly',       :podspec => 'Vendor/ThirdPartyPods/RCT-Folly.podspec.json'
 
-  post_install do |installer|
-    react_native_post_install(
-      installer,
-      RN_PATH,
-      :mac_catalyst_enabled => false,
-    )
+  # SocketRocket: public trunk pod (no local podspec needed).
+  pod 'SocketRocket', '~> 0.7.1'
+end
+
+# Xcode 26.1: clang explicit modules breaks system Foundation/UIKit/_Builtin_float
+# module builds when invoked through xcodebuild with modules enabled.
+# Phase 0 verified CLANG_ENABLE_MODULES=NO is required for RN third-party C++ pods.
+post_install do |installer|
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |c|
+      c.build_settings['CLANG_ENABLE_MODULES'] = 'NO'
+      c.build_settings['CLANG_ENABLE_EXPLICIT_MODULES'] = 'NO'
+      c.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'
+      c.build_settings['OTHER_CFLAGS'] = '$(inherited) -fno-modules'
+      c.build_settings['OTHER_CPLUSPLUSFLAGS'] = '$(inherited) -fno-modules'
+    end
+  end
+  # AggregateTarget handling: in this minimal setup (no use_react_native!), the
+  # aggregate target's build settings flow through xcconfig files rather than
+  # direct build_settings mutation. The pods_project target settings above
+  # already propagate CLANG_ENABLE_MODULES=NO via xcconfig inheritance, so we
+  # skip aggregate_targets here to avoid API mismatches.
+
+  # fmt 11 consteval patch (Xcode 26.1): base.h unconditionally #define FMT_USE_CONSTEVAL 1,
+  # overriding -D flag. Patch to 0 AFTER pod install completes (post_install hook).
+  fmt_base = File.join(installer.sandbox.root, 'fmt', 'include', 'fmt', 'base.h')
+  if File.exist?(fmt_base)
+    content = File.read(fmt_base)
+    patched = content.gsub('#  define FMT_USE_CONSTEVAL 1',
+                           '// [Xcode26 patch] consteval disabled for Xcode 26 compat' + "\n" +
+                           '#  define FMT_USE_CONSTEVAL 0')
+    if patched != content
+      File.write(fmt_base, patched)
+      Pod::UI.puts "[Podfile] Patched fmt/base.h FMT_USE_CONSTEVAL -> 0"
+    end
   end
 end
