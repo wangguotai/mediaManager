@@ -34,6 +34,7 @@ import com.wgt.media.SettingsScreen
 import com.wgt.media.SettingsState
 import com.wgt.media.RnActivityScreen
 import com.wgt.media.CleanupScreen
+import com.wgt.media.ShareManagementScreen
 import com.wgt.media.TrashScreen
 import com.wgt.media.SplashScreen
 import com.wgt.media.ThemeMode
@@ -191,7 +192,8 @@ fun App() {
                                 onNavigateToAppearance = { screen = Screen.APPEARANCE },
                                 onNavigateToMediaTools = { screen = Screen.MEDIA_TOOLS },
                                 onNavigateToAbout = { screen = Screen.ABOUT },
-                                onNavigateToDeveloper = { screen = Screen.DEVELOPER }
+                                onNavigateToDeveloper = { screen = Screen.DEVELOPER },
+                                onNavigateToShareManagement = { screen = Screen.SHARE_MANAGEMENT }
                             )
                             Screen.BACKUP_SETTINGS -> BackupSettingsScreen(
                                 onBack = { screen = Screen.SETTINGS },
@@ -237,6 +239,9 @@ fun App() {
                             Screen.INSIGHTS_DASHBOARD -> InsightsDashboardScreen(
                                 onBack = { screen = Screen.SETTINGS }
                             )
+                            Screen.SHARE_MANAGEMENT -> ShareManagementScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
                         }
                     }
                 }
@@ -246,7 +251,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, BACKUP_SETTINGS, APPEARANCE, MEDIA_TOOLS, ABOUT, DEVELOPER, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, INSIGHTS_DASHBOARD }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, BACKUP_SETTINGS, APPEARANCE, MEDIA_TOOLS, ABOUT, DEVELOPER, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, INSIGHTS_DASHBOARD, SHARE_MANAGEMENT }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }

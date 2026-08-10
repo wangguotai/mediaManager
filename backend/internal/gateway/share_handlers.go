@@ -511,6 +511,232 @@ func (s *Server) handleShareStream(w http.ResponseWriter, r *http.Request, token
 	http.ServeFile(w, r, files[0])
 }
 
+// handleSharePreview 处理 GET /s/{token}（公开 HTML 预览页，PRD-v10 §1.1）。
+// 收件人无需安装 App 即可在浏览器中查看分享照片。
+// 路由注册：server.go 的 s.mux.HandleFunc("/s/", s.handleSharePreview)；
+// authMiddleware 豁免 /s/ 前缀，公开访问不要求认证。
+//
+// 逻辑：
+//   - 路径形如 /s/{token}；取 /s/ 后第一段作为 token（忽略后续路径段）。
+//   - 复用 GetShareToken + 过期校验（与 handleShareView 一致）。
+//   - 有 password_hash 时：若 ?password=xxx 缺失或校验失败，返回含密码输入框的
+//     HTML 页面（表单 GET /s/{token}?password=xxx）；密码正确则展示瀑布流。
+//   - 无密码：直接展示照片瀑布流。
+//   - 过期/不存在/无效：返回错误 HTML 页（不暴露具体原因）。
+//   - 照片 <img src="/api/share/{token}/stream/{mediaId}">（与公开 stream 端点一致）。
+func (s *Server) handleSharePreview(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeShareErrorHTML(w, "服务暂不可用，请稍后再试。")
+		return
+	}
+	// path 形如 /s/{token} 或 /s/{token}/…（额外段忽略）。取 /s/ 后第一段。
+	rest := strings.TrimPrefix(r.URL.Path, "/s/")
+	if rest == "" || rest == r.URL.Path {
+		// rest == r.URL.Path 表示未匹配 /s/ 前缀（应不可能，因路由按前缀注册）。
+		writeShareErrorHTML(w, "无效的分享链接。")
+		return
+	}
+	if strings.Contains(rest, "..") {
+		writeShareErrorHTML(w, "无效的分享链接。")
+		return
+	}
+	token := rest
+	if idx := strings.IndexByte(token, '/'); idx >= 0 {
+		token = token[:idx]
+	}
+	if token == "" {
+		writeShareErrorHTML(w, "无效的分享链接。")
+		return
+	}
+
+	st, err := s.store.GetShareToken(r.Context(), token)
+	if err != nil {
+		writeShareErrorHTML(w, "分享链接不存在或已失效。")
+		return
+	}
+	// 过期校验（不区分不存在与已过期，避免泄露）。
+	if !st.ExpiresAt.IsZero() && time.Now().After(st.ExpiresAt) {
+		writeShareErrorHTML(w, "分享链接不存在或已失效。")
+		return
+	}
+
+	// 密码校验：有 password_hash 时要求 ?password=xxx，bcrypt 比对失败 → 密码输入页。
+	needPasswordPage := false
+	if st.PasswordHash != "" {
+		pw := r.URL.Query().Get("password")
+		if pw == "" {
+			needPasswordPage = true
+		} else if err := bcrypt.CompareHashAndPassword([]byte(st.PasswordHash), []byte(pw)); err != nil {
+			needPasswordPage = true // 密码错误也回到密码页，不区分“无密码”与“错密码”
+		}
+		if needPasswordPage {
+			writeSharePasswordHTML(w, token)
+			return
+		}
+	}
+
+	// 还原 media_ids 并逐个取元数据，过滤 deleted=false（软删的不展示）。
+	var mediaIDs []string
+	if err := json.Unmarshal([]byte(st.MediaIDs), &mediaIDs); err != nil {
+		writeShareErrorHTML(w, "分享内容解析失败。")
+		return
+	}
+
+	items := make([]sharePreviewItem, 0, len(mediaIDs))
+	for _, mid := range mediaIDs {
+		m, err := s.store.GetMedia(r.Context(), mid)
+		if err != nil || m.Deleted {
+			continue
+		}
+		items = append(items, sharePreviewItem{
+			ID:       m.ID,
+			Filename: m.Filename,
+			Mime:     m.Mime,
+		})
+	}
+
+	// 密码正确/无密码时，<img> 需带 ?password=xxx 以通过 stream 端点校验。
+	pwQuery := ""
+	if st.PasswordHash != "" {
+		pwQuery = "?password=" + r.URL.Query().Get("password")
+	}
+
+	writeShareGalleryHTML(w, token, st, len(items), items, pwQuery)
+}
+
+// writeShareErrorHTML 返回轻量错误页（内联 CSS，中文友好提示）。
+func writeShareErrorHTML(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>分享链接</title>
+<style>%s</style></head>
+<body><main class="wrap">
+<div class="card error">
+  <div class="icon">⊘</div>
+  <p>%s</p>
+</div>
+</main></body></html>`, sharePreviewCSS(), msg)
+}
+
+// writeSharePasswordHTML 返回密码输入页（表单 GET /s/{token}?password=xxx）。
+func writeSharePasswordHTML(w http.ResponseWriter, token string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>输入密码</title>
+<style>%s</style></head>
+<body><main class="wrap">
+<div class="card pw">
+  <div class="icon">🔐</div>
+  <h1>请输入密码</h1>
+  <p class="hint">该分享链接受密码保护。</p>
+  <form method="get" action="/s/%s" class="pw-form">
+    <input type="password" name="password" placeholder="密码" autofocus required>
+    <button type="submit">查看</button>
+  </form>
+</div>
+</main></body></html>`, sharePreviewCSS(), token)
+}
+
+// sharePreviewItem 是瀑布流预览页单张照片的渲染数据。
+type sharePreviewItem struct {
+	ID       string
+	Filename string
+	Mime     string
+}
+
+// writeShareGalleryHTML 返回照片瀑布流预览页（内联 CSS，响应式）。
+func writeShareGalleryHTML(w http.ResponseWriter, token string, st *storage.ShareToken, count int, items []sharePreviewItem, pwQuery string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	createdStr := st.CreatedAt.UTC().Format("2006-01-02 15:04")
+	expiresStr := "永久有效"
+	if !st.ExpiresAt.IsZero() {
+		expiresStr = st.ExpiresAt.UTC().Format("2006-01-02 15:04 MST")
+	}
+
+	// 构造缩略图卡片 HTML。
+	var cards strings.Builder
+	for _, it := range items {
+		src := fmt.Sprintf("/api/share/%s/stream/%s%s", token, it.ID, pwQuery)
+		fmt.Fprintf(&cards, `    <figure class="card photo" data-src="%s">
+      <img loading="lazy" src="%s" alt="%s">
+    </figure>`+"\n", src, src, it.Filename)
+	}
+
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>分享相册</title>
+<style>%s</style></head>
+<body><main class="wrap">
+<header class="hdr">
+  <h1>📷 分享相册</h1>
+  <p class="meta">创建于 %s · 有效期 %s · 共 %d 张</p>
+</header>
+<section class="grid">
+%s</section>
+<footer class="ftr">
+  <button class="dl" onclick="downloadAll()">⬇ 下载全部</button>
+</footer>
+<div id="lightbox" class="lightbox" onclick="this.classList.remove('show')">
+  <img id="lb-img" src="" alt="">
+</div>
+<script>
+function downloadAll(){
+  alert('请在 App 中使用「批量下载」获取全部原图。');
+}
+// 点击照片大图查看。
+document.querySelectorAll('.photo').forEach(function(f){
+  f.addEventListener('click',function(){
+    var s=f.getAttribute('data-src');
+    document.getElementById('lb-img').src=s;
+    document.getElementById('lightbox').classList.add('show');
+  });
+});
+</script>
+</main></body></html>`, sharePreviewCSS(), createdStr, expiresStr, count, cards.String())
+}
+
+// sharePreviewCSS 返回预览页内联 CSS（响应式瀑布流：手机1列/平板2列/桌面3列）。
+func sharePreviewCSS() string {
+	return `*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#f5f5f7;color:#1d1d1f;line-height:1.5}
+.wrap{max-width:1200px;margin:0 auto;padding:16px}
+.hdr{padding:20px 0;text-align:center}
+.hdr h1{font-size:24px;font-weight:600}
+.meta{color:#86868b;font-size:14px;margin-top:6px}
+.grid{display:grid;grid-template-columns:1fr;gap:12px;margin:16px 0}
+@media(min-width:640px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:1024px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.photo{cursor:pointer;transition:transform .15s}
+.photo:hover{transform:scale(1.02)}
+.photo img{display:block;width:100%;height:auto;object-fit:cover}
+.ftr{text-align:center;padding:24px 0}
+.dl{background:#0071e3;color:#fff;border:none;border-radius:980px;padding:12px 28px;font-size:15px;cursor:pointer}
+.dl:hover{background:#0077ed}
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:999;justify-content:center;align-items:center;cursor:zoom-out}
+.lightbox.show{display:flex}
+.lightbox img{max-width:92vw;max-height:92vh;object-fit:contain}
+.icon{font-size:48px;text-align:center;margin-bottom:12px}
+.error .icon{color:#ff3b30}
+.error p{text-align:center;color:#86868b}
+.pw h1{font-size:20px;font-weight:600;text-align:center;margin-bottom:8px}
+.pw .hint{text-align:center;color:#86868b;font-size:14px;margin-bottom:20px}
+.pw-form{display:flex;flex-direction:column;gap:12px;max-width:320px;margin:0 auto}
+.pw-form input{padding:12px 14px;border:1px solid #d2d2d7;border-radius:10px;font-size:16px;outline:none}
+.pw-form input:focus{border-color:#0071e3}
+.pw-form button{background:#0071e3;color:#fff;border:none;border-radius:980px;padding:12px;font-size:15px;cursor:pointer}
+.pw-form button:hover{background:#0077ed}`
+}
+
 // handleShareDelete 处理 DELETE /api/share/{token}（需认证，仅创建者可撤销）。
 // authMiddleware 已豁免 /api/share/，故在此手动鉴权；DeleteShareToken 按
 // (token, user_id) 双键过滤，归属不符返回 ErrNotFound（404，不区分不存在与无权）。

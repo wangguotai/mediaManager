@@ -643,6 +643,13 @@ class MediaViewModel {
                 }
                 hasMoreCloudChanges = page.hasMore
                 logger.info(TAG, "loadCloudChanges page done, cloud=${cloudMedia.size} cursor=$syncCursor hasMore=$hasMoreCloudChanges")
+                // PRD-v10 §3.1：云端累积视图更新后检查「那年今天」回忆并按需推送本地通知。
+                // 此处 cloudMedia 已 fresh，memoryMonths getter 基于它重算，命中当前月份的
+                // 历史年份回忆时由平台 actual（Android：NotificationManager）发通知；去重与开关
+                // 在 actual 内处理，commonMain 仅传数据。iOS 端空实现，无副作用。
+                // 用 runCatching 兜底：通知逻辑异常绝不能影响同步主流程（游标已推进、UI 已刷新）。
+                runCatching { checkAndNotifyMemories(memoryMonths) }
+                    .onFailure { e -> logger.warning(TAG, "checkAndNotifyMemories failed: ${e::class.simpleName} ${e.message}") }
             } catch (e: Exception) {
                 // 非预期异常（如合并逻辑）：记录，游标不变，下次续拉。
                 logger.error(TAG, "loadCloudChanges failed: ${e::class.simpleName} ${e.message}")

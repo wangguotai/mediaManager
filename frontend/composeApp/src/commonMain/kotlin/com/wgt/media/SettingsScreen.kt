@@ -55,6 +55,7 @@ import mediamanager.composeapp.generated.resources.ic_info
 import mediamanager.composeapp.generated.resources.ic_openclaw
 import mediamanager.composeapp.generated.resources.ic_palette
 import mediamanager.composeapp.generated.resources.ic_settings
+import mediamanager.composeapp.generated.resources.ic_share
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
@@ -270,7 +271,8 @@ fun SettingsScreen(
     onNavigateToAppearance: () -> Unit = {},
     onNavigateToMediaTools: () -> Unit = {},
     onNavigateToAbout: () -> Unit = {},
-    onNavigateToDeveloper: () -> Unit = {}
+    onNavigateToDeveloper: () -> Unit = {},
+    onNavigateToShareManagement: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -458,6 +460,13 @@ fun SettingsScreen(
                 title = "媒体工具",
                 subtitle = "回收站 · 孤立文件 · 自动打标签 · 存储清理",
                 onClick = onNavigateToMediaTools
+            )
+            // 分享管理（PRD-v10 §1.2）
+            EntryRow(
+                iconRes = Res.drawable.ic_share,
+                title = "分享管理",
+                subtitle = "查看 · 复制链接 · 撤销分享",
+                onClick = onNavigateToShareManagement
             )
             // 关于
             EntryRow(

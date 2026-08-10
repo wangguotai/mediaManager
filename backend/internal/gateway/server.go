@@ -823,6 +823,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/share/extend", s.handleShareExtend)
 	s.mux.HandleFunc("/api/share/", s.handleShareAccess)
 
+	// 分享外部预览页（PRD-v10 §1.1）：GET /s/{token} 返回轻量 HTML，让分享链接
+	// 收件人不用装 App 即可在浏览器看照片。路由按 /s/ 前缀匹配，handler 内取 token。
+	// authMiddleware 豁免 /s/ 前缀（见下方 authMiddleware 注释），公开访问不要求认证。
+	s.mux.HandleFunc("/s/", s.handleSharePreview)
+
 	// Stats: 缩略图缓存命中率等可观测性指标（JSON，兼容旧前端，保留）。
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 
@@ -940,6 +945,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// （requireShareAuth 辅助解析 Authorization → user_id）。这样公开端点无需 token，
 		// 需认证端点在 handler 入口显式鉴权，二者解耦。
 		if strings.HasPrefix(r.URL.Path, "/api/share/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 分享外部预览页（PRD-v10 §1.1）：/s/{token} 为公开 HTML，不要求认证。
+		// 与 /api/share/ 同理，handler 内自行校验 token/密码；此处中间件直接放行。
+		if strings.HasPrefix(r.URL.Path, "/s/") {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -109,6 +109,19 @@ object SettingsKeys {
      * 空串/0L 表示从未备份过。
      */
     const val LAST_BACKUP_TIME = "last_backup_time"
+
+    /**
+     * 回忆通知开关（PRD-v10 §3.1）。"true" 时 App 启动/同步后检查「那年今天」并推送本地通知。
+     * 默认 "true"（对标系统相册类 App 回忆推送默认开启行为）；用户可在设置页关闭。
+     * 去重标记键前缀 [MEMORY_LAST_NOTIFIED_PREFIX]+`yyyy-MM` 复用本存储层落盘。
+     */
+    const val MEMORY_NOTIFICATION_ENABLED = "memory_notification_enabled"
+
+    /**
+     * 回忆通知去重键前缀（PRD-v10 §3.1）。actual 端拼接 `yyyy-MM` 形成完整键，
+     * 值 "1" 表示该年月已通知过，避免同日多次启动/同步重复打扰。
+     */
+    const val MEMORY_LAST_NOTIFIED_PREFIX = "memory_last_notified_"
 }
 
 /**
