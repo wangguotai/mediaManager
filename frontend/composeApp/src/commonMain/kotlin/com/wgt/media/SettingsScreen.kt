@@ -273,7 +273,8 @@ fun SettingsScreen(
     onNavigateToAbout: () -> Unit = {},
     onNavigateToDeveloper: () -> Unit = {},
     onNavigateToShareManagement: () -> Unit = {},
-    onNavigateToFavorites: () -> Unit = {}
+    onNavigateToFavorites: () -> Unit = {},
+    onNavigateToPhotoMap: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -454,6 +455,13 @@ fun SettingsScreen(
                 title = "我的收藏",
                 subtitle = "查看收藏的照片 · 长按取消收藏",
                 onClick = onNavigateToFavorites
+            )
+            // 照片地图
+            EntryRow(
+                iconRes = Res.drawable.ic_info,
+                title = "照片地图",
+                subtitle = "按 GPS 位置浏览照片",
+                onClick = onNavigateToPhotoMap
             )
             // 外观
             EntryRow(

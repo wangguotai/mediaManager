@@ -35,6 +35,7 @@ import com.wgt.media.SettingsState
 import com.wgt.media.RnActivityScreen
 import com.wgt.media.CleanupScreen
 import com.wgt.media.FavoritesScreen
+import com.wgt.media.PhotoMapScreen
 import com.wgt.media.ShareManagementScreen
 import com.wgt.media.TrashScreen
 import com.wgt.media.SplashScreen
@@ -195,7 +196,8 @@ fun App() {
                                 onNavigateToAbout = { screen = Screen.ABOUT },
                                 onNavigateToDeveloper = { screen = Screen.DEVELOPER },
                                 onNavigateToShareManagement = { screen = Screen.SHARE_MANAGEMENT },
-                                onNavigateToFavorites = { screen = Screen.FAVORITES }
+                                onNavigateToFavorites = { screen = Screen.FAVORITES },
+                                onNavigateToPhotoMap = { screen = Screen.PHOTO_MAP }
                             )
                             Screen.BACKUP_SETTINGS -> BackupSettingsScreen(
                                 onBack = { screen = Screen.SETTINGS },
@@ -249,6 +251,9 @@ fun App() {
                             Screen.SHARE_MANAGEMENT -> ShareManagementScreen(
                                 onBack = { screen = Screen.SETTINGS }
                             )
+                            Screen.PHOTO_MAP -> PhotoMapScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
                         }
                     }
                 }
@@ -258,7 +263,7 @@ fun App() {
 }
 
 /** 顶层屏幕路由（已登录态）。 */
-private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, BACKUP_SETTINGS, APPEARANCE, MEDIA_TOOLS, ABOUT, DEVELOPER, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, FAVORITES, INSIGHTS_DASHBOARD, SHARE_MANAGEMENT }
+private enum class Screen { MEDIA, MEMORY_DETAIL, SETTINGS, BACKUP_SETTINGS, APPEARANCE, MEDIA_TOOLS, ABOUT, DEVELOPER, ALBUM, FILE_MANAGEMENT, TRASH, RN_ACTIVITY, CLEANUP, FAVORITES, INSIGHTS_DASHBOARD, SHARE_MANAGEMENT, PHOTO_MAP }
 
 /** 未登录态的二级视图：登录 / 注册切替。 */
 private enum class AuthView { LOGIN, REGISTER }

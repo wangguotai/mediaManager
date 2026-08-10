@@ -752,6 +752,43 @@ object MediaService {
         }
     }
 
+    /** GeoCluster — 照片地理聚类点。 */
+    data class GeoCluster(
+        val lat: Double,
+        val lng: Double,
+        val count: Int,
+        val thumbMediaId: String,
+        val thumbUrl: String
+    )
+
+    /**
+     * GET /api/media/geo-clusters — 照片 GPS 位置聚类。
+     *
+     * 后端按 haversine 500m 半径聚类，返回 [{lat,lng,count,thumb_media_id,thumb_url}]。
+     * 供照片地图视图展示。
+     */
+    suspend fun getGeoClusters(): List<GeoCluster>? {
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/media/geo-clusters")
+            if (response.status == HttpStatusCode.OK) {
+                val obj = Json.parseToJsonElement(response.body<String>()).jsonObject
+                obj["clusters"]?.jsonArray?.mapNotNull { el ->
+                    val o = el.jsonObject
+                    GeoCluster(
+                        lat = o["lat"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null,
+                        lng = o["lng"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null,
+                        count = o["count"]?.jsonPrimitive?.intOrNull ?: 0,
+                        thumbMediaId = o["thumb_media_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                        thumbUrl = o["thumb_url"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                }
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getGeoClusters FAILED: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
     // ---- 高级搜索 ----
 
     /**
