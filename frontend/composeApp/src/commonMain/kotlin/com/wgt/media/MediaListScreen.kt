@@ -3029,12 +3029,13 @@ fun MediaGridItem(
                     }
                 }
 
-                // 选中遮罩：半透明蓝色覆盖，与边框、左上角勾选圆共同构成选中视觉反馈。
+                // 选中遮罩：半透明蓝色覆盖（PRD-v9 §4.1 规范色 0x330066FF），
+                // 与边框、左上角勾选圆共同构成选中视觉反馈。
                 if (isSelected) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+                            .background(Color(0x330066FF))
                     )
                 }
 

@@ -1,6 +1,7 @@
 package com.wgt
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -157,79 +158,86 @@ fun App() {
                     }
                 } else {
                     // 已登录：保留既有三 Tab 结构不变。
-                    when (screen) {
-                        Screen.MEDIA -> MediaListScreen(
-                            viewModel = viewModel,
-                            onNavigateToSettings = { screen = Screen.SETTINGS },
-                            onNavigateToAlbums = { screen = Screen.ALBUM },
-                            onNavigateToFileManagement = { screen = Screen.FILE_MANAGEMENT },
-                            onNavigateToMemory = { year, month ->
-                                // 记录选中月份并跳转回忆详情页。
-                                memoryYear = year
-                                memoryMonth = month
-                                screen = Screen.MEMORY_DETAIL
-                            },
-                            onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
-                        )
-                        Screen.MEMORY_DETAIL -> MemoryDetailScreen(
-                            viewModel = viewModel,
-                            year = memoryYear,
-                            month = memoryMonth,
-                            onBack = { screen = Screen.MEDIA }
-                        )
-                        Screen.SETTINGS -> SettingsScreen(
-                            viewModel = viewModel,
-                            onBack = { screen = Screen.MEDIA },
-                            onNavigateToBackup = { screen = Screen.BACKUP_SETTINGS },
-                            onNavigateToAppearance = { screen = Screen.APPEARANCE },
-                            onNavigateToMediaTools = { screen = Screen.MEDIA_TOOLS },
-                            onNavigateToAbout = { screen = Screen.ABOUT },
-                            onNavigateToDeveloper = { screen = Screen.DEVELOPER }
-                        )
-                        Screen.BACKUP_SETTINGS -> BackupSettingsScreen(
-                            onBack = { screen = Screen.SETTINGS },
-                            viewModel = viewModel
-                        )
-                        Screen.APPEARANCE -> AppearanceScreen(
-                            onBack = { screen = Screen.SETTINGS }
-                        )
-                        Screen.MEDIA_TOOLS -> MediaToolsScreen(
-                            onBack = { screen = Screen.SETTINGS },
-                            viewModel = viewModel,
-                            onNavigateToTrash = { screen = Screen.TRASH },
-                            onNavigateToCleanup = { screen = Screen.CLEANUP },
-                            onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY }
-                        )
-                        Screen.ABOUT -> AboutScreen(
-                            onBack = { screen = Screen.SETTINGS },
-                            viewModel = viewModel,
-                            onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
-                        )
-                        Screen.DEVELOPER -> DeveloperScreen(
-                            onBack = { screen = Screen.SETTINGS },
-                            viewModel = viewModel
-                        )
-                        Screen.ALBUM -> AlbumScreen(
-                            viewModel = viewModel,
-                            onBack = { screen = Screen.MEDIA }
-                        )
-                        Screen.FILE_MANAGEMENT -> FileManagementScreen(
-                            viewModel = viewModel,
-                            onBack = { screen = Screen.MEDIA }
-                        )
-                        Screen.TRASH -> TrashScreen(
-                            onBack = { screen = Screen.SETTINGS }
-                        )
-                        Screen.RN_ACTIVITY -> RnActivityScreen(
-                            onBack = { screen = Screen.SETTINGS }
-                        )
-                        Screen.CLEANUP -> CleanupScreen(
-                            viewModel = viewModel,
-                            onBack = { screen = Screen.SETTINGS }
-                        )
-                        Screen.INSIGHTS_DASHBOARD -> InsightsDashboardScreen(
-                            onBack = { screen = Screen.SETTINGS }
-                        )
+                    // PRD-v9 §1.1：页面切换用 Crossfade 淡入淡出过渡（tween 250ms）。
+                    Crossfade(
+                        targetState = screen,
+                        animationSpec = tween(250),
+                        label = "screenTransition"
+                    ) { currentScreen ->
+                        when (currentScreen) {
+                            Screen.MEDIA -> MediaListScreen(
+                                viewModel = viewModel,
+                                onNavigateToSettings = { screen = Screen.SETTINGS },
+                                onNavigateToAlbums = { screen = Screen.ALBUM },
+                                onNavigateToFileManagement = { screen = Screen.FILE_MANAGEMENT },
+                                onNavigateToMemory = { year, month ->
+                                    // 记录选中月份并跳转回忆详情页。
+                                    memoryYear = year
+                                    memoryMonth = month
+                                    screen = Screen.MEMORY_DETAIL
+                                },
+                                onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
+                            )
+                            Screen.MEMORY_DETAIL -> MemoryDetailScreen(
+                                viewModel = viewModel,
+                                year = memoryYear,
+                                month = memoryMonth,
+                                onBack = { screen = Screen.MEDIA }
+                            )
+                            Screen.SETTINGS -> SettingsScreen(
+                                viewModel = viewModel,
+                                onBack = { screen = Screen.MEDIA },
+                                onNavigateToBackup = { screen = Screen.BACKUP_SETTINGS },
+                                onNavigateToAppearance = { screen = Screen.APPEARANCE },
+                                onNavigateToMediaTools = { screen = Screen.MEDIA_TOOLS },
+                                onNavigateToAbout = { screen = Screen.ABOUT },
+                                onNavigateToDeveloper = { screen = Screen.DEVELOPER }
+                            )
+                            Screen.BACKUP_SETTINGS -> BackupSettingsScreen(
+                                onBack = { screen = Screen.SETTINGS },
+                                viewModel = viewModel
+                            )
+                            Screen.APPEARANCE -> AppearanceScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
+                            Screen.MEDIA_TOOLS -> MediaToolsScreen(
+                                onBack = { screen = Screen.SETTINGS },
+                                viewModel = viewModel,
+                                onNavigateToTrash = { screen = Screen.TRASH },
+                                onNavigateToCleanup = { screen = Screen.CLEANUP },
+                                onNavigateToRnActivity = { screen = Screen.RN_ACTIVITY }
+                            )
+                            Screen.ABOUT -> AboutScreen(
+                                onBack = { screen = Screen.SETTINGS },
+                                viewModel = viewModel,
+                                onNavigateToInsights = { screen = Screen.INSIGHTS_DASHBOARD }
+                            )
+                            Screen.DEVELOPER -> DeveloperScreen(
+                                onBack = { screen = Screen.SETTINGS },
+                                viewModel = viewModel
+                            )
+                            Screen.ALBUM -> AlbumScreen(
+                                viewModel = viewModel,
+                                onBack = { screen = Screen.MEDIA }
+                            )
+                            Screen.FILE_MANAGEMENT -> FileManagementScreen(
+                                viewModel = viewModel,
+                                onBack = { screen = Screen.MEDIA }
+                            )
+                            Screen.TRASH -> TrashScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
+                            Screen.RN_ACTIVITY -> RnActivityScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
+                            Screen.CLEANUP -> CleanupScreen(
+                                viewModel = viewModel,
+                                onBack = { screen = Screen.SETTINGS }
+                            )
+                            Screen.INSIGHTS_DASHBOARD -> InsightsDashboardScreen(
+                                onBack = { screen = Screen.SETTINGS }
+                            )
+                        }
                     }
                 }
             }
