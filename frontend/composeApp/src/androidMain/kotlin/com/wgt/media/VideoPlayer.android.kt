@@ -1,16 +1,27 @@
 package com.wgt.media
 
+import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.media.AudioManager
 import android.media.PlaybackParams
 import android.net.Uri
+import android.os.Build
+import android.view.WindowManager
 import android.widget.VideoView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -29,21 +40,27 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import com.wgt.platform.AppContext
 import com.wgt.platform.logger.logger
+import com.wgt.platform.getCurrentActivity
 import media.MediaMetadata
 import mediamanager.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.ExperimentalResourceApi
@@ -61,6 +78,8 @@ private const val TAG = "VideoPlayer"
  * 生命周期：在 [DisposableEffect] 中停止释放，避免离开播放器后音频继续。
  *
  * V7：倍速控制 — 通过 MediaPlayer.playbackParams.setSpeed() 实现 0.5x/1x/1.5x/2x。
+ *
+ * V8：全屏切换 + 手势亮度/音量控制 + 双击暂停/播放。
  */
 @OptIn(ExperimentalResourceApi::class)
 @Composable
@@ -84,9 +103,28 @@ internal actual fun VideoPlayer(
     // V7：倍速播放（1.0x → 1.5x → 2.0x → 0.5x 循环切换）
     val speedOptions = listOf(1.0f, 1.5f, 2.0f, 0.5f)
     val speedLabels = listOf("1.0x", "1.5x", "2.0x", "0.5x")
-    var speedIndex by remember { mutableStateOf(0) }
+    var speedIndex by remember { mutableIntStateOf(0) }
     // 存储 MediaPlayer 引用，用于运行时切倍速
     var mediaPlayerRef by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+
+    // V8：全屏状态
+    var isFullscreen by remember { mutableStateOf(false) }
+
+    // V8：手势亮度/音量控制
+    val audioManager = remember {
+        context.getSystemService(AudioManager::class.java)
+    }
+    // 保存进入手势控制前的初始亮度，用于退出后恢复（-1f 表示跟随系统）
+    var initialBrightness by remember { mutableFloatStateOf(-1f) }
+    var currentBrightness by remember { mutableFloatStateOf(-1f) }
+    var currentVolume by remember { mutableIntStateOf(audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0) }
+    val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+
+    // 手势提示文字（"亮度 80%" / "音量 60%"）
+    var gestureHint by remember { mutableStateOf<String?>(null) }
+    // 双击暂停/播放的大图标提示
+    var tapHintIcon by remember { mutableStateOf<String?>(null) } // "▶" or "⏸"
+    var showTapHint by remember { mutableStateOf(false) }
 
     // 挂监听 + 设置视频源。key 含 videoUrl：本地 Live Photo 的 file:// URL 异步就绪时
     // 重新 setVideoURI，避免首次用尚未就绪的占位源初始化后无法切换到真实文件。
@@ -140,6 +178,56 @@ internal actual fun VideoPlayer(
         }
     }
 
+    // V8：全屏切换副作用 — 设置屏幕方向 + 系统栏可见性
+    DisposableEffect(isFullscreen) {
+        val activity = AppContext.getCurrentActivity()
+        if (activity != null) {
+            if (isFullscreen) {
+                // 横屏
+                @Suppress("DEPRECATION")
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                // 隐藏状态栏 + 导航栏
+                val window = activity.window
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                // 恢复方向
+                @Suppress("DEPRECATION")
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                // 恢复系统栏
+                val window = activity.window
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose { }
+    }
+
+    // V8：退出播放器时恢复屏幕方向与系统栏
+    DisposableEffect(Unit) {
+        onDispose {
+            val activity = AppContext.getCurrentActivity()
+            if (activity != null && isFullscreen) {
+                @Suppress("DEPRECATION")
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                val window = activity.window
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                // 恢复亮度（-1f 表示跟随系统）
+                if (currentBrightness >= 0f) {
+                    val lp = window.attributes
+                    lp.screenBrightness = -1f
+                    window.attributes = lp
+                }
+            }
+        }
+    }
+
     // 离开时停止释放，防止音频泄漏。
     DisposableEffect(Unit) {
         onDispose {
@@ -150,11 +238,30 @@ internal actual fun VideoPlayer(
     // V7：手势进度调节状态
     var seekStartPos by remember { mutableFloatStateOf(0f) }
 
+    // V8：手势亮度/音量拖拽的起始坐标，用于判断左/右半屏 + 起始值
+    var gestureStartY by remember { mutableFloatStateOf(0f) }
+    var gestureStartBrightness by remember { mutableFloatStateOf(-1f) }
+    var gestureStartVolume by remember { mutableIntStateOf(0) }
+    var gestureType by remember { mutableStateOf<String?>(null) } // "brightness" / "volume"
+
+    fun applyBrightness(activity: Activity, value: Float) {
+        val lp = activity.window.attributes
+        lp.screenBrightness = value.coerceIn(0f, 1f)
+        activity.window.attributes = lp
+        currentBrightness = value.coerceIn(0f, 1f)
+    }
+
+    fun applyVolume(value: Int) {
+        val v = value.coerceIn(0, maxVolume)
+        audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+        currentVolume = v
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            // V7：水平拖动手势调节进度
+            // V7：水平拖动手势调节进度（底层手势，与单击/双击/垂直拖拽共存）
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragStart = { seekStartPos = positionMs },
@@ -176,6 +283,78 @@ internal actual fun VideoPlayer(
                     }
                 )
             }
+            // V8：双击暂停/播放
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        if (videoView.isPlaying) {
+                            videoView.pause()
+                            isPlaying = false
+                            tapHintIcon = "⏸"
+                        } else {
+                            videoView.start()
+                            isPlaying = true
+                            tapHintIcon = "▶"
+                        }
+                        showTapHint = true
+                    }
+                    // 单击不处理（顶部/底部控件有各自按钮；避免与双击冲突 detectTapGestures 自动延迟判定）
+                )
+            }
+            // V8：垂直拖拽控制亮度/音量
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        gestureStartY = offset.y
+                        val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                        val activity = AppContext.getCurrentActivity()
+                        if (offset.x < widthPx / 2f) {
+                            // 左半屏 — 亮度
+                            gestureType = "brightness"
+                            if (activity != null) {
+                                // 读取当前窗口亮度；-1 表示跟随系统，此时用 0.5 作为起始估算
+                                val cur = activity.window.attributes.screenBrightness
+                                val start = if (cur < 0f) 0.5f else cur
+                                gestureStartBrightness = start
+                                initialBrightness = cur
+                            }
+                        } else {
+                            // 右半屏 — 音量
+                            gestureType = "volume"
+                            gestureStartVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+                        }
+                    },
+                    onDrag = { change, dragAmount ->
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        // dragAmount.y 为正表示手指下移 → 值减小
+                        val ratio = -dragAmount.y / h
+                        val activity = AppContext.getCurrentActivity()
+                        when (gestureType) {
+                            "brightness" -> {
+                                if (activity != null) {
+                                    val newB = (gestureStartBrightness + ratio).coerceIn(0f, 1f)
+                                    applyBrightness(activity, newB)
+                                    gestureHint = "亮度 ${(newB * 100).toInt()}%"
+                                }
+                            }
+                            "volume" -> {
+                                val newV = (gestureStartVolume + (ratio * maxVolume).toInt()).coerceIn(0, maxVolume)
+                                applyVolume(newV)
+                                gestureHint = "音量 ${if (maxVolume > 0) (newV * 100 / maxVolume) else 0}%"
+                            }
+                        }
+                        // 消费事件，避免传播到水平拖拽
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        // 1.5s 后隐藏提示
+                        gestureType = null
+                    },
+                    onDragCancel = {
+                        gestureType = null
+                    }
+                )
+            }
     ) {
         // 视频画面
         AndroidView(
@@ -193,7 +372,63 @@ internal actual fun VideoPlayer(
             }
         }
 
-        // 顶部：文件名 + 关闭
+        // 手势提示文字（亮度/音量）— 拖拽结束后 1.5s 自动隐藏
+        if (gestureHint != null) {
+            val hintToShow = gestureHint
+            LaunchedEffect(hintToShow, gestureType) {
+                if (gestureType == null) {
+                    // 拖拽已结束 → 1.5s 后清除
+                    kotlinx.coroutines.delay(1500)
+                    if (gestureHint == hintToShow) gestureHint = null
+                }
+            }
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                ) {
+                    Text(
+                        hintToShow ?: "",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // 双击暂停/播放大图标提示 — 0.8s 后淡出
+        LaunchedEffect(showTapHint, tapHintIcon) {
+            if (showTapHint) {
+                kotlinx.coroutines.delay(800)
+                showTapHint = false
+                tapHintIcon = null
+            }
+        }
+        AnimatedVisibility(
+            visible = showTapHint,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    tapHintIcon ?: "",
+                    color = Color.White,
+                    fontSize = 72.sp
+                )
+            }
+        }
+
+        // 顶部：文件名 + 关闭 + 全屏
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -218,6 +453,18 @@ internal actual fun VideoPlayer(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+            // V8：全屏切换按钮
+            IconButton(onClick = { isFullscreen = !isFullscreen }) {
+                Icon(
+                    painter = painterResource(
+                        if (isFullscreen) Res.drawable.ic_fullscreen_exit
+                        else Res.drawable.ic_fullscreen
+                    ),
+                    contentDescription = if (isFullscreen) "退出全屏" else "全屏",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
         }
 
         // 底部控件：播放/暂停 + 进度条 + 时长 + 倍速
