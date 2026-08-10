@@ -461,7 +461,14 @@ fun MediaListScreen(
         ImageEditor(
             media = media,
             useBackendLoader = viewModel.currentSource != com.wgt.feature.media.MediaService.MediaSource.LOCAL,
-            onDismiss = { editorMedia = null }
+            onDismiss = { editorMedia = null },
+            onSaved = {
+                // 编辑图上传后端成功后，按当前源强制刷新媒体列表，使编辑版本出现在列表中。
+                when (viewModel.currentSource) {
+                    com.wgt.feature.media.MediaService.MediaSource.LOCAL -> viewModel.loadMediaFromGallery(forceRefresh = true)
+                    else -> viewModel.loadCloudMediaList(forceRefresh = true)
+                }
+            }
         )
     }
 

@@ -30,3 +30,21 @@ expect suspend fun saveImageBitmapToGallery(
     bitmap: ImageBitmap,
     filename: String
 ): String?
+
+/**
+ * 把 ImageBitmap 编码为图片字节流（跨平台 expect 声明）。
+ *
+ * 各平台 actual 实现：
+ * - Android：Bitmap.compress(JPEG/PNG/WebP, quality, ByteArrayOutputStream)
+ * - iOS：Skia Image.encodeToData (Compose Multiplatform iOS 后端为 Skia)
+ *
+ * @param bitmap 要编码的图片
+ * @param format 目标格式，目前支持 "jpeg"（大小写不敏感）；其他值回退为 JPEG
+ * @param quality 压缩质量 0-100（仅对有损格式有效），默认 95
+ * @return 编码后的字节流；失败返回 null
+ */
+expect fun encodeImageBitmapToBytes(
+    bitmap: ImageBitmap,
+    format: String = "jpeg",
+    quality: Int = 95
+): ByteArray?

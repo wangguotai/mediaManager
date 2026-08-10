@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.wgt.platform.architecture.dispatchers.dispatchers
+import com.wgt.feature.media.MediaService
 import kotlinx.coroutines.launch
 import media.MediaMetadata
 import mediamanager.composeapp.generated.resources.Res
@@ -177,7 +178,8 @@ private enum class SaveState { IDLE, SAVING, SUCCESS, FAILED }
 fun ImageEditor(
     media: MediaMetadata,
     useBackendLoader: Boolean,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onSaved: (() -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -309,12 +311,36 @@ fun ImageEditor(
                             } else {
                                 cropAndRotateImageBitmap(src2, sourceRect, rotation.toFloat(), filterMatrix)
                             }
+
+                            // 1. 把编辑后的位图编码为 JPEG 字节流（JPEG 95%），供上传后端。
+                            val imageBytes = encodeImageBitmapToBytes(processed, "jpeg", 95)
+
+                            // 2. 上传到后端 /api/media/media-edit-save/{mediaId}（仅 cloud 源才尝试上传；
+                            //    LOCAL 源无后端原图 mediaId 语义，跳过上传直接走本地相册保存）。
+                            var backendUploaded = false
+                            if (useBackendLoader && imageBytes != null) {
+                                val version = MediaService.uploadEditedImage(media.id, imageBytes, media.filename)
+                                backendUploaded = version != null
+                                if (backendUploaded) {
+                                    // 上传成功 → 通知调用方刷新媒体列表（让编辑版本出现在列表中）。
+                                    onSaved?.invoke()
+                                }
+                                // 上传失败（version == null）不阻断：继续走本地相册保存降级路径。
+                            }
+
+                            // 3. 本地相册保存：上传成功或上传失败/跳过时都保存，确保用户编辑成果不丢失。
                             val result = saveImageBitmapToGallery(processed, media.filename)
                             if (result != null) {
                                 saveState = SaveState.SUCCESS
                             } else {
-                                saveState = SaveState.FAILED
-                                saveError = "保存失败，请检查相册权限"
+                                // 本地相册保存也失败：仅当后端已成功时仍算成功（编辑成果已落盘到后端），
+                                // 否则报失败。
+                                if (backendUploaded) {
+                                    saveState = SaveState.SUCCESS
+                                } else {
+                                    saveState = SaveState.FAILED
+                                    saveError = "保存失败，请检查相册权限"
+                                }
                             }
                         } catch (e: Exception) {
                             saveState = SaveState.FAILED

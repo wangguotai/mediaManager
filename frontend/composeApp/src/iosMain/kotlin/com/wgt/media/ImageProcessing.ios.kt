@@ -8,6 +8,7 @@ import com.wgt.platform.logger.logger
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.ColorMatrix
+import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Paint
@@ -110,6 +111,28 @@ actual suspend fun saveImageBitmapToGallery(
         null
     } catch (e: Exception) {
         logger.error("ImageProcessing", "saveImageBitmapToGallery failed: ${e.message}")
+        null
+    }
+}
+
+actual fun encodeImageBitmapToBytes(
+    bitmap: ImageBitmap,
+    format: String,
+    quality: Int
+): ByteArray? {
+    return try {
+        val skiaBitmap = bitmap.asSkiaBitmap()
+        val image = Image.makeFromBitmap(skiaBitmap)
+        val encodedFormat = when (format.trim().lowercase()) {
+            "png" -> EncodedImageFormat.PNG
+            "webp" -> EncodedImageFormat.WEBP
+            else -> EncodedImageFormat.JPEG
+        }
+        // PNG 无损，quality 参数被 Skia 忽略；JPEG/WEBP 用给定 quality（0-100）。
+        val data = image.encodeToData(encodedFormat, quality.coerceIn(0, 100))
+        data?.bytes
+    } catch (e: Exception) {
+        logger.error("ImageProcessing", "encodeImageBitmapToBytes failed: ${e.message}")
         null
     }
 }

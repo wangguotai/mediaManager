@@ -8150,6 +8150,49 @@ object MediaService {
     }
 
     /**
+     * POST /api/media/media-edit-save/{mediaId} — 图片编辑后保存到后端。
+     *
+     * 后端协议：请求体为编辑后图片的**原始字节流**（raw bytes，非 JSON/multipart），
+     * `mediaId` 走路径尾段。后端流式落盘（上限 50MB）+ magic bytes 校验，
+     * 固定保存为 JPEG（文件名 `{mediaId}_edited_{unix秒}.jpg`），并写 metadata sidecar
+     * 记录 `edited=true` + `original_media_id`。响应 `{ media_id, version, path, size }`。
+     *
+     * 与 [videoTrimUpload] 同构：路径参数 + raw body + OctetStream content-type。
+     *
+     * **降级策略**：本方法仅负责上传，调用方（ImageEditor.onSave）在返回 null 时
+     * 应降级为仅本地相册保存，不阻断用户编辑成果。
+     *
+     * @param mediaId 原图媒体 ID（后端据此写 original_media_id 追溯关系）
+     * @param imageBytes 编辑后图片的 JPEG 字节流
+     * @param filename 原文件名（仅用于日志，后端不消费此参数，固定按 mediaId 命名）
+     * @return 成功时为后端保存的版本标识（`path` 字段，即落盘文件名）；失败返回 null
+     */
+    suspend fun uploadEditedImage(mediaId: String, imageBytes: ByteArray, filename: String): String? {
+        if (mediaId.isBlank() || imageBytes.isEmpty()) return null
+        return try {
+            val response: HttpResponse = jsonClient.post(
+                "${backendBaseUrl()}/api/media/media-edit-save/${mediaId.encodeURLPath()}"
+            ) {
+                contentType(ContentType.Application.OctetStream)
+                setBody(imageBytes)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val o = Json.parseToJsonElement(response.body<String>()).jsonObject
+                val version = o["path"]?.jsonPrimitive?.contentOrNull
+                    ?: o["version"]?.jsonPrimitive?.contentOrNull
+                logger.info("MediaService", "uploadEditedImage mediaId=$mediaId filename=$filename bytes=${imageBytes.size} path=$version")
+                version
+            } else {
+                logger.info("MediaService", "uploadEditedImage mediaId=$mediaId filename=$filename status=${response.status}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("MediaService", "uploadEditedImage FAILED mediaId=$mediaId filename=$filename: ${e::class.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    /**
      * V9：GET /api/media/exif/{id} — 返回单个媒体的完整 EXIF/metadata。
      *
      * 后端合并两个数据源（见 gateway.handleMediaExif）：

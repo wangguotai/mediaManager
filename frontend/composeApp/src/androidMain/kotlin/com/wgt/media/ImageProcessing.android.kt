@@ -103,3 +103,30 @@ actual suspend fun saveImageBitmapToGallery(
         null
     }
 }
+
+actual fun encodeImageBitmapToBytes(
+    bitmap: ImageBitmap,
+    format: String,
+    quality: Int
+): ByteArray? {
+    return try {
+        val androidBitmap = bitmap.asAndroidBitmap()
+        val compressFormat = when (format.trim().lowercase()) {
+            "png" -> Bitmap.CompressFormat.PNG
+            "webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else {
+                @Suppress("DEPRECATION")
+                Bitmap.CompressFormat.WEBP
+            }
+            else -> Bitmap.CompressFormat.JPEG
+        }
+        val baos = java.io.ByteArrayOutputStream()
+        // PNG 忽略 quality（无损）；JPEG/WEBP 用给定 quality。
+        androidBitmap.compress(compressFormat, quality.coerceIn(0, 100), baos)
+        baos.toByteArray()
+    } catch (e: Exception) {
+        logger.error("ImageProcessing", "encodeImageBitmapToBytes failed: ${e.message}")
+        null
+    }
+}
