@@ -1,10 +1,14 @@
 package com.wgt.media
 
 import com.wgt.platform.logger.logger
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import platform.Foundation.NSData
+import platform.Foundation.getBytes
 import platform.Foundation.NSString
 import platform.Foundation.NSURL
 import platform.Foundation.NSURLSession
@@ -100,8 +104,15 @@ actual class PlatformWebSocket actual constructor(private val url: String) {
     }
 
     /** NSData → String（UTF-8）。WebSocket 文本帧到达时 data 为 UTF-8 NSData。 */
+    @OptIn(ExperimentalForeignApi::class)
     private fun dataToString(data: NSData): String? {
-        return String(data.toByteArray(), Charsets.UTF_8)
+        val len = data.length.toInt()
+        if (len == 0) return ""
+        val arr = ByteArray(len)
+        arr.usePinned { pinned ->
+            data.getBytes(pinned.addressOf(0), length = len.toULong())
+        }
+        return arr.decodeToString()
     }
 
     actual fun close() {
