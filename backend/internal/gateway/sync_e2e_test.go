@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,7 +163,7 @@ func TestDeviceRegisterAndList(t *testing.T) {
 func TestSyncUsage(t *testing.T) {
 	srv, token, uid, _ := newSyncGateway(t)
 	// 通过 upload 落盘一条媒体（同时写 storage media 表）。
-	uploadAndCheck(t, srv, token, "pic.jpg", []byte("hello-world"), "success")
+	uploadAndCheck(t, srv, token, "pic.jpg", fakeJPEGBody([]byte("hello-world")), "success")
 
 	code, m := doJSON(t, srv, authedReq(http.MethodGet, "/api/sync/usage", token, nil))
 	_ = uid
@@ -171,8 +173,8 @@ func TestSyncUsage(t *testing.T) {
 	if int(m["file_count"].(float64)) != 1 {
 		t.Fatalf("usage file_count=%v (want 1)", m["file_count"])
 	}
-	if int64(m["total_bytes"].(float64)) != int64(len("hello-world")) {
-		t.Fatalf("usage total_bytes=%v (want %d)", m["total_bytes"], len("hello-world"))
+	if int64(m["total_bytes"].(float64)) != int64(len(fakeJPEGBody([]byte("hello-world")))) {
+		t.Fatalf("usage total_bytes=%v (want %d)", m["total_bytes"], len(fakeJPEGBody([]byte("hello-world"))))
 	}
 }
 
@@ -182,8 +184,8 @@ func TestSyncChangesIncrementalWithTombstone(t *testing.T) {
 	srv, token, _, _ := newSyncGateway(t)
 
 	// 上传两条（成功，写 media 表）。
-	r1 := uploadAndCheck(t, srv, token, "a.jpg", []byte("aaaa"), "success")
-	r2 := uploadAndCheck(t, srv, token, "b.jpg", []byte("bbbb"), "success")
+	r1 := uploadAndCheck(t, srv, token, "a.jpg", fakeJPEGBody([]byte("aaaa")), "success")
+	r2 := uploadAndCheck(t, srv, token, "b.jpg", fakeJPEGBody([]byte("bbbb")), "success")
 
 	// 软删第一条：经 storage.Store 直接标记（模拟 DeleteMedia 路径尚未接 store，
 	// 这里用 store API 触发墓碑 + updated_at 推进，使 changes 能观测到）。
@@ -240,7 +242,7 @@ func TestSyncChangesIncrementalWithTombstone(t *testing.T) {
 
 func TestUploadDedup(t *testing.T) {
 	srv, token, _, _ := newSyncGateway(t)
-	payload := []byte("dedup-content")
+	payload := fakeJPEGBody([]byte("dedup-content"))
 
 	// 首次上传：成功。
 	first := uploadAndCheck(t, srv, token, "orig.jpg", payload, "success")
@@ -267,7 +269,7 @@ func TestUploadPersistsClientIDTakenAt(t *testing.T) {
 	srv, token, _, _ := newSyncGateway(t)
 	// 上传带 client_id/taken_at。
 	path := "/api/media/upload?filename=with-meta.jpg&client_id=device-X&taken_at=1700000000000"
-	req := authedReq(http.MethodPost, path, token, []byte("meta-content"))
+	req := authedReq(http.MethodPost, path, token, fakeJPEGBody([]byte("meta-content")))
 	rec := httptest.NewRecorder()
 	authedHandler(srv).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -352,7 +354,7 @@ func TestDeleteCrossUserTombstoneBlocked(t *testing.T) {
 	srv, aliceToken, bobToken, aliceUID := newTwoUserGateway(t)
 
 	// alice 上传一条媒体。
-	up := uploadAndCheck(t, srv, aliceToken, "secret.jpg", []byte("alice-private"), "success")
+	up := uploadAndCheck(t, srv, aliceToken, "secret.jpg", fakeJPEGBody([]byte("alice-private")), "success")
 
 	// bob 试图删除 alice 的 media_id。
 	delReq := authedReq(http.MethodPost, "/api/media/delete", bobToken,
@@ -397,7 +399,22 @@ type uploadResult struct {
 // 断言 status 并返回 media_id 与 sha256。path 经 authedReq 透传。
 func uploadAndCheck(t *testing.T, srv *Server, token, filenameQuery string, body []byte, wantStatus string) uploadResult {
 	t.Helper()
-	path := "/api/media/upload?filename=" + filenameQuery
+	// 用 url.Values 正确分离 filename 与额外的 query 参数（如 sha256），
+	// 避免 "?sha256=wrong" 被拼入 filename 值导致扩展名解析错误。
+	parts := strings.SplitN(filenameQuery, "?", 2)
+	q := url.Values{}
+	q.Set("filename", parts[0])
+	if len(parts) == 2 {
+		extra, err := url.ParseQuery(parts[1])
+		if err == nil {
+			for k, vs := range extra {
+				for _, v := range vs {
+					q.Set(k, v)
+				}
+			}
+		}
+	}
+	path := "/api/media/upload?" + q.Encode()
 	req := authedReq(http.MethodPost, path, token, body)
 	rec := httptest.NewRecorder()
 	authedHandler(srv).ServeHTTP(rec, req)
@@ -417,6 +434,13 @@ func uploadAndCheck(t *testing.T, srv *Server, token, filenameQuery string, body
 		t.Fatalf("upload missing media_id: %+v", m)
 	}
 	return uploadResult{mediaID: id, sha: sha}
+}
+
+// fakeJPEGBody 在 payload 前加 JPEG 文件头（FF D8 FF E0），使上传通过
+// isAllowedMediaType 的 magic bytes 白名单校验。测试不需要真实可解码的 JPEG，
+// 仅需通过服务端文件头签名检查即可。
+func fakeJPEGBody(payload []byte) []byte {
+	return append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, payload...)
 }
 
 // itoa 把 int64 转字符串（测试辅助）。

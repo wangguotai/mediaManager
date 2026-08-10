@@ -1552,16 +1552,12 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	//   - sha256：内容指纹；提供时按 (user_id,sha256) 去重，命中则秒传不落盘。
 	//   - client_id：客户端幂等键，原样入库供多端冲突排查（可空）。
 	//   - taken_at：内容拍摄时间（ms）；0 表未知。
-	sha256Param := strings.TrimSpace(r.URL.Query().Get("sha256"))
 	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
 	takenAt := parseInt64Query(r.URL.Query().Get("taken_at"))
 
 	// 服务端实测 sha256 已在流式落盘时同步算出（actualSHA）；以实际落盘字节为准，
-	// 避免客户端误报导致去重错乱。若客户端未传 sha256，以实测值作为去重指纹。
-	dedupSHA := sha256Param
-	if dedupSHA == "" {
-		dedupSHA = actualSHA
-	}
+	// 忽略客户端传入的 sha256（客户端可能误报或恶意伪造），避免去重错乱。
+	dedupSHA := actualSHA
 
 	// 秒传去重：store 已配置且该用户已存在同 sha256 的内容 → 直接复用既有 media_id，
 	// 不重复落盘。即便既有行已被软删，也视为"该内容已存在过"，秒传返回其 id
