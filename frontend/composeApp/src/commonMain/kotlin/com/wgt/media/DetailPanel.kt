@@ -232,7 +232,7 @@ private fun DetailSection(media: MediaMetadata, sourceLabel: String) {
  * 单条键值信息：左标签灰色、右值白色，[HorizontalDivider] 分隔。
  */
 @Composable
-private fun InfoRow(label: String, value: String) {
+internal fun InfoRow(label: String, value: String) {
     Column(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
