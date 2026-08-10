@@ -272,7 +272,8 @@ fun SettingsScreen(
     onNavigateToMediaTools: () -> Unit = {},
     onNavigateToAbout: () -> Unit = {},
     onNavigateToDeveloper: () -> Unit = {},
-    onNavigateToShareManagement: () -> Unit = {}
+    onNavigateToShareManagement: () -> Unit = {},
+    onNavigateToFavorites: () -> Unit = {}
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -446,6 +447,13 @@ fun SettingsScreen(
                 title = "云相册备份",
                 subtitle = "自动备份 · 仅 WiFi · 设备登记",
                 onClick = onNavigateToBackup
+            )
+            // 我的收藏
+            EntryRow(
+                iconRes = Res.drawable.ic_info,
+                title = "我的收藏",
+                subtitle = "查看收藏的照片 · 长按取消收藏",
+                onClick = onNavigateToFavorites
             )
             // 外观
             EntryRow(

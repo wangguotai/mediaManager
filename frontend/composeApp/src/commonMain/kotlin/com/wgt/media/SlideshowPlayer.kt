@@ -46,8 +46,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -166,7 +168,11 @@ fun SlideshowPlayer(
             SlideshowImage(
                 media = mediaList[page],
                 useBackendLoader = useBackendLoader,
-                loadFullResolution = isCurrentOrAdjacent
+                loadFullResolution = isCurrentOrAdjacent,
+                page = page,
+                currentIndex = currentIndex,
+                progress = progress,
+                isPaused = isPaused
             )
         }
 
@@ -305,7 +311,11 @@ fun SlideshowPlayer(
 private fun SlideshowImage(
     media: MediaMetadata,
     useBackendLoader: Boolean,
-    loadFullResolution: Boolean = true
+    loadFullResolution: Boolean = true,
+    page: Int = 0,
+    currentIndex: Int = 0,
+    progress: Float = 0f,
+    isPaused: Boolean = false
 ) {
     var imageBitmap by remember(media.id) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(media.id) { mutableStateOf(true) }
@@ -349,9 +359,20 @@ private fun SlideshowImage(
     }
 
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),  // Ken Burns 缩放/平移时填充背景，防止露出黑边
         contentAlignment = Alignment.Center
     ) {
+        val density = LocalDensity.current
+        // Ken Burns 效果：仅当前页缓慢缩放+平移，与页面停留时间（progress 0→1）同步。
+        // 暂停时冻结在当前进度值（与底部进度指示器一致：暂停按 0 处理）。
+        val isActivePage = page == currentIndex
+        val kenProgress = if (isActivePage && !isPaused) progress else 0f
+        val scale = 1f + 0.15f * kenProgress
+        val translationX = with(density) { (20.dp * kenProgress).toPx() }
+        val translationY = with(density) { (-10.dp * kenProgress).toPx() }
+
         when {
             isLoading -> {
                 CircularProgressIndicator(color = Color.White)
@@ -369,7 +390,14 @@ private fun SlideshowImage(
                     Image(
                         bitmap = imageBitmap!!,
                         contentDescription = media.filename,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = translationX,
+                                translationY = translationY
+                            ),
                         contentScale = ContentScale.Fit
                     )
                 }
