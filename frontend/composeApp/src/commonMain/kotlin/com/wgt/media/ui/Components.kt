@@ -352,6 +352,65 @@ fun EmptyState(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ErrorState
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 错误态占位。
+ *
+ * 视觉口径：垂直居中 [Column]，error 图标（48dp，error 颜色）+ [title]（titleMedium）
+ * + [message]（bodyMedium + onSurfaceVariant）+ 可选「重试」按钮。
+ * 用于网络错误、加载失败、API 异常等错误态，替代各页散落的 `Text("加载失败")`。
+ *
+ * @param title 主标题（如「加载失败」）
+ * @param message 错误详情（如「网络连接超时，请检查网络后重试」）
+ * @param onRetry 重试回调（可选；为 null 时不显示重试按钮）
+ * @param modifier 调用方修饰
+ */
+@Composable
+fun ErrorState(
+    title: String,
+    message: String,
+    onRetry: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = modifier
+            .fillMaxWidth()
+            .wrapContentHeight()
+            .padding(Dimens.spacingXLarge)
+    ) {
+        Text(
+            "⚠️",
+            fontSize = androidx.compose.ui.unit.TextUnit(48f, androidx.compose.ui.unit.TextUnitType.Sp),
+            modifier = Modifier.size(Dimens.emptyStateIconSize)
+        )
+        SpacerVertical(height = Dimens.spacingLarge)
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center
+        )
+        SpacerVertical(height = Dimens.spacingSmall)
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        if (onRetry != null) {
+            SpacerVertical(height = Dimens.spacingLarge)
+            androidx.compose.material3.FilledTonalButton(onClick = onRetry) {
+                Text("重试")
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LoadingShimmer
 // ─────────────────────────────────────────────────────────────────────────────
 
