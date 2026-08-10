@@ -472,37 +472,54 @@ fun MediaListScreen(
         )
     }
 
-    // V7：重命名对话框
+    // V7：重命名对话框 — V9 迁移为 ModalBottomSheet（更现代交互）
     renameTarget?.let { media ->
         var newName by remember { mutableStateOf(media.filename) }
-        AlertDialog(
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
             onDismissRequest = { renameTarget = null },
-            title = { Text("重命名") },
-            text = {
+            sheetState = sheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "重命名",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
                 OutlinedTextField(
                     value = newName,
                     onValueChange = { newName = it },
                     label = { Text("文件名") },
-                    singleLine = true
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
                 )
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = newName.isNotBlank() && newName != media.filename,
-                    onClick = {
-                        val target = media
-                        renameTarget = null
-                        viewModel.renameMedia(target.id, newName) { success ->
-                            if (success) viewModel.showErrorMessage("重命名成功")
-                            else viewModel.showErrorMessage("重命名失败")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { renameTarget = null }) { Text("取消") }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(
+                        enabled = newName.isNotBlank() && newName != media.filename,
+                        onClick = {
+                            val target = media
+                            renameTarget = null
+                            viewModel.renameMedia(target.id, newName) { success ->
+                                if (success) viewModel.showErrorMessage("重命名成功")
+                                else viewModel.showErrorMessage("重命名失败")
+                            }
                         }
-                    }
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { renameTarget = null }) { Text("取消") }
+                    ) { Text("确定") }
+                }
             }
-        )
+        }
     }
 
     // 幻灯片播放器：预览操作栏点「幻灯片」进入，全屏自动播放当前 filteredList。
