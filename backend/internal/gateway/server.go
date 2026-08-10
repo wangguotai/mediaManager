@@ -302,6 +302,10 @@ func (s *Server) registerRoutes() {
 	// （taken_at，缺失则回退 created_at）推断地点类型，统计 indoor/outdoor/office/unknown
 	// 分布与主导类型。Media model 无 GPS 字段，故为启发式估算，非精确坐标。需认证+store。
 	s.mux.HandleFunc("/api/media/media-gps-estimate", s.handleMediaGpsEstimate)
+	// 照片 GPS 位置聚类：遍历用户媒体提取 EXIF GPS，按 haversine 500m 贪心聚类。
+	// 返回 [{lat,lng,count,thumb_media_id,name}]，供前端地图视图渲染照片分布。
+	// 与 media-gps-estimate（启发式地点类型推断）互补：本端点返回精确 GPS 聚类。
+	s.mux.HandleFunc("/api/media/geo-clusters", s.handleGeoClusters)
 	// 媒体心情分析：基于拍摄时段（taken_at，缺失则回退 created_at）的小时数推断照片"心情"——
 	// 清晨清新(6-10h)/午后活力(10-16h)/黄昏浪漫(16-19h)/夜晚神秘(19-6h)，统计各心情
 	// count+percentage+emoji 与 dominant_mood。需认证+store。
@@ -8312,6 +8316,139 @@ func (s *Server) handleMediaGpsEstimate(w http.ResponseWriter, r *http.Request) 
 		"total":    total,
 		"dominant": dominant,
 	})
+}
+
+// handleGeoClusters GET /api/media/geo-clusters — 照片 GPS 位置聚类。
+//
+// Media model 无持久化 lat/lng 列，本端点遍历当前用户全部未软删媒体，逐条读取
+// 磁盘 JPEG 文件提取 EXIF GPS（service.ExtractGPSFromFile），跳过无 GPS 的媒体。
+// 然后按 haversine 距离贪心聚类（半径 500m）：每个点找最近的已建 cluster，<500m
+// 则并入，否则新建 cluster。聚类中心为该簇所有点 lat/lng 的算术平均。
+//
+// 响应结构：
+//
+//	{
+//	  "clusters": [
+//	    {"lat": 31.23, "lng": 121.47, "count": 12, "thumb_media_id": "abc", "name": ""},
+//	    ...
+//	  ],
+//	  "total_media_with_gps": N,
+//	  "total_clusters": M
+//	}
+//
+// 需认证（JWT），按 user_id 隔离；store 未注入返回 503。name 暂返回空串（留待后续
+// 反向地理编码填充）。
+func (s *Server) handleGeoClusters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	uid := userIDFromContext(r.Context())
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
+		return
+	}
+
+	mediaList, err := s.store.ListMediaByUser(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	uploadsDir := s.userUploadsDir(uid)
+
+	// type gpsPoint 持有单张媒体的 GPS 坐标与 media_id（供取缩略图代表）。
+	type gpsPoint struct {
+		lat     float64
+		lng     float64
+		mediaID string
+	}
+	type cluster struct {
+		latSum  float64
+		lngSum  float64
+		count   int
+		thumbID string // 该簇中首个 media_id，作为缩略图代表
+	}
+
+	var points []gpsPoint
+	for _, m := range mediaList {
+		if m.Deleted {
+			continue
+		}
+		// 定位磁盘文件：优先 uploads/{mediaID}.*，回退到 resolve 风格的网盘目录。
+		path := ""
+		if uploadsDir != "" {
+			if files, gerr := filepath.Glob(filepath.Join(uploadsDir, m.ID+".*")); gerr == nil && len(files) > 0 {
+				path = files[0]
+			}
+		}
+		if path == "" {
+			continue
+		}
+		lat, lng, ok := service.ExtractGPSFromFile(path)
+		if !ok {
+			continue
+		}
+		points = append(points, gpsPoint{lat: lat, lng: lng, mediaID: m.ID})
+	}
+
+	// 贪心聚类：半径 500m（geoClusterRadiusMeters）。
+	var clusters []cluster
+	for _, p := range points {
+		idx := -1
+		bestDist := math.MaxFloat64
+		for i := range clusters {
+			d := haversineMeters(p.lat, p.lng, clusters[i].latSum/float64(clusters[i].count), clusters[i].lngSum/float64(clusters[i].count))
+			if d < bestDist {
+				bestDist = d
+				idx = i
+			}
+		}
+		if idx >= 0 && bestDist <= geoClusterRadiusMeters {
+			clusters[idx].latSum += p.lat
+			clusters[idx].lngSum += p.lng
+			clusters[idx].count++
+		} else {
+			clusters = append(clusters, cluster{latSum: p.lat, lngSum: p.lng, count: 1, thumbID: p.mediaID})
+		}
+	}
+
+	// 组装响应。
+	out := make([]map[string]any, 0, len(clusters))
+	for _, c := range clusters {
+		out = append(out, map[string]any{
+			"lat":            c.latSum / float64(c.count),
+			"lng":            c.lngSum / float64(c.count),
+			"count":          c.count,
+			"thumb_media_id": c.thumbID,
+			"name":           "",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"clusters":             out,
+		"total_media_with_gps": len(points),
+		"total_clusters":       len(clusters),
+	})
+}
+
+// geoClusterRadiusMeters 是 geo-clusters 聚类的合并半径（haversine 米）。
+// 500m 足以把同一场合连拍的几十张照片归为一簇，又不至于把不同景点合并。
+const geoClusterRadiusMeters = 500.0
+
+// haversineMeters 计算两个 WGS84 坐标间的球面距离（米）。
+func haversineMeters(lat1, lng1, lat2, lng2 float64) float64 {
+	const r = 6371000.0 // 地球平均半径（米）
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLng := (lng2 - lng1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
+			math.Sin(dLng/2)*math.Sin(dLng/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return r * c
 }
 
 // handleStorageForecast V9：GET /api/media/storage-forecast — 存储用量预测。

@@ -170,6 +170,13 @@ func fillDimensions(meta *gen.MediaMetadata, path string) {
 	}
 }
 
+// ExtractGPSFromFile 从 JPEG 文件的 EXIF GPS IFD 提取十进制 lat/lng。
+// 非 JPEG、无 EXIF、无 GPS 或坐标非法均返回 (0,0,false)，不报错。
+// 供 gateway geo-clusters 端点按 media_id 读取磁盘文件提取 GPS。
+func ExtractGPSFromFile(path string) (lat, lng float64, ok bool) {
+	return ExtractGPSFromExif(extractJPEGExif(path))
+}
+
 // extractJPEGExif 用纯标准库解析 JPEG 中 APP1 EXIF 段，抽取最常用的几个字段：
 // Make / Model / DateTimeOriginal / ExifImageWidth / ExifImageHeight / Orientation。
 // 解析失败或非 JPEG 返回空 map（失败细粒度：仅丢弃该条目，不影响其余）。
@@ -249,11 +256,19 @@ func parseTIFFExif(tiff []byte) map[string]string {
 	ifd0Offset := int(order.Uint32(tiff[4:8]))
 	out := make(map[string]string)
 
-	// 解析 IFD0：含 Make/Model/Orientation/DateTime 等。
+	// 解析 IFD0：含 Make/Model/Orientation/DateTime 等，返回 ExifIFD 偏移。
 	exifIFDOffset := parseIFD(tiff, ifd0Offset, order, ifd0TagTable, out)
 	// 解析 ExifIFD：含 DateTimeOriginal/ExifImageWidth/Height 等。
 	if exifIFDOffset > 0 {
 		parseIFD(tiff, exifIFDOffset, order, exifTagTable, out)
+	}
+	// 解析 GPS IFD（tag 0x8825 指针在 parseIFD 中已捕获并存入 out["__gps_ifd__"]，
+	// 由 parseGPSIFD 独立消费并清出该临时键）。
+	if v := out["__gps_ifd__"]; v != "" {
+		if off, perr := strconv.Atoi(v); perr == nil && off > 0 && off < len(tiff) {
+			parseGPSIFD(tiff, off, order, out)
+		}
+		delete(out, "__gps_ifd__")
 	}
 	// 裁剪到上限，避免异常值爆炸。
 	if len(out) > exifEntryCap {
@@ -328,6 +343,14 @@ func parseIFD(tiff []byte, ifdOffset int, order binary.ByteOrder, table []tagSpe
 		if tag == 0x8769 {
 			if valueOffset > 0 && valueOffset < len(tiff) {
 				exifIFDOffset = valueOffset
+			}
+			continue
+		}
+		// tag 0x8825（GPSIFD 指针）记录偏移供 parseTIFFExif 后续 parseGPSIFD。
+		// 以临时键暂存，由 parseTIFFExif 消费后清出，避免污染正常字段。
+		if tag == 0x8825 {
+			if valueOffset > 0 && valueOffset < len(tiff) {
+				out["__gps_ifd__"] = strconv.Itoa(valueOffset)
 			}
 			continue
 		}
@@ -425,6 +448,130 @@ func tagUnitSize(typ uint16) int {
 	default:
 		return 0
 	}
+}
+
+// parseGPSIFD 解析 GPS IFD，将 GPSLatitudeRef / GPSLatitude / GPSLongitudeRef /
+// GPSLongitude 写入 out，并把组合后的十进制度数写入 "GPSLatitude" / "GPSLongitude"
+// （覆盖中间的 DMS 纯数字串）。Media model 无持久化 lat/lng 列，故 geo-clusters
+// 端点据此组合值聚类。
+//
+// EXIF GPS 编码（参考 EXIF 2.32 spec §4.6.6）：
+//   - GPSLatitudeRef  (0x0001, ASCII): "N" / "S"
+//   - GPSLatitude     (0x0002, RATIONAL×3): 度/分/秒，3 个无符号分数
+//   - GPSLongitudeRef (0x0003, ASCII): "E" / "W"
+//   - GPSLongitude    (0x0004, RATIONAL×3): 度/分/秒
+//
+// 度分秒转十进制：dec = d + m/60 + s/3600；南/西取负。
+func parseGPSIFD(tiff []byte, ifdOffset int, order binary.ByteOrder, out map[string]string) {
+	if ifdOffset < 0 || ifdOffset+2 > len(tiff) {
+		return
+	}
+	count := int(order.Uint16(tiff[ifdOffset : ifdOffset+2]))
+	if ifdOffset+2+count*12 > len(tiff) {
+		return
+	}
+	var latRef, lngRef string
+	var latDMS, lngDMS [3]float64
+	latOK, lngOK := false, false
+	for i := 0; i < count; i++ {
+		entry := ifdOffset + 2 + i*12
+		tag := order.Uint16(tiff[entry : entry+2])
+		typ := order.Uint16(tiff[entry+2 : entry+4])
+		valueCount := int(order.Uint32(tiff[entry+4 : entry+8]))
+		valueOffset := int(order.Uint32(tiff[entry+8 : entry+12]))
+
+		switch tag {
+		case 0x0001: // GPSLatitudeRef
+			if b := inlineOrOffsetBytes(tiff, order, typ, valueCount, valueOffset, entry+8); len(b) > 0 {
+				latRef = string(bytes.TrimRight(b, "\x00"))
+			}
+		case 0x0003: // GPSLongitudeRef
+			if b := inlineOrOffsetBytes(tiff, order, typ, valueCount, valueOffset, entry+8); len(b) > 0 {
+				lngRef = string(bytes.TrimRight(b, "\x00"))
+			}
+		case 0x0002: // GPSLatitude (RATIONAL×3)
+			if rs := readRationals(tiff, order, typ, valueCount, valueOffset, entry+8, 3); len(rs) == 3 {
+				latDMS[0], latDMS[1], latDMS[2] = rs[0], rs[1], rs[2]
+				latOK = true
+			}
+		case 0x0004: // GPSLongitude (RATIONAL×3)
+			if rs := readRationals(tiff, order, typ, valueCount, valueOffset, entry+8, 3); len(rs) == 3 {
+				lngDMS[0], lngDMS[1], lngDMS[2] = rs[0], rs[1], rs[2]
+				lngOK = true
+			}
+		}
+	}
+	if latOK {
+		out["GPSLatitudeRef"] = latRef
+		dec := latDMS[0] + latDMS[1]/60.0 + latDMS[2]/3600.0
+		if strings.EqualFold(latRef, "S") {
+			dec = -dec
+		}
+		out["GPSLatitude"] = strconv.FormatFloat(dec, 'f', -1, 64)
+	}
+	if lngOK {
+		out["GPSLongitudeRef"] = lngRef
+		dec := lngDMS[0] + lngDMS[1]/60.0 + lngDMS[2]/3600.0
+		if strings.EqualFold(lngRef, "W") {
+			dec = -dec
+		}
+		out["GPSLongitude"] = strconv.FormatFloat(dec, 'f', -1, 64)
+	}
+}
+
+// readRationals 从 EXIF entry 读取最多 max 个 RATIONAL（type=5/10），每个 8 字节
+// （4 字节分子 + 4 字节分母，big/little endian by order）。返回 float64 切片。
+// value<=4 字节内联路径不适用于 RATIONAL（8 字节），故始终走 offset 分支。
+func readRationals(tiff []byte, order binary.ByteOrder, typ uint16, count, value, dataOffset, max int) []float64 {
+	if typ != 5 && typ != 10 {
+		return nil
+	}
+	n := count
+	if n > max {
+		n = max
+	}
+	// RATIONAL 8 字节，无法内联（>4），value 为 TIFF 偏移。
+	if value <= 0 || value+n*8 > len(tiff) {
+		return nil
+	}
+	out := make([]float64, 0, n)
+	for i := 0; i < n; i++ {
+		num := order.Uint32(tiff[value+i*8 : value+i*8+4])
+		den := order.Uint32(tiff[value+i*8+4 : value+i*8+8])
+		if den == 0 {
+			out = append(out, 0)
+			continue
+		}
+		out = append(out, float64(num)/float64(den))
+	}
+	return out
+}
+
+// ExtractGPSFromExif 从 EXIF map（parseTIFFExif 输出）读取组合后的十进制 lat/lng。
+// 任一缺失或解析失败返回 (0,0,false)。供 geo-clusters 端点复用已解析的 EXIF。
+func ExtractGPSFromExif(exif map[string]string) (lat, lng float64, ok bool) {
+	if exif == nil {
+		return 0, 0, false
+	}
+	ls, has1 := exif["GPSLatitude"]
+	ln, has2 := exif["GPSLongitude"]
+	if !has1 || !has2 {
+		return 0, 0, false
+	}
+	lat, err1 := strconv.ParseFloat(ls, 64)
+	lng, err2 := strconv.ParseFloat(ln, 64)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	// 合理性检查：坐标在有效范围内。
+	if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+		return 0, 0, false
+	}
+	if lat == 0 && lng == 0 {
+		// (0,0) 几乎都是未设置/错误 GPS，忽略避免污染聚类（如部分设备默认值）。
+		return 0, 0, false
+	}
+	return lat, lng, true
 }
 
 var thumbnailLongEdge = map[gen.ThumbnailSize]int{
