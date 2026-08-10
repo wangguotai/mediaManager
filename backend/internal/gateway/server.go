@@ -75,9 +75,14 @@ type Server struct {
 	// 为 nil 时（未配置认证的纯测试 server）跳过限速，保持既有测试兼容。
 	loginLimiter *loginRateLimiter
 
+	// syncHub 是 PRD-v10 §4.1 WebSocket 实时同步推送 hub（user_id → 在线 WS 连接）。
+	// 在 NewServer 中初始化。handleMediaUpload/Delete/Restore 成功后调 notifyMediaChange
+	// 向该用户全在线设备推送 media_changed 帧，客户端收到后调 /api/sync/changes 续拉。
+	syncHub *SyncHub
+
 	// rateLimiter 是公开分享访问端点（GET /api/share/{token} 及其 /stream 子路径）
-	// 的 IP 级滑动窗口限速器，防暴力枚举短链。每 IP 60s 内最多 shareRateMax 次，
-	// 超限返回 429。在 NewServer 中始终创建（公开端点不限部署形态）。
+	// 的 IP 级滑动窗口限速器，防暴力枚举短链。每 IP 60s 内最多 shareRateMax 次，超限
+	// 返回 429。在 NewServer 中始终创建（公开端点不限部署形态）。
 	rateLimiter *RateLimiter
 }
 
@@ -106,6 +111,7 @@ func NewServer(addr string, cfg OpenClawConfig, mediaSvc gen.MediaServiceServer,
 		// 保证 accessLog 与 /metrics 在任何部署形态下都能正常工作。
 		slogLevel: slog.LevelInfo,
 		metrics:   newMetricsRegistry(),
+		syncHub:   NewSyncHub(),
 	}
 	initLogger(s.slogLevel)
 	// 登录暴力限速器：authSvc 配置时启用，后台 goroutine 周期清理过期条目。
@@ -804,6 +810,10 @@ func (s *Server) registerRoutes() {
 	// 多设备同步：增量 changes（含墓碑）、用户存储用量。
 	s.mux.HandleFunc("/api/sync/changes", s.handleSyncChanges)
 	s.mux.HandleFunc("/api/sync/usage", s.handleSyncUsage)
+	// PRD-v10 §4.1 WebSocket 实时同步推送通道。浏览器原生 WebSocket 无法带自定义
+	// Authorization 头，故 token 经 query ?token= 传递，由 handleSyncWS 内手动校验 JWT。
+	// authMiddleware 按路径豁免 /api/sync/ws（见 authMiddleware 注释），公开握手后即升级。
+	s.mux.HandleFunc("/api/sync/ws", s.handleSyncWS)
 
 	// 设备注册与列表：记录接入的客户端，供多端同步审计。
 	s.mux.HandleFunc("/api/device/register", s.handleDeviceRegister)
@@ -934,7 +944,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// /api/auth/refresh 用 body 中的 refresh token 鉴权（非 Bearer access），故也需豁免。
 		// /metrics 与 /healthz 同为无认证端点，供 Prometheus 与健康探针抓取。
 		switch r.URL.Path {
-		case "/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/healthz", "/metrics", "/api/promotions/challenge":
+		case "/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/healthz", "/metrics", "/api/promotions/challenge", "/api/sync/ws":
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1476,6 +1486,9 @@ func (s *Server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.AddAuditLog(r.Context(), uid, "delete", mid, "soft delete")
 		}
 	}
+	// PRD-v10 §4.1：软删成功后向该用户在线设备推送 media_changed(delete)，
+	// 其他端收到后调 /api/sync/changes 续拉墓碑。best-effort，不阻断响应。
+	s.notifyMediaChange(uid, syncEventDelete)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1588,6 +1601,8 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 				_ = s.reviveDeletedMedia(r.Context(), existing.ID)
 				resp["status"] = "deduped_restored"
 			}
+			// PRD-v10 §4.1：秒传/复活也算媒体变更，推送 media_changed(upload)。
+			s.notifyMediaChange(uid, syncEventUpload)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -1660,6 +1675,9 @@ func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 	if s.metrics != nil {
 		s.metrics.RecordUploadBytes(written)
 	}
+	// PRD-v10 §4.1：新上传成功后向该用户在线设备推送 media_changed(upload)，
+	// 其他端收到后调 /api/sync/changes 续拉新内容。best-effort，不阻断响应。
+	s.notifyMediaChange(uid, syncEventUpload)
 	writeJSON(w, http.StatusOK, resp)
 }
 

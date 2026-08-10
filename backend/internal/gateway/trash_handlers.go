@@ -136,6 +136,11 @@ func (s *Server) handleMediaRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		result.Succeeded = append(result.Succeeded, id)
 	}
+	// PRD-v10 §4.1：恢复成功后向该用户在线设备推送 media_changed(restore)，
+	// 其他端收到后调 /api/sync/changes 续拉复活记录。best-effort，不阻断响应。
+	if len(result.Succeeded) > 0 {
+		s.notifyMediaChange(uid, syncEventRestore)
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

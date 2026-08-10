@@ -66,6 +66,26 @@ private fun backendBaseUrl(): String {
 }
 
 /**
+ * PRD-v10 §4.1：返回 WebSocket 实时同步端点 URL（ws/wss）。
+ *
+ * 把当前 [backendBaseUrl] 的 http→ws / https→wss 改写后拼上 /api/sync/ws，
+ * 并把 [token] 作为 query ?token= 透传——浏览器/原生 WebSocket 无法带自定义
+ * Authorization 头，故后端 handleSyncWS 支持从 query 取 token 校验 JWT。
+ *
+ * token 为空时仍返回 URL（不含 query），由调用方保证仅登录态连接。供
+ * [com.wgt.media.SyncWebSocket] 握手用。
+ */
+fun syncWsUrl(token: String): String {
+    val base = backendBaseUrl()
+    val wsScheme = when {
+        base.startsWith("https://") -> "wss://" + base.removePrefix("https://")
+        base.startsWith("http://") -> "ws://" + base.removePrefix("http://")
+        else -> "ws://$base"
+    }
+    return if (token.isNotEmpty()) "$wsScheme/api/sync/ws?token=$token" else "$wsScheme/api/sync/ws"
+}
+
+/**
  * 统一 HTTP 客户端。
  *
  * 装三样关键能力：

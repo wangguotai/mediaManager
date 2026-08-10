@@ -21,9 +21,11 @@ import media.MediaType
 import com.wgt.feature.gallery.gallery
 import com.wgt.feature.gallery.requestMediaDeletion
 import com.wgt.base.network.platform
+import com.wgt.feature.media.syncWsUrl
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.concurrent.Volatile
 import kotlin.time.Clock
 
 private const val TAG = "MediaViewModel"
@@ -92,6 +94,12 @@ class MediaViewModel {
     private val galleryFeature: com.wgt.feature.gallery.GalleryFeature by lazy {
         manager.feature.gallery
     }
+
+    // PRD-v10 §4.1：WebSocket 实时同步通道。登录态就绪后启动，收到 media_changed
+    // 帧即调 loadCloudChanges 续拉增量；登出/会话结束时 disconnect。@Volatile 保证
+    // 跨线程可见（SyncWebSocket 回调在平台网络线程，onSessionEnded 可能在主线程）。
+    @Volatile
+    private var syncWebSocket: SyncWebSocket? = null
 
     // 媒体列表状态
     var mediaList by mutableStateOf<List<MediaMetadata>>(emptyList())
@@ -582,9 +590,11 @@ class MediaViewModel {
     /**
      * 登录态就绪后触发：App 启动 token 注入后、登录成功后、401 清会话后重新登录后调用。
      *
-     * 触发两件事（幂等，重复调用无副作用）：
+     * 触发三件事（幂等，重复调用无副作用）：
      * 1. [loadCloudChanges] —— App 启动增量拉取，用本地 [syncCursor] 续拉云端变更。
      * 2. 若 [SettingsState.autoBackupEnabled] —— 注册设备（按需）并启动自动备份。
+     * 3. [startSyncWebSocket] —— 启动 PRD-v10 §4.1 WebSocket 实时同步通道，收到
+     *    media_changed 帧即调 [loadCloudChanges] 续拉增量，取代轮询。
      *
      * 不在 [init] 直接发请求：token 由 App 的 LaunchedEffect 异步注入 MediaService，
      * 启动顺序上无法保证 init 时 token 已就位。
@@ -594,9 +604,46 @@ class MediaViewModel {
         loadCloudChanges()
         // 同步用量供设置页/已上传页展示，失败静默。
         loadSyncUsage()
+        // PRD-v10 §4.1：启动 WebSocket 实时同步（幂等，重复调用会先 disconnect 旧连接）。
+        startSyncWebSocket()
         if (SettingsState.autoBackupEnabled) {
             startAutoBackup()
         }
+    }
+
+    /**
+     * PRD-v10 §4.1 —— 启动 WebSocket 实时同步通道（幂等）。
+     *
+     * 用当前 [AuthState.token] 构造 [SyncWebSocket]，收到 media_changed 帧时切回
+     * 主线程调 [loadCloudChanges] 续拉增量。重复调用先 disconnect 旧连接，确保不叠加。
+     * token 为空（未登录）时不启动，日志告警。
+     */
+    private fun startSyncWebSocket() {
+        val token = AuthState.token
+        if (token.isEmpty()) {
+            logger.warning(TAG, "startSyncWebSocket skipped: no token")
+            return
+        }
+        // 幂等：先停旧连接（token 可能已刷新，需重建 URL）。
+        syncWebSocket?.disconnect()
+        val ws = SyncWebSocket(token) { event ->
+            logger.info(TAG, "sync ws media_changed event=$event")
+            // 回调在平台网络线程；loadCloudChanges 自身切到 viewModelScope（主线程），
+            // 这里直接调即可，reentrant-safe（isSyncing 守卫）。
+            loadCloudChanges()
+        }
+        syncWebSocket = ws
+        ws.connect()
+    }
+
+    /**
+     * 会话结束（登出 / 401 清会话）时调：断开 WebSocket 与停止后台同步。
+     * 幂等。App 在 [AuthState.clearSession] 后调用，确保 WS 不再持有旧 token。
+     */
+    fun onSessionEnded() {
+        syncWebSocket?.disconnect()
+        syncWebSocket = null
+        stopAutoBackup()
     }
 
     /**
