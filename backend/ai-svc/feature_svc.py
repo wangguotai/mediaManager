@@ -173,8 +173,14 @@ _ZH_EN_PROMPT = {
 }
 
 def _clip_zero_shot_tags(img: Image.Image, top_k=6):
-    """对图算 CLIP zero-shot 分类。返回 dict: scene/subject/clothing/activity/mood 各 top-1~2。
-    CLIP 不可用时返回空 dict。"""
+    """对图算 CLIP zero-shot 分类。返回 dict: scene/subject/clothing/activity/mood 各 top-1。
+    CLIP 不可用时返回空 dict。
+
+    阈值策略（v2，避免色块被乱打标签）：
+      - 采纳阈值 0.25（v1 的 0.20 太松，纯色块会被打"天空/合影"等噪声标签）
+      - 每类只取 top-1（最确定的标签，避免并列弱标签污染 caption）
+      - 仅当 top-1 高于阈值才采纳；top-2 仅在分差≥0.05 且都>0.30 时作补充
+    """
     if not _CLIP_STATE["ready"]:
         return {}
     import torch
@@ -191,13 +197,18 @@ def _clip_zero_shot_tags(img: Image.Image, top_k=6):
             txt_feat = _CLIP_STATE["model"].encode_text(toks)
             txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
             sims = (img_feat @ txt_feat.T)[0].cpu().numpy()
-        # 取该类 top-2，相似度 >0.2 才采纳（CLIP 阈值经验值）
-        idx = sims.argsort()[::-1][:2]
+        idx = sims.argsort()[::-1]
         picked = []
-        for i in idx:
-            if sims[i] > 0.20:
-                picked.append((tags[i], float(sims[i])))
-                all_hits.append((tags[i], float(sims[i]), category))
+        top1 = idx[0]
+        if sims[top1] > 0.25:
+            picked.append((tags[top1], float(sims[top1])))
+            all_hits.append((tags[top1], float(sims[top1]), category))
+            # top-2 仅在与 top-1 分差≥0.05 且都>0.30 时作补充（强信号并列才采纳）
+            if len(idx) > 1:
+                top2 = idx[1]
+                if sims[top2] > 0.30 and (sims[top1] - sims[top2]) >= 0.05:
+                    picked.append((tags[top2], float(sims[top2])))
+                    all_hits.append((tags[top2], float(sims[top2]), category))
         if picked:
             result[category] = picked
     # objects = 跨类合并 top-k
