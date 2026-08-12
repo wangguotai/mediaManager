@@ -621,13 +621,13 @@ func (s *Server) handleAIIndex(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
 		return
 	}
-	limit := 10
+	limit := 30
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := parseIntSafe(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
-	// 同步索引指定用户
+	// 同步索引指定用户。J：4 并发池（与后台 worker 一致），避免大库同步索引串行过慢。
 	a := s.NewAIIndexer()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
@@ -636,15 +636,29 @@ func (s *Server) handleAIIndex(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	processed := 0
-	for _, mid := range ids {
-		if err := a.indexOne(ctx, uid, mid); err != nil {
-			continue
-		}
-		processed++
+	var processed atomic.Int32
+	const concurrency = 4
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for mid := range jobs {
+				if err := a.indexOne(ctx, uid, mid); err != nil {
+					continue
+				}
+				processed.Add(1)
+			}
+		}()
 	}
+	for _, mid := range ids {
+		jobs <- mid
+	}
+	close(jobs)
+	wg.Wait()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"processed":  processed,
+		"processed":  int(processed.Load()),
 		"candidates": len(ids),
 		"remaining":  0, // 下一轮再扫
 	})
