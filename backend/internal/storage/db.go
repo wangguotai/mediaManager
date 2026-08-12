@@ -145,6 +145,69 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user    ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+
+-- ============ PRD-v12：AI 视觉检索与自动注解 ============
+-- 设计见 docs/PRD-v12.md。向量存 BLOB（序列化 []float32），检索在 Go 内存做暴力余弦，
+-- 避免引入 sqlite-vss（需 CGO，与现状 modernc 纯 Go driver 冲突）。
+
+-- V12§3.1 媒体注解：AI 生成的中文描述/场景/物体/色调/情绪 + 用户手动备注。
+--   - caption     : 自然语言描述（"一个穿汉服的女孩站在树林里"）
+--   - objects     : JSON 数组字符串 ["汉服","猫"]
+--   - model_ver   : 生成模型版本，模型升级后可据此失效重算
+--   - manual_note : 用户编辑的注解，检索时与 caption 合并参与语义匹配
+CREATE TABLE IF NOT EXISTS media_annotations (
+    media_id    TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    caption     TEXT NOT NULL DEFAULT '',
+    scene       TEXT NOT NULL DEFAULT '',
+    objects     TEXT NOT NULL DEFAULT '[]',
+    colors      TEXT NOT NULL DEFAULT '[]',
+    mood        TEXT NOT NULL DEFAULT '',
+    manual_note TEXT NOT NULL DEFAULT '',
+    model_ver   TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ann_user  ON media_annotations(user_id);
+CREATE INDEX IF NOT EXISTS idx_ann_scene ON media_annotations(user_id, scene);
+
+-- V12§3.2 图像向量（CLIP）。vector 为 binary.Marshal 的 []float32。
+CREATE TABLE IF NOT EXISTS media_embeddings (
+    media_id    TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    vector      BLOB NOT NULL,
+    dim         INTEGER NOT NULL,
+    model_ver   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_embed_user ON media_embeddings(user_id);
+
+-- V12§3.3 人物聚类（长相记忆）。不识别人名，按人脸向量"长得像"分组，用户手动命名。
+CREATE TABLE IF NOT EXISTS person_clusters (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    name            TEXT NOT NULL DEFAULT '',
+    avatar_media_id TEXT,
+    face_count      INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pcluster_user ON person_clusters(user_id);
+
+-- 媒体中出现的人脸：归属某 cluster，带边界框与向量。
+CREATE TABLE IF NOT EXISTS media_persons (
+    id           TEXT PRIMARY KEY,
+    media_id     TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    cluster_id   TEXT NOT NULL,
+    bbox         TEXT NOT NULL DEFAULT '',
+    face_vector  BLOB,
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_persons_cluster ON media_persons(user_id, cluster_id);
+CREATE INDEX IF NOT EXISTS idx_persons_media   ON media_persons(media_id);
 `
 
 // columnAdditions 列出在初始 schema 之外、为支持增量同步而追加的 media 列。

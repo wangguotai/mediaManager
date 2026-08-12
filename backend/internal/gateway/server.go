@@ -84,6 +84,10 @@ type Server struct {
 	// 的 IP 级滑动窗口限速器，防暴力枚举短链。每 IP 60s 内最多 shareRateMax 次，超限
 	// 返回 429。在 NewServer 中始终创建（公开端点不限部署形态）。
 	rateLimiter *RateLimiter
+
+	// aiIndexer 是 PRD-v12 后台索引 worker（向量化+caption）。nil 表示未启动
+	// （store 未注入时）。30s 一轮扫描未索引 media，串行调特征服务。
+	aiIndexer *AIIndexer
 }
 
 // NewServer wires routes for the given addr. It does not start listening.
@@ -867,6 +871,14 @@ func (s *Server) registerRoutes() {
 
 	// Health
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+
+	// PRD-v12：AI 视觉检索与自动注解。注册 /api/ai/* 与 /api/persons/* 路由；
+	// 若 store 就绪则启动后台索引 worker（30s 一轮扫描未索引 media）。
+	s.RegisterAIRoutes()
+	if s.store != nil {
+		s.aiIndexer = s.NewAIIndexer()
+		s.aiIndexer.Start(30 * time.Second)
+	}
 }
 
 // OpenClawBaseURL exposes the configured upstream URL for log/startup lines.

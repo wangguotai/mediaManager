@@ -852,6 +852,12 @@ func (s *MediaService) ThumbCacheStats() ThumbCacheStats {
 // resolveMediaPath 按 user_id + mediaID 查找源文件的磁盘路径：先在该用户的 uploads
 // 目录按 "mediaID.*" 匹配，未命中再回退到全局共享的网盘图片源根目录（data/cloud-images）。
 // 网盘图片的 id 是去扩展名的文件名（如 test-cloud-image），与 uploads 的 uuid id
+// ResolveMediaPath 是 resolveMediaPath 的导出版，供 AI 索引管线（PRD-v12）
+// 复用同一套路径解析：先查用户 uploads 目录，再回退 cloud-images。返回空串表示未找到。
+func (s *MediaService) ResolveMediaPath(uid, mediaID string) string {
+	return s.resolveMediaPath(uid, mediaID)
+}
+
 // 同样适用 "id+.*" glob。uid 非法或 mediaID 非法时返回空串（视为未找到，不回退全局，
 // 以免跨用户串读）。返回空串表示未找到。
 func (s *MediaService) resolveMediaPath(uid, mediaID string) string {

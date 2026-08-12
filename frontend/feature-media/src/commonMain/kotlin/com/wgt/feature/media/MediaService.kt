@@ -912,6 +912,186 @@ object MediaService {
     // ---- 全文搜索 ----
 
     /**
+     * AI 语义检索结果（PRD-v12 `/api/ai/search` JSON 对齐）。
+     *
+     * 后端返回 `{ "results": [{ "media": {...}, "score": 0.xx, "caption": "", "scene": "" }],
+     * "total": N, "query": "...", "parsed_query": {...} }`。media 字段口径与
+     * [getMediaSmartSearch] 一致（直接序列化 `storage.Media`），复用 [parseMediaItem]。
+     *
+     * @param results 命中媒体（含相似度分数与 AI 注解）
+     * @param score 语义相似度（0~1，越高越相关）
+     * @param caption AI 生成的中文注解（可能为空）
+     * @param scene 主场景标签
+     */
+    data class AISearchResult(
+        val results: List<AIMediaHit>,
+        val total: Int,
+        val query: String
+    )
+    data class AIMediaHit(
+        val media: MediaMetadata,
+        val score: Float,
+        val caption: String,
+        val scene: String
+    )
+
+    /**
+     * AI 语义检索 —— GET /api/ai/search?q=穿汉服的照片。
+     *
+     * 与 [getMediaSmartSearch] 区别：本端点用 CLIP 图文向量做余弦检索，能理解
+     * "穿汉服"/"在海边大笑"等纯视觉语义，不依赖文件名/标签。需后端先索引（/api/ai/index）。
+     *
+     * @param query 自然语言（视觉语义）查询
+     * @param limit 返回上限（默认 50）
+     */
+    suspend fun getAISearch(query: String, limit: Int = 50): AISearchResult? {
+        val q = query.trim()
+        if (q.isEmpty()) return AISearchResult(emptyList(), 0, "")
+        return try {
+            val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/ai/search") {
+                parameter("q", q)
+                parameter("limit", limit)
+            }
+            if (response.status == HttpStatusCode.OK) {
+                val body: String = response.body()
+                val obj = Json.parseToJsonElement(body).jsonObject
+                val list = obj["results"]?.jsonArray?.map { item ->
+                    val o = item.jsonObject
+                    AIMediaHit(
+                        media = parseMediaItem(o["media"]!!.jsonObject),
+                        score = o["score"]?.jsonPrimitive?.floatOrNull ?: 0f,
+                        caption = o["caption"]?.jsonPrimitive?.contentOrNull ?: "",
+                        scene = o["scene"]?.jsonPrimitive?.contentOrNull ?: ""
+                    )
+                } ?: emptyList()
+                val total = obj["total"]?.jsonPrimitive?.intOrNull ?: list.size
+                logger.info("MediaService", "getAISearch q=$q hits=${list.size}")
+                AISearchResult(list, total, q)
+            } else null
+        } catch (e: Exception) {
+            logger.error("MediaService", "getAISearch FAILED q=$q: ${e.message}")
+            null
+        }
+    }
+
+    /** AI 索引进度（/api/ai/status）。null=请求失败。 */
+    data class AIIndexProgress(val total: Int, val indexed: Int, val pending: Int,
+                               val annotated: Int, val persons: Int, val featureSvcReachable: Boolean)
+    suspend fun getAIStatus(): AIIndexProgress? = try {
+        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/ai/status")
+        if (response.status == HttpStatusCode.OK) {
+            val obj = Json.parseToJsonElement(response.body()).jsonObject
+            val p = obj["progress"]?.jsonObject
+            val svc = obj["feature_svc"]?.jsonObject
+            AIIndexProgress(
+                total = p?.get("Total")?.jsonPrimitive?.intOrNull ?: 0,
+                indexed = p?.get("Indexed")?.jsonPrimitive?.intOrNull ?: 0,
+                pending = p?.get("Pending")?.jsonPrimitive?.intOrNull ?: 0,
+                annotated = p?.get("Annotated")?.jsonPrimitive?.intOrNull ?: 0,
+                persons = p?.get("Persons")?.jsonPrimitive?.intOrNull ?: 0,
+                featureSvcReachable = svc?.get("reachable")?.jsonPrimitive?.booleanOrNull ?: false
+            )
+        } else null
+    } catch (e: Exception) { logger.error("MediaService", "getAIStatus: ${e.message}"); null }
+
+    /** 触发一轮同步索引（POST /api/ai/index?limit=N）。返回处理数。 */
+    suspend fun triggerAIIndex(limit: Int = 10): Int = try {
+        val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/ai/index") {
+            parameter("limit", limit)
+        }
+        if (response.status == HttpStatusCode.OK) {
+            Json.parseToJsonElement(response.body()).jsonObject["processed"]?.jsonPrimitive?.intOrNull ?: 0
+        } else 0
+    } catch (e: Exception) { logger.error("MediaService", "triggerAIIndex: ${e.message}"); 0 }
+
+    /** 自动相册（按场景聚合，/api/ai/albums）。 */
+    data class AutoAlbum(val scene: String, val count: Int, val sampleId: String)
+    suspend fun getAutoAlbums(): List<AutoAlbum> = try {
+        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/ai/albums")
+        if (response.status == HttpStatusCode.OK) {
+            val obj = Json.parseToJsonElement(response.body()).jsonObject
+            obj["albums"]?.jsonArray?.map {
+                val o = it.jsonObject
+                AutoAlbum(
+                    scene = o["Scene"]?.jsonPrimitive?.contentOrNull ?: "",
+                    count = o["Count"]?.jsonPrimitive?.intOrNull ?: 0,
+                    sampleId = o["SampleID"]?.jsonPrimitive?.contentOrNull ?: ""
+                )
+            } ?: emptyList()
+        } else emptyList()
+    } catch (e: Exception) { emptyList() }
+
+    /** 单张注解（GET /api/ai/annotation/{id}）。 */
+    data class Annotation(val caption: String, val scene: String, val objects: List<String>,
+                          val mood: String, val manualNote: String)
+    suspend fun getAnnotation(mediaId: String): Annotation? = try {
+        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/ai/annotation/$mediaId")
+        if (response.status == HttpStatusCode.OK) {
+            val obj = Json.parseToJsonElement(response.body()).jsonObject["annotation"]?.jsonObject ?: return null
+            Annotation(
+                caption = obj["Caption"]?.jsonPrimitive?.contentOrNull ?: "",
+                scene = obj["Scene"]?.jsonPrimitive?.contentOrNull ?: "",
+                objects = obj["Objects"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+                mood = obj["Mood"]?.jsonPrimitive?.contentOrNull ?: "",
+                manualNote = obj["ManualNote"]?.jsonPrimitive?.contentOrNull ?: ""
+            )
+        } else null
+    } catch (e: Exception) { null }
+
+    /** 编辑注解（PUT /api/ai/annotation/{id}）。 */
+    suspend fun updateAnnotation(mediaId: String, manualNote: String): Boolean = try {
+        val response: HttpResponse = jsonClient.put("${backendBaseUrl()}/api/ai/annotation/$mediaId") {
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("manual_note", manualNote) })
+        }
+        response.status == HttpStatusCode.OK
+    } catch (e: Exception) { false }
+
+    /** 人物聚类（/api/persons）。 */
+    data class PersonCluster(val id: String, val name: String, val avatarMediaId: String, val faceCount: Int)
+    suspend fun getPersons(): List<PersonCluster> = try {
+        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/persons")
+        if (response.status == HttpStatusCode.OK) {
+            val obj = Json.parseToJsonElement(response.body()).jsonObject
+            obj["clusters"]?.jsonArray?.map {
+                val o = it.jsonObject
+                PersonCluster(
+                    id = o["ID"]?.jsonPrimitive?.contentOrNull ?: "",
+                    name = o["Name"]?.jsonPrimitive?.contentOrNull ?: "",
+                    avatarMediaId = o["AvatarMediaID"]?.jsonPrimitive?.contentOrNull ?: "",
+                    faceCount = o["FaceCount"]?.jsonPrimitive?.intOrNull ?: 0
+                )
+            } ?: emptyList()
+        } else emptyList()
+    } catch (e: Exception) { emptyList() }
+
+    /** 重算人物聚类（POST /api/persons/recluster）。返回簇数。 */
+    suspend fun reclusterPersons(): Int = try {
+        val response: HttpResponse = jsonClient.post("${backendBaseUrl()}/api/persons/recluster")
+        if (response.status == HttpStatusCode.OK)
+            Json.parseToJsonElement(response.body()).jsonObject["clusters"]?.jsonPrimitive?.intOrNull ?: 0
+        else 0
+    } catch (e: Exception) { 0 }
+
+    /** 给人物聚类命名（PUT /api/persons/{id}）。 */
+    suspend fun renamePerson(clusterId: String, name: String): Boolean = try {
+        val response: HttpResponse = jsonClient.put("${backendBaseUrl()}/api/persons/$clusterId") {
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("name", name) })
+        }
+        response.status == HttpStatusCode.OK
+    } catch (e: Exception) { false }
+
+    /** 某 cluster 的全部媒体（GET /api/persons/{id}/media）。 */
+    suspend fun getPersonMedia(clusterId: String): List<MediaMetadata> = try {
+        val response: HttpResponse = jsonClient.get("${backendBaseUrl()}/api/persons/$clusterId/media")
+        if (response.status == HttpStatusCode.OK) {
+            val obj = Json.parseToJsonElement(response.body()).jsonObject
+            obj["media"]?.jsonArray?.map { parseMediaItem(it.jsonObject) } ?: emptyList()
+        } else emptyList()
+    } catch (e: Exception) { emptyList() }
+
+    /**
      * 全文搜索结果（与后端 `media-full-text-search` JSON 对齐）。
      *
      * 后端返回 `{ "results": [...], "total": N, "query_info": {...} }`，

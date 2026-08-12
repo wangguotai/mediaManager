@@ -178,6 +178,15 @@ fun MediaListScreen(
     // 复用 advancedSearchScope。仅结构性挂载，不改既有本地搜索过滤逻辑。
     var showFullTextSearch by remember { mutableStateOf(false) }
 
+    // PRD-v12：AI 语义搜索弹窗。与 SmartSearch 平级，调 MediaService.getAISearch
+    // （CLIP 图文向量检索，能理解"穿汉服的照片"等视觉语义，不依赖文件名/标签）。
+    // 命中结果同样经 viewModel.applyAdvancedSearchResults 灌入列表。
+    var showAiSearch by remember { mutableStateOf(false) }
+
+    // PRD-v12：AI 智能管理中心（全屏覆盖层）。从"我的"Tab 的 AI 卡片入口打开，
+    // 展示索引状态/自动相册/人物聚类。"我的"Tab 的 MyTabContent 通过 onOpenAiCenter 触发。
+    var showAiCenter by remember { mutableStateOf(false) }
+
     // ── 离线模式状态（PRD-v8 §1.5）──
     // 每 5 秒轮询 OfflineCacheManager.isOfflineMode()，驱动离线 banner 显隐。
     // 用户可手动关 banner（offlineBannerDismissed），但网络恢复后 dismissed 标记自动复位，
@@ -717,6 +726,62 @@ fun MediaListScreen(
         )
     }
 
+    // PRD-v12：AI 语义搜索弹窗。调 MediaService.getAISearch（CLIP 视觉语义检索），
+    // 结果灌入 viewModel.applyAdvancedSearchResults。total=0 时 Snackbar 提示。
+    // 与 SmartSearch 区别：AI 搜索按图像视觉特征匹配，能找"穿汉服"等无标签场景。
+    if (showAiSearch) {
+        AISearchDialog(
+            onDismiss = { showAiSearch = false },
+            onResults = { list, total ->
+                showAiSearch = false
+                viewModel.applyAdvancedSearchResults(list)
+                if (total == 0) {
+                    advancedSearchScope.launch {
+                        snackbarHostState.showSnackbar("未找到匹配的照片，试试更具体的描述，或先索引更多照片")
+                    }
+                }
+            }
+        )
+    }
+
+    // PRD-v12：AI 智能管理中心（全屏覆盖）。AICenterScreen 展示索引状态/自动相册/
+    // 人物聚类。打开相册/人物时用 AI 搜索该场景/人物名灌入列表并关闭中心。
+    if (showAiCenter) {
+        androidx.compose.material3.Surface(
+            modifier = Modifier.fillMaxSize().statusBarsPadding()
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { showAiCenter = false }) { Text("‹ 返回") }
+                    Spacer(Modifier.weight(1f))
+                    Text("AI 智能管理", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.width(48.dp))
+                }
+                AICenterScreen(
+                    onOpenAlbum = { scene ->
+                        showAiCenter = false
+                        // 用 AI 搜索该场景名，结果灌入列表
+                        advancedSearchScope.launch {
+                            val res = MediaService.getAISearch(scene, 100)
+                            viewModel.applyAdvancedSearchResults(res?.results?.map { it.media } ?: emptyList())
+                        }
+                    },
+                    onOpenPerson = { clusterId ->
+                        showAiCenter = false
+                        // 拉该人物 cluster 的全部媒体灌入列表
+                        advancedSearchScope.launch {
+                            viewModel.applyAdvancedSearchResults(MediaService.getPersonMedia(clusterId))
+                        }
+                    }
+                )
+            }
+        }
+    }
+
     // 全文搜索对话框：用户输入关键词（可选位置 lat,lon + 半径 + 类型），FullTextSearchDialog
     // 内部调 MediaService.getMediaFullTextSearch，命中结果经 onResults 灌入
     // viewModel.applyAdvancedSearchResults 替换列表；位置筛选不可用时 Snackbar 提示。
@@ -898,7 +963,8 @@ fun MediaListScreen(
                     onNavigateToAlbums = onNavigateToAlbums,
                     onNavigateToFileManagement = onNavigateToFileManagement,
                     onNavigateToInsights = onNavigateToInsights,
-                    offlineQueueSize = offlineQueueSize
+                    offlineQueueSize = offlineQueueSize,
+                    onOpenAiCenter = { showAiCenter = true }
                 )
                 return@Box
             }
@@ -973,6 +1039,19 @@ fun MediaListScreen(
                         selected = viewModel.filterType,
                         onSelect = { type -> viewModel.applyFilterType(type) }
                     )
+
+                    // PRD-v12：AI 图像搜索入口。CLIP 视觉语义检索，能理解"穿汉服的照片"等
+                    // 无标签场景。与上方本地搜索/智能搜索并列，作为最高语义层入口。
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        AssistChip(
+                            onClick = { showAiSearch = true },
+                            leadingIcon = { Text("🧠", fontSize = 16.sp) },
+                            label = { Text("AI 图像搜索") }
+                        )
+                    }
 
                     // —— 服务端收藏筛选切换（对接 MediaService.getFavorites()）——
                     // 激活时列表只展示后端 GET /api/media/favorites 返回的收藏媒体，
@@ -1496,7 +1575,9 @@ private fun MyTabContent(
     onNavigateToInsights: () -> Unit = {},
     offlineQueueSize: Int = 0,
     // 「⏳ N 项待上传」指示器点击 → 打开离线队列冲突解决对话框（PRD-v8 §1.5）。
-    onShowOfflineQueue: () -> Unit = {}
+    onShowOfflineQueue: () -> Unit = {},
+    // PRD-v12：打开 AI 智能管理中心（索引/自动相册/人物聚类）
+    onOpenAiCenter: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     Column(
@@ -1548,7 +1629,34 @@ private fun MyTabContent(
             }
         }
 
-        // ── 离线上传队列指示器（PRD-v8 §1.5）──
+        // PRD-v12：AI 智能管理入口卡片。点击进入 AI 中心（索引状态/自动相册/人物聚类）。
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable { onOpenAiCenter() },
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("🧠", fontSize = 28.sp)
+                Column {
+                    Text(
+                        "AI 智能管理",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Text(
+                        "自动分类相册 · 人物聚类 · 语义搜索",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f)
+                    )
+                }
+            }
+        }
         // 待传项数 > 0 时显示提示行，告知用户弱网期间积压的上传任务会在网络恢复后自动重传。
         // 点击打开 OfflineQueueDialog，列出待传项并支持逐项移除 / 全部重试 / 关闭
         // （冲突解决 UI，PRD-v8 §1.5 离线模式完整化）。
