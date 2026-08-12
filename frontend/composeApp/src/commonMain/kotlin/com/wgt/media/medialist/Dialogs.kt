@@ -595,6 +595,9 @@ fun MediaInfoDialog(
                             InfoRow("原始拍摄时间", display)
                         }
                     }
+                    // PRD-v12 §3.2：AI 注解区（照片故事）——caption/scene/物体/情绪 + 手动编辑。
+                    // 未索引时展示"生成 AI 注解"按钮，触发 /api/ai/index 单张索引。
+                    AIAnnotationSection(mediaId)
                     // V8：标签区域
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("标签:", fontSize = 13.sp, fontWeight = FontWeight.Medium)

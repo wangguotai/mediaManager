@@ -10,6 +10,8 @@
 package com.wgt.media
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -121,6 +123,122 @@ private fun triggerAiSearch(
             summary(Pair(0, "错误：${e.message ?: "未知"}"))
         } finally {
             searching(false)
+        }
+    }
+}
+
+/**
+ * AI 注解区（PRD-v12 §3.2 照片故事）——嵌入 MediaInfoDialog。
+ *
+ * 并发拉 [MediaService.getAnnotation]，展示 AI 生成的 caption/scene/物体/情绪，
+ * 并提供 manual_note 编辑（用户补充"这是我和妈妈在苏州"）。
+ * 索引未完成时 annotation=null，展示"AI 注解生成中"提示 + 触发索引按钮。
+ *
+ * @param mediaId 媒体 ID
+ */
+@Composable
+fun AIAnnotationSection(mediaId: String) {
+    val scope = rememberCoroutineScope()
+    var annotation by remember(mediaId) { mutableStateOf<MediaService.Annotation?>(null) }
+    var loading by remember(mediaId) { mutableStateOf(true) }
+    var editing by remember(mediaId) { mutableStateOf(false) }
+    var noteDraft by remember(mediaId) { mutableStateOf("") }
+    var triggering by remember(mediaId) { mutableStateOf(false) }
+
+    LaunchedEffect(mediaId) {
+        loading = true
+        annotation = MediaService.getAnnotation(mediaId)
+        loading = false
+        noteDraft = annotation?.manualNote ?: ""
+    }
+
+    Spacer(modifier = Modifier.height(10.dp))
+    HorizontalDivider()
+    Spacer(modifier = Modifier.height(8.dp))
+    Text("🧠 AI 注解", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    Spacer(modifier = Modifier.height(4.dp))
+
+    if (loading) {
+        Text("加载中…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else if (annotation == null) {
+        // 未索引：提示 + 触发索引按钮
+        Text("该照片尚未生成 AI 注解", fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                enabled = !triggering,
+                onClick = {
+                    triggering = true
+                    scope.launch {
+                        MediaService.triggerAIIndex(1)
+                        annotation = MediaService.getAnnotation(mediaId)
+                        noteDraft = annotation?.manualNote ?: ""
+                        triggering = false
+                    }
+                }
+            ) { Text(if (triggering) "生成中…" else "生成 AI 注解") }
+        }
+    } else {
+        val ann = annotation!!
+        // AI caption
+        if (ann.caption.isNotEmpty()) {
+            Text(ann.caption, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+        }
+        // scene / mood 标签
+        val metaLabels = listOfNotNull(
+            ann.scene.takeIf { it.isNotEmpty() }?.let { "场景: $it" },
+            ann.mood.takeIf { it.isNotEmpty() }?.let { "情绪: $it" }
+        )
+        if (metaLabels.isNotEmpty()) {
+            Text(metaLabels.joinToString("  ·  "), fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        // 物体 chip（物体≤6，横向滚动 Row 即可，避免 FlowRow 的实验 API opt-in）
+        if (ann.objects.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                ann.objects.forEach { obj ->
+                    AssistChip(
+                        onClick = {},
+                        label = { Text(obj, fontSize = 11.sp) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    )
+                }
+            }
+        }
+        // manual_note 编辑区
+        if (editing) {
+            OutlinedTextField(
+                value = noteDraft,
+                onValueChange = { noteDraft = it },
+                label = { Text("补充描述（在做什么/和谁/关于什么）") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    scope.launch {
+                        MediaService.updateAnnotation(mediaId, noteDraft)
+                        annotation = MediaService.getAnnotation(mediaId)
+                        editing = false
+                    }
+                }) { Text("保存") }
+                TextButton(onClick = { editing = false; noteDraft = ann.manualNote }) { Text("取消") }
+            }
+        } else {
+            if (ann.manualNote.isNotEmpty()) {
+                Text("📝 ${ann.manualNote}", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface)
+            }
+            TextButton(onClick = { editing = true; noteDraft = ann.manualNote }) {
+                Text(if (ann.manualNote.isEmpty()) "添加描述" else "编辑描述")
+            }
         }
     }
 }
