@@ -327,18 +327,23 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 
 	// 人物词过滤：查询含"我/他/她/妈妈/爸爸/宝宝"等时，按命名 cluster 限定候选集。
 	// 例："我穿汉服的照片" → 先取名为"我"的 cluster 全部 media，再语义排序。
-	personClusterMedia := map[string]bool{} // 空表示不限定
+	// 注意：nil 表示"不限定"，空 map 会误过滤（空 map 非 nil，所有 mid 都 !hit）。
+	// 故无人物词或无匹配 cluster 时必须保持 nil，不能初始化为空 map。
+	var personClusterMedia map[string]bool // nil = 不限定
 	if personName, ok := detectPersonInQuery(query); ok {
 		clusters, _ := s.store.ListPersonClusters(ctx, uid)
 		for _, pc := range clusters {
 			if pc.Name == personName {
 				ids, _ := s.store.ListMediaByCluster(ctx, uid, pc.ID)
 				for _, id := range ids {
+					if personClusterMedia == nil {
+						personClusterMedia = make(map[string]bool)
+					}
 					personClusterMedia[id] = true
 				}
 			}
 		}
-		// 若识别到人物名但没匹配 cluster，不强制过滤（避免零结果）
+		// 若识别到人物名但没匹配 cluster，不强制过滤（保持 nil 避免零结果）
 		if len(personClusterMedia) == 0 {
 			personClusterMedia = nil
 		}

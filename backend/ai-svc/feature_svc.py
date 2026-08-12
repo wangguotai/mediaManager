@@ -413,21 +413,31 @@ class Handler(BaseHTTPRequestHandler):
         # 次优：CLIP zero-shot 分类（离线，与检索同空间，质量稳定）
         if _CLIP_STATE["ready"]:
             zs = _clip_zero_shot_tags(img)
-            scene = zs.get("scene", [([""])[0] if not zs.get("scene") else zs["scene"][0][0]] )[0] if zs.get("scene") else ""
             scene = zs["scene"][0][0] if zs.get("scene") else _guess_scene(img)
             mood = zs["mood"][0][0] if zs.get("mood") else ""
             objs = [t for t, s in zs.get("objects_raw", [])]
-            # 拼合 caption：场景 + 主要物体 + 服饰/活动（如命中）
-            parts = []
-            if zs.get("clothing"):
-                parts.append(f"穿{zs['clothing'][0][0]}")
-            if zs.get("subject"):
-                parts.append(zs["subject"][0][0])
-            if zs.get("activity"):
-                parts.append(f"在{zs['activity'][0][0]}")
+            # 拼合 caption：自然语序。优先级 subject > clothing > activity > scene，
+            # 避免旧版"穿裙子合影在运动的天空照片"这种生硬堆砌。
+            # 策略：以主语开头，按"谁+穿什么+在哪+做什么"自然顺序，只取每类 top-1，
+            # 无命中就退化为纯场景描述，保证 caption 始终可读。
+            subject = zs["subject"][0][0] if zs.get("subject") else ""
+            clothing = zs["clothing"][0][0] if zs.get("clothing") else ""
+            activity = zs["activity"][0][0] if zs.get("activity") else ""
+            segs = []
+            if subject:
+                segs.append(subject)
+            if clothing:
+                segs.append(f"穿{clothing}")
+            # 场景作地点状语：有主语时"在X"，无主语时直接"X照片"
             if scene:
-                parts.append(f"的{scene}照片")
-            caption = "".join(parts) if parts else f"{scene}照片" if scene else ""
+                segs.append(f"在{scene}" if subject else scene)
+            if activity:
+                segs.append(activity)
+            if segs:
+                # 主语存在→"女孩穿汉服在海边旅行"；无主语→"海边旅行"或"海边照片"
+                caption = "".join(segs) + ("的照片" if subject else "照片")
+            else:
+                caption = f"{scene}照片" if scene else ""
             self._send(200, {
                 "caption": caption,
                 "scene": scene,
