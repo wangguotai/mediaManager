@@ -423,6 +423,11 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 	}
 	cands := make([]cand, 0, len(embeds))
 	for mid, mv := range embeds {
+		// 人物词过滤在排序前做：若启用了 personClusterMedia 限制，仅收该 cluster 成员为候选。
+		// 旧版在 fetchN=limit*2 窗口内过滤，大库下 cluster 成员在 top 窗口稀疏，会漏相关项/返回不足。
+		if personClusterMedia != nil && !personClusterMedia[mid] {
+			continue
+		}
 		cands = append(cands, cand{mid, storage.Cosine(qv, mv)})
 	}
 	// 混合排序后取 top-k
@@ -436,10 +441,6 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 	out := make([]aiSearchResult, 0, limit)
 	for i := 0; i < fetchN && len(out) < limit; i++ {
 		mid := cands[i].mediaID
-		// 人物词过滤：若启用了 personClusterMedia 限制，候选必须在其中
-		if personClusterMedia != nil && !personClusterMedia[mid] {
-			continue
-		}
 		m, err := s.store.GetMedia(ctx, mid)
 		if err != nil || m == nil || m.UserID != uid {
 			continue
