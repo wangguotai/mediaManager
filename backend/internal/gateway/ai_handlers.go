@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"media-manager/backend/internal/service"
@@ -205,15 +206,15 @@ func (a *AIIndexer) Start(scanInterval time.Duration) {
 func (a *AIIndexer) loop(interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	// 启动后立即跑一轮
-	a.indexOnce(context.Background(), 20)
+	// 启动后立即跑一轮。batch=50：单轮处理量，配合 4 并发，平衡吞吐与特征服务压力。
+	a.indexOnce(context.Background(), 50)
 	for {
 		select {
 		case <-a.stopCh:
 			a.logf("stopped")
 			return
 		case <-t.C:
-			a.indexOnce(context.Background(), 20)
+			a.indexOnce(context.Background(), 50)
 		}
 	}
 }
@@ -229,6 +230,9 @@ func (a *AIIndexer) resolvePath(uid, mediaID string) string {
 
 // indexOnce 扫描全部用户（或指定用户）的未索引 media，逐张提取向量+caption 落库。
 // limit 控制单轮处理量，避免长时间占用。返回本轮处理数。
+// indexOnce 扫描全部用户的未索引 media，4 并发处理一批（D：批量并行优化）。
+// 串行单张 ~1-2s/张，百 G 图库会积压；4 并发把吞吐提到 ~4x，且限制并发避免压垮
+// 特征服务（CLIP 推理本就吃 CPU）。limit 控制单轮总量，processed 原子计数。
 func (a *AIIndexer) indexOnce(ctx context.Context, limit int) int {
 	if a.server.store == nil {
 		return 0
@@ -237,24 +241,40 @@ func (a *AIIndexer) indexOnce(ctx context.Context, limit int) int {
 	if err != nil || len(users) == 0 {
 		return 0
 	}
-	processed := 0
+	var processed atomic.Int32
 	for _, u := range users {
 		ids, err := a.server.store.ListUnindexedMedia(ctx, u.ID, limit)
 		if err != nil || len(ids) == 0 {
 			continue
 		}
-		for _, mid := range ids {
-			if err := a.indexOne(ctx, u.ID, mid); err != nil {
-				a.logf("index %s err: %v", mid, err)
-				continue
-			}
-			processed++
+		// 4 并发 worker 池消费 ids
+		const concurrency = 4
+		jobs := make(chan string)
+		var wg sync.WaitGroup
+		for w := 0; w < concurrency; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for mid := range jobs {
+					if err := a.indexOne(ctx, u.ID, mid); err != nil {
+						a.logf("index %s err: %v", mid, err)
+						continue
+					}
+					processed.Add(1)
+				}
+			}()
 		}
+		for _, mid := range ids {
+			jobs <- mid
+		}
+		close(jobs)
+		wg.Wait()
 	}
-	if processed > 0 {
-		a.logf("round processed %d", processed)
+	n := int(processed.Load())
+	if n > 0 {
+		a.logf("round processed %d (4-concurrency)", n)
 	}
-	return processed
+	return n
 }
 
 // indexOne 处理单张：取文件→embed→caption→落库。
