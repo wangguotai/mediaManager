@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"media-manager/backend/internal/storage"
@@ -21,6 +22,29 @@ import (
 
 // clusterByEmbeddings 用凝聚层次聚类把 media 向量分簇。
 // 返回 media_id -> clusterIndex。
+// inheritName 按"成员投票"继承旧命名：统计新 cluster 各成员在 mediaToName 中的
+// 名字出现次数，取最多者；无命中返回空串。比按单张代表图匹配稳健（代表图随 map
+// 遍历顺序随机，易丢命名）。
+func inheritName(members []string, mediaToName map[string]string) string {
+	counts := map[string]int{}
+	for _, mid := range members {
+		if n, ok := mediaToName[mid]; ok && n != "" {
+			counts[n]++
+		}
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	best := ""
+	bestN := 0
+	for n, c := range counts {
+		if c > bestN {
+			best, bestN = n, c
+		}
+	}
+	return best
+}
+
 func clusterByEmbeddings(embeds map[string][]float32, simThreshold float32) map[string]int {
 	if len(embeds) == 0 {
 		return nil
@@ -111,34 +135,35 @@ func (s *Server) ReclusterPersons(ctx context.Context, userID string, simThresho
 		clusterMembers[c] = append(clusterMembers[c], mid)
 	}
 
-	// 保留旧命名：读旧 clusters，按代表 media id 找回名字
+	// 保留旧命名：读旧 clusters 及其成员，建 mediaID→name 映射。
+	// 重建后新 cluster 任一成员曾在旧命名 cluster 中即继承该名（按成员多数继承，
+	// 避免旧版按单张代表图匹配因 map 遍历顺序随机而丢失命名）。
 	oldClusters, _ := s.store.ListPersonClusters(ctx, userID)
-	oldByName := map[string]string{} // avatarMediaID -> name
-	oldByID := map[string]*storage.PersonCluster{}
+	mediaToName := map[string]string{} // mediaID -> name（来自旧命名 cluster 的成员）
 	for _, oc := range oldClusters {
-		oldByID[oc.ID] = oc
-		if oc.AvatarMediaID != "" {
-			oldByName[oc.AvatarMediaID] = oc.Name
+		if oc.Name == "" {
+			continue
+		}
+		mids, _ := s.store.ListMediaByCluster(ctx, userID, oc.ID)
+		for _, mid := range mids {
+			mediaToName[mid] = oc.Name
 		}
 	}
 
-	// 简化策略：清空旧 cluster/media_persons，重建（命名暂丢失，下版按代表图匹配保留）
-	// 为避免丢用户命名，改为：保留仍存在的旧 cluster（按代表图归属新簇）。
-	// 这里 v1 简化为重建，记录到 audit 由前端提示用户重命名。
-	_ = oldClusters
+	// 重建前必须清空旧 cluster/media_persons，否则每次 recluster 累积翻倍
+	// （v3 修 bug：旧版只 Create 不清，cluster 数无限增长）。
+	if err := s.store.ClearPersonsForUser(ctx, userID); err != nil {
+		return 0, fmt.Errorf("clear old persons: %w", err)
+	}
 
 	created := 0
 	for _, members := range clusterMembers {
 		if len(members) == 0 {
 			continue
 		}
-		// 代表图 = 第一个
 		avatar := members[0]
-		name := ""
-		// 尝试保留旧命名：若代表图曾在旧 cluster 且有名字
-		if n, ok := oldByName[avatar]; ok {
-			name = n
-		}
+		// 命名继承：统计新 cluster 成员在旧命名映射中的名字，取出现最多者
+		name := inheritName(members, mediaToName)
 		pc, err := s.store.CreatePersonCluster(ctx, userID, name, avatar)
 		if err != nil || pc == nil {
 			continue

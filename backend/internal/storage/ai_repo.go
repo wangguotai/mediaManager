@@ -273,6 +273,19 @@ func (s *Store) ListUnindexedMedia(ctx context.Context, userID string, limit int
 	return out, rows.Err()
 }
 
+// ClearPersonsForUser 删除某用户的全部人物聚类与 media_persons 记录。
+// ReclusterPersons 重建前调用，避免重复 recluster 累积旧 cluster（v3 修 bug：
+// 旧版只 Create 不清，每次 recluster cluster 数翻倍）。
+func (s *Store) ClearPersonsForUser(ctx context.Context, userID string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM media_persons WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM person_clusters WHERE user_id=?`, userID)
+	return err
+}
+
 // AIProgress 返回索引进度统计。
 func (s *Store) AIProgress(ctx context.Context, userID string) (*AIIndexProgress, error) {
 	p := &AIIndexProgress{}
