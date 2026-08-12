@@ -405,17 +405,28 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 			continue
 		}
 		ann, _ := s.store.GetAnnotation(ctx, uid, mid)
-		// 语义+NLP 关键词加成（caption/manual_note 含查询词）
+		// 语义+NLP 关键词加成（caption/manual_note 含查询词）。
+		// 门槛：仅当语义分 sem ≥ 0.22 才加 boost，且 boost 不超过 sem 的 30%。
+		// 否则语义都低的图（如被 zero-shot 误判 caption 的色块）会靠词命中跳到
+		// 真正相关图前面（v2 阈值优化时发现：test_photo caption 含"海边"后被 boost 超 beach）。
 		boost := float32(0)
-		if ann != nil {
+		sem := cands[i].sem
+		if ann != nil && sem >= 0.22 {
+			rawBoost := float32(0)
 			if strings.Contains(ann.Caption, query) || strings.Contains(ann.ManualNote, query) {
-				boost += 0.15
+				rawBoost += 0.15
 			}
 			for _, o := range ann.Objects {
 				if strings.Contains(query, o) {
-					boost += 0.1
+					rawBoost += 0.1
 				}
 			}
+			// boost 上限 = sem × 30%，确保语义仍是主导排序信号
+			cap := sem * 0.30
+			if rawBoost > cap {
+				rawBoost = cap
+			}
+			boost = rawBoost
 		}
 		mediaMap := mediaToMap(m)
 		mediaMap["thumbnail_url"] = "/api/media/stream/" + mid
