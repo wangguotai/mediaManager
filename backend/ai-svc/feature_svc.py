@@ -259,7 +259,54 @@ def _hash_text_vec(text: str):
     n = np.linalg.norm(v) + 1e-9
     return (v / n).astype(np.float32).tolist()
 
-# ---- 多模态 LLM (caption/classify) ----
+# ---- 查询增强：中文→CLIP英文prompt ----
+# CLIP 对 "a photo of X" 这类英文 prompt 召回更准（尤其颜色/场景基础概念）。
+# 这里把查询中的中文概念词替换/包装为英文 photo prompt，提升纯文本检索质量。
+# 注意：图像端用中文标签的英文 prompt（_ZH_EN_PROMPT）做 zero-shot，两端同空间对齐。
+_QUERY_ZH_EN = {
+    "蓝": "blue", "蓝色": "blue color", "红": "red", "红色": "red color",
+    "绿": "green", "绿色": "green color", "黄": "yellow", "黄色": "yellow color",
+    "紫": "purple", "黑色": "black", "白色": "white", "粉": "pink",
+    "海": "sea, ocean and beach", "海边": "seaside, beach and ocean",
+    "沙滩": "sandy beach", "山": "mountain", "山林": "mountains and forest",
+    "草地": "grassland", "雪": "snow", "天空": "sky", "日落": "sunset",
+    "日出": "sunrise", "夜景": "night scene", "室内": "indoors",
+    "城市": "city street", "建筑": "buildings", "河": "river", "湖": "lake",
+    "猫": "cat", "狗": "dog", "鸟": "bird", "花": "flowers", "食物": "food",
+    "蛋糕": "cake", "车": "car",
+    "汉服": "hanfu, traditional chinese clothing", "古装": "ancient chinese costume",
+    "和服": "kimono", "婚纱": "wedding dress", "裙子": "skirt or dress",
+    "人": "person", "女孩": "girl", "男孩": "boy", "儿童": "child", "宝宝": "baby",
+    "合影": "group photo of people", "自拍": "selfie",
+    "旅行": "traveling sightseeing", "运动": "sports", "婚礼": "wedding",
+    "毕业": "graduation", "聚餐": "dining together",
+}
+
+def _enhance_query(text: str) -> str:
+    """中文查询→CLIP友好英文prompt。命中词替换为英文，整体包装为 photo prompt。
+    无命中则尝试把整句当描述包装（CLIP 多语言也能用，但英文 prompt 更稳）。"""
+    if not text:
+        return text
+    t = text
+    replaced = []
+    for zh, en in _QUERY_ZH_EN.items():
+        if zh in t:
+            replaced.append(en)
+            t = t.replace(zh, " ")
+    # 人物称谓保留中文语义但用英文表达
+    person_map = {"我": "me", "妈妈": "mother", "爸爸": "father", "宝宝": "baby",
+                  "朋友": "friend"}
+    for zh, en in person_map.items():
+        if zh in t:
+            replaced.append(en)
+            t = t.replace(zh, " ")
+    if replaced:
+        # 多概念拼成 "a photo of X and Y"
+        concepts = ", ".join(dict.fromkeys(replaced))
+        return f"a photo of {concepts}"
+    # 无命中：原文当描述包装（CLIP 多语言）
+    return f"a photo of {text.strip()}"
+
 def _gateway_available():
     return AI_BACKEND in ("gateway", "auto") and bool(GATEWAY_BASE)
 
@@ -387,7 +434,11 @@ class Handler(BaseHTTPRequestHandler):
         text = payload.get("text", "")
         _try_load_clip()
         if _CLIP_STATE["ready"]:
-            vec = _clip_text_vec(text)
+            # 查询增强：CLIP 对英文 "a photo of X" prompt 召回更准。中文查询若命中
+            # 概念映射，转英文 prompt 算向量；不命中则用中文原文（CLIP 也支持多语言，
+            # 但英文 prompt 对颜色/场景等基础概念区分度更高）。
+            enhanced = _enhance_query(text)
+            vec = _clip_text_vec(enhanced)
             model = CLIP_MODEL_NAME
         else:
             vec = _hash_text_vec(text)
