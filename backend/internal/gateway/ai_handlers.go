@@ -167,6 +167,9 @@ func mimeFromExt(ext string) string {
 // ---- 索引 worker ----
 
 // AIIndexer 是后台索引管线。ScanInterval 控制扫描周期。
+// embedCache 是用户级图像向量缓存（G：检索性能优化 + 为 ANN 铺路）：
+// SearchSemantic 每次检索全量 LoadEmbeddings 浪费 IO，缓存后复用，
+// 索引/删除后调 InvalidateEmbedCache(uid) 失效。
 type AIIndexer struct {
 	server *Server
 	ai     *AIClient
@@ -175,16 +178,51 @@ type AIIndexer struct {
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
+
+	cacheMu    sync.RWMutex
+	embedCache map[string]map[string][]float32 // uid -> (mediaID -> vector)
 }
 
 // NewAIIndexer 创建索引器。logf 为空时用标准日志。
 func (s *Server) NewAIIndexer() *AIIndexer {
 	return &AIIndexer{
-		server: s,
-		ai:     NewAIClient(aiFeatureSvcURL),
-		logf:   func(format string, args ...any) { slog.Info("ai-indexer: "+format, args...) },
-		stopCh: make(chan struct{}),
+		server:      s,
+		ai:          NewAIClient(aiFeatureSvcURL),
+		logf:        func(format string, args ...any) { slog.Info("ai-indexer: "+format, args...) },
+		stopCh:      make(chan struct{}),
+		embedCache:  make(map[string]map[string][]float32),
 	}
+}
+
+// LoadEmbeddingsCached 返回某用户的全部向量，优先用进程内缓存。
+// 缓存 miss 时从 store 加载并填入。索引/删除后应调 InvalidateEmbedCache。
+func (a *AIIndexer) LoadEmbeddingsCached(ctx context.Context, uid string) (map[string][]float32, error) {
+	a.cacheMu.RLock()
+	if m, ok := a.embedCache[uid]; ok {
+		a.cacheMu.RUnlock()
+		return m, nil
+	}
+	a.cacheMu.RUnlock()
+	m, err := a.server.store.LoadEmbeddings(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	a.cacheMu.Lock()
+	a.embedCache[uid] = m
+	a.cacheMu.Unlock()
+	return m, nil
+}
+
+// InvalidateEmbedCache 失效某用户（或全部，uid="" ）的向量缓存。
+// 在 indexOne 成功落库后与 media 删除后调用。
+func (a *AIIndexer) InvalidateEmbedCache(uid string) {
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	if uid == "" {
+		a.embedCache = make(map[string]map[string][]float32)
+		return
+	}
+	delete(a.embedCache, uid)
 }
 
 // Start 启动后台 worker。幂等（重复调用安全）。
@@ -307,6 +345,8 @@ func (a *AIIndexer) indexOne(ctx context.Context, uid, mediaID string) error {
 		ann.ModelVer = cr.ModelVer
 	}
 	_ = a.server.store.UpsertAnnotation(ctx, ann)
+	// G：新向量落库，失效该用户缓存，下次检索重新加载（含本次）。
+	a.InvalidateEmbedCache(uid)
 	return nil
 }
 
@@ -334,7 +374,14 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 	qv := er.Vector
 
 	// 加载用户全部图像向量
-	embeds, err := s.store.LoadEmbeddings(ctx, uid)
+	// G：优先用 aiIndexer 的进程内向量缓存，避免每次检索全量 LoadEmbeddings。
+	// aiIndexer nil（store 未注入时不会到这）或缓存不可用降级到直接加载。
+	var embeds map[string][]float32
+	if s.aiIndexer != nil {
+		embeds, err = s.aiIndexer.LoadEmbeddingsCached(ctx, uid)
+	} else {
+		embeds, err = s.store.LoadEmbeddings(ctx, uid)
+	}
 	if err != nil {
 		return nil, err
 	}
