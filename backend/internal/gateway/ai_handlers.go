@@ -413,11 +413,16 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 		sem := cands[i].sem
 		if ann != nil && sem >= 0.22 {
 			rawBoost := float32(0)
-			if strings.Contains(ann.Caption, query) || strings.Contains(ann.ManualNote, query) {
+			// caption/manual_note 词级命中 query（非整串包含——query 是自然语言长句，
+			// caption 是短描述，整串 Contains 几乎永不命中，是 v2 引入的逻辑 bug）。
+			// 策略：caption/manual_note 按非中文标点/空白切分，任一词（≥2字）出现在 query 中即命中。
+			qLower := strings.ToLower(query)
+		captionHit := wordInQuery(ann.Caption, qLower) || wordInQuery(ann.ManualNote, qLower)
+			if captionHit {
 				rawBoost += 0.15
 			}
 			for _, o := range ann.Objects {
-				if strings.Contains(query, o) {
+				if o != "" && strings.Contains(query, o) {
 					rawBoost += 0.1
 				}
 			}
@@ -438,6 +443,26 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 		})
 	}
 	return out, nil
+}
+
+// wordInQuery 判断 text 中是否有词（≥2 字）出现在 queryLower 中。
+// 用于 caption/manual_note 词级命中查询（整串 Contains 对长句查询几乎不命中）。
+// text 按中英文标点/空白切分；中文词≥2字、英文词≥2字符才参与，避免单字噪声。
+func wordInQuery(text, queryLower string) bool {
+	if text == "" || queryLower == "" {
+		return false
+	}
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '，' || r == '.' || r == '。' ||
+			r == '/' || r == '\\' || r == '-' || r == '_' || r == '·'
+	})
+	for _, w := range fields {
+		wl := strings.ToLower(w)
+		if len([]rune(wl)) >= 2 && strings.Contains(queryLower, wl) {
+			return true
+		}
+	}
+	return false
 }
 
 // detectPersonInQuery 检查询询是否含人物称谓词，返回匹配的 cluster 命名。
