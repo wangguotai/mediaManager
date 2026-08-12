@@ -955,14 +955,23 @@ object MediaService {
             if (response.status == HttpStatusCode.OK) {
                 val body: String = response.body()
                 val obj = Json.parseToJsonElement(body).jsonObject
-                val list = obj["results"]?.jsonArray?.map { item ->
-                    val o = item.jsonObject
-                    AIMediaHit(
-                        media = parseMediaItem(o["media"]!!.jsonObject),
-                        score = o["score"]?.jsonPrimitive?.floatOrNull ?: 0f,
-                        caption = o["caption"]?.jsonPrimitive?.contentOrNull ?: "",
-                        scene = o["scene"]?.jsonPrimitive?.contentOrNull ?: ""
-                    )
+                // mapNotNull + 安全取 media：旧版 o["media"]!!.jsonObject 强解，一条坏数据
+                //（media 字段缺失/类型错）会抛异常被外层 catch 吞成整次 null（所有结果丢失）。
+                // 改为 mapNotNull 跳过坏条目，单条异常不影响其余结果。
+                val list = obj["results"]?.jsonArray?.mapNotNull { item ->
+                    try {
+                        val o = item.jsonObject
+                        val mediaEl = o["media"]?.jsonObject ?: return@mapNotNull null
+                        AIMediaHit(
+                            media = parseMediaItem(mediaEl),
+                            score = o["score"]?.jsonPrimitive?.floatOrNull ?: 0f,
+                            caption = o["caption"]?.jsonPrimitive?.contentOrNull ?: "",
+                            scene = o["scene"]?.jsonPrimitive?.contentOrNull ?: ""
+                        )
+                    } catch (e: Exception) {
+                        logger.info("MediaService", "getAISearch skip bad item: ${e.message}")
+                        null
+                    }
                 } ?: emptyList()
                 val total = obj["total"]?.jsonPrimitive?.intOrNull ?: list.size
                 logger.info("MediaService", "getAISearch q=$q hits=${list.size}")
