@@ -397,8 +397,11 @@ func (s *Store) AddMediaPerson(ctx context.Context, mp *MediaPerson) error {
 
 // ListMediaByCluster 列出某人物 cluster 的全部 media_id。
 func (s *Store) ListMediaByCluster(ctx context.Context, userID, clusterID string) ([]string, error) {
+	// JOIN media 过滤已软删除：人物页不应展示已删图（media_persons 残留不该泄露）。
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT media_id FROM media_persons WHERE user_id=? AND cluster_id=?`,
+		`SELECT DISTINCT mp.media_id FROM media_persons mp
+		 JOIN media m ON m.id=mp.media_id
+		 WHERE mp.user_id=? AND mp.cluster_id=? AND m.deleted=0`,
 		userID, clusterID)
 	if err != nil {
 		return nil, err

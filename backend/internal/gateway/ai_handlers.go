@@ -444,6 +444,10 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 		if err != nil || m == nil || m.UserID != uid {
 			continue
 		}
+		// 过滤已软删除的媒体：embedding 残留不应让删除图出现在检索结果。
+		if m.Deleted {
+			continue
+		}
 		// 硬过滤
 		if parsed.Type != "" && m.Type != parsed.Type {
 			continue
