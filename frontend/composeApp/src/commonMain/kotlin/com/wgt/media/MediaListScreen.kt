@@ -997,6 +997,13 @@ fun MediaListScreen(
             // "照片" Tab(index=0)：标题 + 搜索栏 + 筛选条 + 时间线网格列表
             // PRD-v12 UI：与相册/查找/创意 Tab 统一一刻相册浅灰底，消除墨绿白差异。
             Column(modifier = Modifier.fillMaxSize().statusBarsPadding().background(AppBackground)) {
+                // PRD-v12 UI：一刻相册式营销 Banner —— 照片页第一视觉，构图(蓝→红橙渐变卡+白字)
+                // 对齐一刻相册顶部活动区，突出"相册/回忆"心智而非"系统管理"。纯装饰,点按不失效。
+                PromoBannerCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                )
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
                 // onSurface 主色；选择模式计数用 titleMedium。搜索图标用 onSurfaceVariant。
@@ -4952,3 +4959,48 @@ private fun msToDateTimeStr(ms: Long): String {
 
 private fun isLeapYear(y: Int): Boolean =
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+/**
+ * 一刻相册式营销 Banner 卡 —— 照片页第一视觉。
+ * 视觉：蓝→红橙 水平渐变圆角卡，左文案(粗体白) + 右图标，对齐一刻相册顶部活动区。
+ * 纯装饰/导航到相册，不引入额外数据流。配色用一刻相册主强调蓝(#3478F6)与活动红橙渐变。
+ */
+@Composable
+private fun PromoBannerCard(modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(88.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(Color(0xFF3478F6), Color(0xFFFF6A3D))
+                    )
+                )
+                .padding(horizontal = 18.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "一键浪漫 · 回忆成册",
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "让回忆自动成册，留住美好瞬间",
+                        color = Color.White.copy(alpha = 0.92f),
+                        fontSize = 13.sp
+                    )
+                }
+                Text("📸", fontSize = 30.sp)
+            }
+        }
+    }
+}
