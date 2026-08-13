@@ -182,6 +182,10 @@ fun MediaListScreen(
     // 命中结果同样经 viewModel.applyAdvancedSearchResults 灌入列表。
     var showAiSearch by remember { mutableStateOf(false) }
 
+    // PRD-v12 UI：一刻相册式分区搜索页(全屏覆盖层)。照片首页标题右侧🔍触发,
+    // 展示 回忆/人物/地点/场景分区 + AI 语义检索。结果灌入主时间线。
+    var showSearchPage by remember { mutableStateOf(false) }
+
     // PRD-v12：AI 智能管理中心（全屏覆盖层）。从"我的"Tab 的 AI 卡片入口打开，
     // 展示索引状态/自动相册/人物聚类。"我的"Tab 的 MyTabContent 通过 onOpenAiCenter 触发。
     var showAiCenter by remember { mutableStateOf(false) }
@@ -736,6 +740,18 @@ fun MediaListScreen(
         )
     }
 
+    // PRD-v12 UI：一刻相册式分区搜索页(全屏覆盖)。从照片首页标题右侧🔍打开。
+    if (showSearchPage) {
+        SearchPageScreen(
+            onClose = { showSearchPage = false },
+            onResults = { list ->
+                showSearchPage = false
+                selectedTab = 0
+                viewModel.applyAdvancedSearchResults(list)
+            }
+        )
+    }
+
     // PRD-v12：AI 智能管理中心（全屏覆盖）。AICenterScreen 展示索引状态/自动相册/
     // 人物聚类。打开相册/人物时用 AI 搜索该场景/人物名灌入列表并关闭中心。
     if (showAiCenter) {
@@ -1051,11 +1067,19 @@ fun MediaListScreen(
                             )
                         }
                     }
-                    // PRD-v12 UI：对标一刻相册照片页标题右侧的「按时间 | 按相册」文字切换。
-                    // 本列表恒按时间分组(DateGroupedGrid)，故「按时间」为选中态；「按相册」
-                    // 点击切到相册Tab(index=1)呈现按场景/人物分组——真实可用，非假UI。
+                    // PRD-v12 UI：对标一刻相册「按时间 | 按相册」+ 🔍搜索页入口。
                     if (!viewModel.hasSelection) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            // 🔍 打开一刻相册式分区搜索页(大点击区,确保命中)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { showSearchPage = true }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("🔍", fontSize = 18.sp, color = TextPrimary)
+                            }
                             Text("按时间",
                                 fontSize = 14.sp, fontWeight = FontWeight.Bold,
                                 color = TextPrimary)
@@ -1277,24 +1301,9 @@ fun MediaListScreen(
                     )
                 }
 
-                // PRD-v12 UI：照片首页「智能聚合」区 —— 对齐一刻相册首页主体(人物/足迹/场景)。
-                // 复用 MediaService 的 persons/geo/albums 数据,照片首页也能智能推荐入口,
-                // 而非纯时间线。选择模式/搜索态下隐藏,避免与批量操作/搜索结果冲突。
-                if (!viewModel.hasSelection && !viewModel.favoritesOnly) {
-                    HomeAggregationSection(
-                        onOpenPerson = { clusterId ->
-                            advancedSearchScope.launch {
-                                viewModel.applyAdvancedSearchResults(MediaService.getPersonMedia(clusterId))
-                            }
-                        },
-                        onOpenScene = { scene ->
-                            advancedSearchScope.launch {
-                                viewModel.applyAdvancedSearchResults(
-                                    MediaService.getAISearch(scene, 100)?.results?.map { it.media } ?: emptyList())
-                            }
-                        }
-                    )
-                }
+                // PRD-v12 UI 纠正：照片 Tab 保持「时间线」为核心(对齐一刻相册照片页),
+                // 智能聚合(人物/足迹/事物)属「查找」Tab。故照片首页不再叠加聚合区,
+                // 时间线网格作为主体,顶部已含 Banner/搜索/按时间|相册。
 
                 // Tab 切换整体淡入淡出（照片 Tab 内：内容本质是云端时间线）
                 Crossfade(
