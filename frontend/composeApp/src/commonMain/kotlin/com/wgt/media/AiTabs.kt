@@ -394,7 +394,8 @@ fun CreativeTabScreen(
         verticalArrangement = Arrangement.spacedBy(SPGap)) {
         item { SectionTitle("创意") }
 
-        // 两个大主按钮（对标"Ai改图/导入图片"）
+        // 两个大主按钮（对标"Ai改图/导入图片"）—— 像素采样一刻相册创意页:
+        // 主按钮为清淡浅色底(#F8F6FE)+深色字,而非白字深色CTA,按像素严格对齐。
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 PrimaryActionButton(
@@ -402,14 +403,14 @@ fun CreativeTabScreen(
                     icon = "⚡",
                     onClick = {},
                     modifier = Modifier.weight(1f),
-                    container = Primary
+                    container = Color(0xFFF8F6FE)
                 )
                 PrimaryActionButton(
                     label = "导入图片",
                     icon = "＋",
                     onClick = { },
                     modifier = Modifier.weight(1f),
-                    container = Color(0xFFF0B429)
+                    container = Color(0xFFF7F8FE)
                 )
             }
         }
@@ -456,7 +457,9 @@ private fun PrimaryActionButton(
         colors = ButtonDefaults.buttonColors(containerColor = container)
     ) {
         Spacer(Modifier.width(4.dp))
-        Text("$icon $label", fontSize = T_Body, fontWeight = FontWeight.Bold, color = Color.White)
+        // 一刻相册创意页主按钮是浅色底+深色字（像素采样#F8F6FE/#F7F8FE + #040B19字）
+        Text("$icon $label", fontSize = T_Body, fontWeight = FontWeight.Bold,
+            color = TextPrimary)
         Spacer(Modifier.width(4.dp))
     }
 }
@@ -474,7 +477,7 @@ private fun ToolIconCell(
     ) {
         Box(
             modifier = Modifier.size(56.dp).clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFFEDF0F8)),
+                .background(Color(0xFFF8F6FE)),  // 像素采样一刻相册创意页工具块底色
             contentAlignment = Alignment.Center
         ) {
             Text(icon, fontSize = 26.sp)
