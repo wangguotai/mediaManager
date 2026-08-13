@@ -202,30 +202,47 @@ fun SearchTabScreen(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.weight(1f)) {
-                // 场景
+                // 场景 —— 一刻相册风格：横排卡片
                 item { Text("场景", fontWeight = FontWeight.SemiBold) }
                 if (albums.isEmpty()) {
                     item { EmptyHint("暂无场景分类") }
                 } else {
-                    items(albums.take(6)) { a ->
-                        ListItem(
-                            headlineContent = { Text(a.scene) },
-                            supportingContent = { Text("${a.count} 张") },
-                            leadingContent = { Text("🖼", fontSize = 22.sp) },
-                            modifier = Modifier.clickable { onOpenScene(a.scene) })
+                    item {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(albums.take(10)) { a ->
+                                SceneCard(
+                                    title = a.scene,
+                                    count = a.count,
+                                    onClick = { onOpenScene(a.scene) }
+                                )
+                            }
+                        }
                     }
                 }
-                // 人物
+                // 人物 —— 一刻相册风格：横排圆头像
                 item { Spacer(Modifier.height(8.dp)); Text("人物") }
                 if (persons.isEmpty()) {
                     item { EmptyHint("暂无人物聚类") }
                 } else {
-                    items(persons.take(3)) { pc ->
-                        ListItem(
-                            headlineContent = { Text(if (pc.name.isEmpty()) "未命名" else pc.name) },
-                            supportingContent = { Text("${pc.faceCount} 张") },
-                            leadingContent = { Text("🙂", fontSize = 22.sp) },
-                            modifier = Modifier.clickable { onOpenPerson(pc.id) })
+                    item {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            items(persons.take(6)) { pc ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.clickable { onOpenPerson(pc.id) }
+                                ) {
+                                    Box(
+                                        modifier = Modifier.size(56.dp)
+                                            .clip(RoundedCornerShape(28.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                                        contentAlignment = Alignment.Center
+                                    ) { Text("🙂", fontSize = 26.sp) }
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(if (pc.name.isEmpty()) "未命名" else pc.name,
+                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
                     }
                 }
                 // 足迹
