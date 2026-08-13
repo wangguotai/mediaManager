@@ -1,7 +1,21 @@
 """一键: 本地图片 -> qwen 视觉识别。用法: python3 qwen_shot.py <image> <提示词>"""
-import sys,json,urllib.request,urllib.error,base64,os
+import sys,json,urllib.request,urllib.error,base64,os,subprocess
 img=sys.argv[1]; prompt=sys.argv[2] if len(sys.argv)>2 else "用中文详细描述这张截图的完整UI布局"
-key=open('/tmp/ccr_key.txt').read().strip()
+# key 优先读 /tmp/ccr_key.txt；文件缺失/为空则自动从其源头 keybin 重新生成并写回。
+KEYBIN=os.path.expanduser("~/.claude-code-router/bin/ccr-claude-code-api-key-default-claude-code")
+def load_key():
+    try:
+        k=open('/tmp/ccr_key.txt').read().strip()
+        if k: return k
+    except FileNotFoundError: pass
+    if os.path.exists(KEYBIN):
+        k=subprocess.check_output(KEYBIN,text=True).strip()
+        if k:
+            os.makedirs('/tmp',exist_ok=True); open('/tmp/ccr_key.txt','w').write(k)
+            print("[key] /tmp/ccr_key.txt 缺失，已从 keybin 重新生成",file=sys.stderr)
+            return k
+    raise SystemExit("无法获取 gateway key")
+key=load_key()
 mt="image/jpeg"
 ext=os.path.splitext(img)[1].lower()
 if ext in (".png",): mt="image/png"
