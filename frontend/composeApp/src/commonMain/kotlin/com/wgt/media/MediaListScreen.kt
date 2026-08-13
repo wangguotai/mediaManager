@@ -1514,16 +1514,16 @@ private fun ActivityBottomBar(
                 label = "查找",
                 selected = selectedTab == 2,
                 onClick = { onSelect(2) },
-                iconOn = Res.drawable.yk_tab_find_on,
-                iconOff = Res.drawable.yk_tab_find_off
+                iconOn = Res.drawable.yk_tab_create_on,   // create_on实为放大镜=查找
+                iconOff = Res.drawable.yk_tab_create_off
             )
             NavTab(
                 icon = Res.drawable.ic_palette,
                 label = "创意",
                 selected = selectedTab == 3,
                 onClick = { onSelect(3) },
-                iconOn = Res.drawable.yk_tab_create_on,
-                iconOff = Res.drawable.yk_tab_create_off
+                iconOn = Res.drawable.yk_tab_find_on,     // find_on实为星形+加号=创意
+                iconOff = Res.drawable.yk_tab_find_off
             )
         }
     }
@@ -1581,9 +1581,13 @@ private fun NavTab(
                   else if (!selected && iconOff != null) iconOff
                   else icon
         if (iconOn != null || iconOff != null) {
+            // 一刻tab图标webp是黑底白细节的单色模板,需tint上色: 选中=Primary蓝,未选=灰。
+            // (camera凸起按钮彩色不在此,它独立渲染)
             Icon(
                 painter = painterResource(res),
                 contentDescription = label,
+                tint = if (selected) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
                     .size(Dimens.navIconSize)
                     .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
