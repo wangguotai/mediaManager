@@ -80,6 +80,78 @@ def _clip_image_vec(img: Image.Image):
         feat = feat / feat.norm(dim=-1, keepdim=True)
         return feat[0].cpu().numpy().astype(np.float32).tolist()
 
+# ---- 人脸检测/识别（PRD-v12 §3.3 真·长相记忆，正式接入）----
+# YuNet(人脸检测 onnx) + SFace(zhi识别人脸 128 维向量 onnx)。需已下载模型到 models/。
+# 模型源: opencv_zoo (media.githubusercontent.com 可下载)。若模型缺失, /face 返回空(降级)。
+_FACE_LOCK = threading.Lock()
+_FACE_STATE = {"detector": None, "recognizer": None, "ready": False, "err": None,
+               "model_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")}
+
+def _try_load_face():
+    """懒加载 YuNet 人脸检测 + SFace 人脸识别。首次调用 /face 时执行。"""
+    if _FACE_STATE["ready"] or _FACE_STATE["err"]:
+        return
+    with _FACE_LOCK:
+        if _FACE_STATE["ready"] or _FACE_STATE["err"]:
+            return
+        try:
+            import cv2
+            yunet = os.path.join(_FACE_STATE["model_dir"], "face_detection_yunet_2023mar.onnx")
+            sface = os.path.join(_FACE_STATE["model_dir"], "face_recognition_sface_2021dec.onnx")
+            if not (os.path.exists(yunet) and os.path.exists(sface)):
+                _FACE_STATE["err"] = "face onnx models missing in models/"
+                print("[face] models missing, /face degraded", flush=True)
+                return
+            det = cv2.FaceDetectorYN.create(yunet, "", (320, 320))
+            rec = cv2.FaceRecognizerSF.create(sface, "")
+            _FACE_STATE.update(detector=det, recognizer=rec, ready=True)
+            print("[face] YuNet+SFace loaded", flush=True)
+        except Exception as e:
+            _FACE_STATE["err"] = str(e)
+            print(f"[face] unavailable: {e}", flush=True)
+
+def _face_vectors_from_bytes(img_bytes):
+    """用 YuNet 检测人脸, SFace 提取向量。返回 list of {bbox, vec, score}。"""
+    if not _FACE_STATE["ready"]:
+        _try_load_face()
+    if not _FACE_STATE["ready"]:
+        return []
+    import cv2, numpy as np
+    from PIL import Image
+    import io
+    img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+    h, w = img.shape[:2]
+    det = _FACE_STATE["detector"]
+    det.setInputSize((w, h))
+    ok, faces = det.detect(img)
+    out = []
+    if not ok or faces is None:
+        return out
+    for f in faces:
+        # f: [x, y, w, h, landmarks5..., score]
+        x, y, fw, fh = f[0], f[1], f[2], f[3]
+        score = float(f[-1]) if len(f) > 0 else 0.0
+        # 裁剪人脸区域(带margin)用于识别
+        x0, y0 = max(0, int(x)), max(0, int(y))
+        x1, y1 = min(w, int(x+fw)), min(h, int(y+fh))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        face_img = img[y0:y1, x0:x1]
+        try:
+            # SFace 输入处理: 归一化到112x112 float32
+            face_resized = cv2.resize(face_img, (112, 112))
+            face_input = cv2.cvtColor(face_resized, cv2.COLOR_RGB2BGR).astype(np.float32)
+            feature = _FACE_STATE["recognizer"].feature(face_input)
+            # SFace 返回 float32 ndarray, 需转标准 Python float 才能 JSON 序列化
+            out.append({
+                "bbox": [round(float(x), 1) for x in (f[0], f[1], f[2], f[3])],
+                "vec": [float(v) for v in feature.tolist()],
+                "score": round(float(score), 3),
+            })
+        except Exception as e:
+            continue
+    return out
+
 def _clip_text_vec(text: str):
     import torch
     with torch.no_grad():
@@ -415,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path.startswith("/classify"):
                 self._handle_classify(body)
             elif self.path.startswith("/face"):
-                self._send(200, {"faces": [], "model": "unavailable"})
+                self._handle_face(body)
             else:
                 self._send(404, {"error": "not found"})
         except Exception as ex:
@@ -519,6 +591,18 @@ class Handler(BaseHTTPRequestHandler):
             "model_ver": "local-rule-v1",
             "note": "clip+llm unavailable, heuristic only",
         })
+
+    def _handle_face(self, body):
+        """人脸检测+识别: 返回 {faces:[{bbox,vec,score}]}。真·人脸向量,供后端人脸聚类。"""
+        ct = self.headers.get("Content-Type", "")
+        if ct.startswith("image/"):
+            img_bytes = body
+        else:
+            p = json.loads(body.decode("utf-8"))
+            img_bytes = base64.b64decode(p.get("image", ""))
+        faces = _face_vectors_from_bytes(img_bytes)
+        model = "yunet-sface" if _FACE_STATE["ready"] else "unavailable"
+        self._send(200, {"faces": faces, "count": len(faces), "model": model})
 
     def _handle_classify(self, body):
         # 复用 caption 逻辑，返回标签集合
