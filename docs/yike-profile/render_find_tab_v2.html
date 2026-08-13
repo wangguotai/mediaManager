@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!--
+  盲测还原: spec_find_tab_v2.json -> render_find_tab_v2.html
+  画布: 750 x 1624 (spec 根为 100%/100% 无绝对尺寸, 按 750x1624 兜底, 比例≈0.46 与原图一致)
+
+  == spec 信息缺口 / 推断点清单 ==
+  1. 根容器 width/height 均为 "100%" 无绝对值 -> 按 750x1624 兜底画布。
+  2. Status Bar 未给 width -> 推断 width:100% (状态栏惯例); 未给背景 -> 透明继承 #F2F4F8。
+  3. 多个 Text 未给 fontSize (22个文件待备份/开启备份/更多>/旅程照片144/城市6/国家1) -> 推断 14px。
+  4. Text 未给 color 处 (#333 默认): "人物/足迹/事物/类型"标题未给color -> 推断 #222; "22个文件待备份" 给了#333。
+  5. Icon 节点只有 name 无矢量数据 -> 按 name 语义用纯 CSS 画简笔 (signal/wifi/battery/search/red_envelope/photo/album/creative)。
+  6. Image 节点无真实图源 -> 占位+小灰字 "img:xxx"; 人物头像加人头剪影以读作"人物"; 地图加浅色块+小路网线。
+  7. Map Card 未给 width, 依 Footprint 默认 align-items:stretch -> 自动满宽 (非缺口, 仅注明)。
+  8. map_bg 未给高度 -> 推断 200px。
+  9. battery value=65 -> 填充宽度 65%。
+  10. Bottom Nav active=search -> 主色 #007AFF, 其余灰 #888; 加激活指示小点。
+  11. nav 图标未给 size -> 推断 26px; search/red_envelope 给 size=24 用 24px。
+  12. red_envelope 用红方块+金封印圆点 语义近似; creative 用四角星花; album 用叠层卡片; photo 用相框+山 语义推断。
+-->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #c8ccd1;
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+  }
+  /* 画布 */
+  #canvas {
+    position: relative;
+    width: 750px;
+    height: 1624px;
+    background-color: #F2F4F8;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 0;
+    color: #333;
+    font-size: 14px;
+  }
+
+  /* ---------- 图标库 (纯CSS简笔) ---------- */
+  .ic { display: inline-block; position: relative; flex: none; }
+
+  /* signal 三道递增竖条 */
+  .ic-signal { width: 18px; height: 14px; display: flex; align-items: flex-end; gap: 2px; }
+  .ic-signal i { width: 3px; background: #000; display: block; border-radius: 1px; }
+  .ic-signal i:nth-child(1){ height: 5px; }
+  .ic-signal i:nth-child(2){ height: 9px; }
+  .ic-signal i:nth-child(3){ height: 13px; }
+
+  /* wifi 三道弧 + 点 */
+  .ic-wifi { width: 18px; height: 14px; position: relative; }
+  .ic-wifi .arc {
+    position: absolute; left: 50%; bottom: 1px; transform: translateX(-50%);
+    border: 2px solid #000; border-bottom: none;
+    border-radius: 50% 50% 0 0 / 100% 100% 0 0;
+  }
+  .ic-wifi .a1 { width: 18px; height: 9px; }
+  .ic-wifi .a2 { width: 12px; height: 6px; bottom: 2px; }
+  .ic-wifi .a3 { width: 6px;  height: 3px; bottom: 3px; }
+  .ic-wifi .dot {
+    position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+    width: 2px; height: 2px; background: #000; border-radius: 50%;
+  }
+
+  /* battery 65% */
+  .ic-bat { width: 26px; height: 13px; position: relative; display: flex; align-items: center; }
+  .ic-bat .shell { width: 22px; height: 12px; border: 2px solid #000; border-radius: 3px; padding: 1px; display: flex; align-items: stretch; }
+  .ic-bat .fill { width: 65%; background: #000; border-radius: 1px; }
+  .ic-bat .cap { position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 2px; height: 5px; background: #000; border-radius: 0 1px 1px 0; }
+
+  /* 放大镜 search (灰) */
+  .ic-mag { width: 24px; height: 24px; position: relative; }
+  .ic-mag .lens { width: 16px; height: 16px; border: 2px solid #888; border-radius: 50%; position: absolute; left: 0; top: 0; }
+  .ic-mag .hand { width: 9px; height: 3px; background: #888; position: absolute; right: -1px; bottom: 3px; transform: rotate(45deg); border-radius: 2px; transform-origin: right center; }
+  .ic-mag.active .lens { border-color: #007AFF; }
+  .ic-mag.active .hand { background: #007AFF; }
+
+  /* 红包 red_envelope: 红方块 + 金封印 */
+  .ic-env { width: 24px; height: 24px; background: #E74C3C; border-radius: 4px; position: relative; overflow: hidden; }
+  .ic-env::before { content:''; position:absolute; top:-6px; left:-6px; width:0; height:0;
+    border-top: 18px solid #C0392B; border-left: 18px solid transparent; border-right: 18px solid transparent; }
+  .ic-env::after { content:''; position:absolute; top:42%; left:50%; transform: translate(-50%,-50%);
+    width: 9px; height: 9px; background: #F1C40F; border-radius: 50%; box-shadow: 0 0 0 2px #E67E22 inset; }
+
+  /* backup 云 */
+  .ic-cloud { width: 22px; height: 16px; position: relative; }
+  .ic-cloud .b1 { position:absolute; left:0; bottom:0; width:14px; height:10px; background:#5B8BD6; border-radius:6px 6px 8px 8px; }
+  .ic-cloud .b2 { position:absolute; left:5px; bottom:6px; width:11px; height:11px; background:#5B8BD6; border-radius:50%; }
+  .ic-cloud .b3 { position:absolute; left:12px; bottom:5px; width:10px; height:12px; background:#5B8BD6; border-radius:50%; }
+
+  /* photo 相框+山 */
+  .ic-photo { width: 26px; height: 22px; border: 2px solid #888; border-radius: 4px; position: relative; overflow: hidden; background:#fff; }
+  .ic-photo .sun { position:absolute; top:3px; right:4px; width:5px; height:5px; background:#888; border-radius:50%; }
+  .ic-photo .mt { position:absolute; bottom:0; left:0; width:0; height:0;
+    border-left: 10px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid #888; }
+  .ic-photo .mt2 { position:absolute; bottom:0; right:-2px; width:0; height:0;
+    border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid #aaa; }
+
+  /* album 叠层卡 */
+  .ic-album { width: 26px; height: 24px; position: relative; }
+  .ic-album .c1 { position:absolute; left:2px; top:2px; width:20px; height:16px; border:2px solid #aaa; border-radius:3px; background:#fff; }
+  .ic-album .c2 { position:absolute; left:5px; top:6px; width:20px; height:16px; border:2px solid #888; border-radius:3px; background:#fff; }
+
+  /* creative 四角星花 */
+  .ic-cre { width: 26px; height: 26px; position: relative; }
+  .ic-cre .star { position:absolute; left:50%; top:50%; width:14px; height:14px; transform:translate(-50%,-50%) rotate(45deg); background:#888; }
+  .ic-cre .star2 { position:absolute; left:50%; top:50%; width:6px; height:6px; transform:translate(-50%,-50%); background:#aaa; border-radius:1px; transform: translate(-50%,-50%) rotate(45deg); }
+  .ic-cre::before { content:''; position:absolute; left:50%; top:50%; width:4px; height:14px; background:#888; transform:translate(-50%,-50%); }
+  .ic-cre::after { content:''; position:absolute; left:50%; top:50%; width:14px; height:4px; background:#888; transform:translate(-50%,-50%); }
+
+  /* 人物头像剪影通用 */
+  .ava { position: relative; border-radius: 50%; overflow: hidden;
+    background: radial-gradient(circle at 50% 35%, #d9c7b8, #b9a18f); display:flex; align-items:flex-end; justify-content:center; }
+  .ava .silh { width: 60%; height: 55%; background: rgba(255,255,255,.55); border-radius: 50% 50% 40% 40% / 60% 60% 40% 40%; margin-bottom: -6%; position: relative; }
+  .ava .silh::before { content:''; position:absolute; left:50%; top:-45%; transform:translateX(-50%); width: 55%; height: 55%; background: rgba(255,255,255,.6); border-radius:50%; }
+  .ava .lbl { position:absolute; bottom:0; left:0; right:0; text-align:center; font-size:6px; color:#777; background:rgba(255,255,255,.6); line-height:7px; }
+
+  /* 地图占位 */
+  .mapimg { position: relative; border-radius: 12px; overflow: hidden;
+    background: linear-gradient(135deg, #cfe8d6 0%, #bfe0cf 40%, #d8ead2 100%); }
+  .mapimg .rd { position:absolute; background: rgba(120,150,120,.35); }
+  .mapimg .lbl { position:absolute; bottom:4px; left:0; right:0; text-align:center; font-size:8px; color:#5a7a5a; }
+  /* nav 激活指示点 */
+  .navdot { width:4px; height:4px; border-radius:50%; background:#007AFF; margin:4px auto 0; }
+
+  .link { color:#007AFF; }
+</style>
+</head>
+<body>
+<div id="canvas">
+
+  <!-- ===== Status Bar ===== -->
+  <div style="flex-direction:row; justify-content:space-between; align-items:center; gap:10px; padding:10px 20px; width:100%; display:flex;">
+    <div style="font-size:16px; font-weight:700; color:#000;">21:16</div>
+    <div style="flex-direction:row; gap:10px; display:flex; align-items:center;">
+      <span class="ic ic-signal"><i></i><i></i><i></i></span>
+      <span class="ic ic-wifi"><span class="arc a1"></span><span class="arc a2"></span><span class="arc a3"></span><span class="dot"></span></span>
+      <span class="ic ic-bat"><span class="shell"><span class="fill"></span></span><span class="cap"></span></span>
+    </div>
+  </div>
+
+  <!-- ===== Top Notification & Actions ===== -->
+  <div style="flex-direction:row; justify-content:space-between; align-items:center; gap:16px; padding:12px 20px; width:100%; display:flex;">
+    <!-- Backup Alert Pill -->
+    <div style="flex-direction:row; justify-content:flex-start; align-items:center; gap:8px; padding:6px 12px; background-color:#FFFFFF; border-radius:24px; display:flex;">
+      <span class="ic ic-cloud"><span class="b1"></span><span class="b2"></span><span class="b3"></span></span>
+      <div style="flex-direction:row; align-items:center; gap:4px; display:flex;">
+        <span style="font-size:14px; color:#333333;">22个文件待备份</span>
+        <span style="font-size:14px; color:#007AFF;">开启备份</span>
+      </div>
+    </div>
+    <!-- Right Actions -->
+    <div style="flex-direction:row; justify-content:flex-end; align-items:center; gap:16px; display:flex;">
+      <span class="ic ic-mag" style="width:24px;height:24px;"><span class="lens"></span><span class="hand"></span></span>
+      <span class="ic ic-env"></span>
+      <div class="ava" style="width:32px;height:32px;">
+        <span class="silh" style="transform:scale(.7);"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Section People 人物 ===== -->
+  <div style="flex-direction:column; justify-content:flex-start; align-items:flex-start; gap:16px; padding:20px 20px 0; width:100%; display:flex;">
+    <!-- header -->
+    <div style="flex-direction:row; justify-content:space-between; align-items:center; width:100%; display:flex;">
+      <span style="font-size:18px; font-weight:700; color:#222;">人物</span>
+      <span style="font-size:14px; color:#999999;">更多 &gt;</span>
+    </div>
+    <!-- avatars scroll row -->
+    <div style="flex-direction:row; gap:16px; display:flex;">
+      <div class="ava" style="width:64px;height:64px;"><span class="silh"></span><span class="lbl">img:头像1</span></div>
+      <div class="ava" style="width:64px;height:64px; background:radial-gradient(circle at 50% 35%, #cdb8a8, #a88f7c);"><span class="silh"></span><span class="lbl">img:头像2</span></div>
+      <div class="ava" style="width:64px;height:64px; background:radial-gradient(circle at 50% 35%, #b9c7d6, #8294a8);"><span class="silh"></span><span class="lbl">img:头像3</span></div>
+      <div class="ava" style="width:64px;height:64px; background:radial-gradient(circle at 50% 35%, #d6c7b9, #a89588);"><span class="silh"></span><span class="lbl">img:头像4</span></div>
+      <div class="ava" style="width:64px;height:64px; background:radial-gradient(circle at 50% 35%, #c7d6c0, #94a890);"><span class="silh"></span><span class="lbl">img:头像5</span></div>
+    </div>
+  </div>
+
+  <!-- ===== Section Footprint 足迹 ===== -->
+  <div style="flex-direction:column; gap:12px; padding:16px 20px 0; width:100%; display:flex;">
+    <div style="flex-direction:row; justify-content:space-between; align-items:center; width:100%; display:flex;">
+      <span style="font-size:18px; font-weight:700; color:#222;">足迹</span>
+      <span style="font-size:14px; color:#999999;">更多 &gt;</span>
+    </div>
+    <!-- Map Card -->
+    <div style="flex-direction:column; background-color:#FFFFFF; border-radius:16px; padding:16px; align-items:center; gap:20px; width:100%; display:flex;">
+      <div class="mapimg" style="width:100%; height:200px;">
+        <div class="rd" style="left:10%; top:20%; width:80%; height:2px; transform:rotate(8deg);"></div>
+        <div class="rd" style="left:25%; top:45%; width:60%; height:2px; transform:rotate(-6deg);"></div>
+        <div class="rd" style="left:5%; top:70%; width:90%; height:3px; transform:rotate(3deg);"></div>
+        <div class="rd" style="left:40%; top:5%; width:2px; height:90%; transform:rotate(12deg);"></div>
+        <span class="lbl">img:map_bg</span>
+      </div>
+      <div style="flex-direction:row; justify-content:space-between; width:100%; display:flex;">
+        <span style="font-size:14px; color:#333;">旅程照片 144</span>
+        <span style="font-size:14px; color:#333;">城市 6</span>
+        <span style="font-size:14px; color:#333;">国家 1</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Section Things 事物 ===== -->
+  <div style="flex-direction:column; gap:16px; padding:20px 20px 0; width:100%; display:flex;">
+    <div style="flex-direction:row; justify-content:space-between; align-items:center; width:100%; display:flex;">
+      <span style="font-size:18px; font-weight:700; color:#222;">事物</span>
+      <span style="font-size:14px; color:#999999;">更多 &gt;</span>
+    </div>
+    <div style="flex-direction:row; gap:12px; flex-wrap:wrap; justify-content:space-between; width:100%; display:flex;">
+      <div style="width:47%; height:120px; background-color:#E0E0E0; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#888;">img:事物1</span></div>
+      <div style="width:47%; height:120px; background-color:#E0E0E0; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#888;">img:事物2</span></div>
+      <div style="width:47%; height:120px; background-color:#E0E0E0; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#888;">img:事物3</span></div>
+      <div style="width:47%; height:120px; background-color:#E0E0E0; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#888;">img:事物4</span></div>
+    </div>
+  </div>
+
+  <!-- ===== Section Types 类型 ===== -->
+  <div style="flex-direction:column; gap:16px; padding:20px 20px 0; width:100%; display:flex;">
+    <span style="font-size:18px; font-weight:700; color:#222;">类型</span>
+    <div style="flex-direction:row; gap:16px; width:100%; display:flex;">
+      <div style="flex:1; height:60px; background-color:#FFFFFF; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#aaa;">img:类型1</span></div>
+      <div style="flex:1; height:60px; background-color:#FFFFFF; border-radius:12px; position:relative;"><span style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:#aaa;">img:类型2</span></div>
+    </div>
+  </div>
+
+  <!-- ===== Bottom Nav ===== -->
+  <div style="position:absolute; bottom:0; width:100%; height:80px; background-color:#FFFFFF; flex-direction:row; justify-content:space-around; align-items:center; display:flex; border-top:1px solid #eee;">
+    <div style="display:flex;flex-direction:column;align-items:center;">
+      <span class="ic ic-photo"><span class="sun"></span><span class="mt"></span><span class="mt2"></span></span>
+      <span class="navdot" style="background:transparent;"></span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;">
+      <span class="ic ic-album"><span class="c1"></span><span class="c2"></span></span>
+      <span class="navdot" style="background:transparent;"></span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;">
+      <span class="ic ic-mag active" style="width:26px;height:26px;"><span class="lens" style="width:17px;height:17px;"></span><span class="hand"></span></span>
+      <span class="navdot"></span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;">
+      <span class="ic ic-cre"><span class="star"></span></span>
+      <span class="navdot" style="background:transparent;"></span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
