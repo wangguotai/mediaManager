@@ -265,6 +265,9 @@ fun SearchTabScreen(
     }
 }
 
+/** 创意工具项（对标一刻相册创意 Tab） */
+private data class CreativeTool(val icon: String, val label: String, val action: () -> Unit)
+
 /**
  * 创意 Tab —— 视频专区 / 照片编辑器 / 幻灯片入口。
  */
@@ -276,24 +279,67 @@ fun CreativeTabScreen(
 ) {
     val scope = rememberCoroutineScope()
     var videos by remember { mutableStateOf<List<MediaMetadata>>(emptyList()) }
-    LazyColumn(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Text("创意", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
+
+    // 工具项（对标一刻相册创意 Tab 的 2 行工具图标）
+    val tools = listOf(
+        CreativeTool("🎬", "视频专区", {
+            scope.launch {
+                videos = MediaService.getMediaListPaged(cloud = true, pageSize = 40)
+                    .list.filter { it.type == MediaType.VIDEO }
+            }
+        }),
+        CreativeTool("🖼", "照片编辑", {}),
+        CreativeTool("📽", "幻灯片", onSlideshow),
+        CreativeTool("🧠", "AI 注解", {}),
+        CreativeTool("🧹", "文件清理", {}),
+        CreativeTool("⭐", "收藏夹", {})
+    )
+
+    LazyColumn(Modifier.fillMaxSize().background(AppBackground).statusBarsPadding()
+        .padding(horizontal = PagePadding, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(SPGap)) {
+        item { SectionTitle("创意") }
+
+        // 两个大主按钮（对标"Ai改图/导入图片"）
         item {
-            ToolCard("🎬 视频专区", "精选你的视频片段", onClick = {
-                scope.launch {
-                    videos = MediaService.getMediaListPaged(cloud = true, pageSize = 40)
-                        .list.filter { it.type == MediaType.VIDEO }
-                }
-            })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                PrimaryActionButton(
+                    label = "AI 改图 / 增强",
+                    icon = "⚡",
+                    onClick = {},
+                    modifier = Modifier.weight(1f),
+                    container = Primary
+                )
+                PrimaryActionButton(
+                    label = "导入图片",
+                    icon = "＋",
+                    onClick = { },
+                    modifier = Modifier.weight(1f),
+                    container = Color(0xFFF0B429)
+                )
+            }
         }
-        item { ToolCard("🖼 照片编辑", "裁剪 / 旋转 / 滤镜", onClick = {}) }
-        item { ToolCard("📽 幻灯片", "时间线全屏放映", onClick = onSlideshow) }
-        item { ToolCard("🧠 AI 注解", "长按照片查看 AI 照片故事", onClick = {}) }
+
+        // 2 行工具网格（每行 3 个）
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(SPGap)) {
+                tools.chunked(3).forEach { rowTools ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(SPGap)
+                    ) {
+                        rowTools.forEach { t ->
+                            ToolIconCell(icon = t.icon, label = t.label, onClick = t.action,
+                                modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
 
         // 视频列表（点"视频专区"后加载）
         if (videos.isNotEmpty()) {
-            item { Text("视频", fontWeight = FontWeight.SemiBold) }
+            item { Spacer(Modifier.height(8.dp)); Text("视频", fontWeight = FontWeight.SemiBold, color = TextPrimary) }
             items(videos.take(20)) { v ->
                 VideoRow(v)
             }
@@ -302,13 +348,46 @@ fun CreativeTabScreen(
 }
 
 @Composable
-private fun ToolCard(title: String, subtitle: String, onClick: () -> Unit) {
-    Card(Modifier.fillMaxWidth().clickable { onClick() },
-        shape = RoundedCornerShape(Dimens.cardCornerRadius)) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun PrimaryActionButton(
+    label: String,
+    icon: String,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    container: Color
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.height(48.dp),
+        shape = RoundedCornerShape(RadiusPill),
+        colors = ButtonDefaults.buttonColors(containerColor = container)
+    ) {
+        Spacer(Modifier.width(4.dp))
+        Text("$icon $label", fontSize = T_Body, fontWeight = FontWeight.Bold, color = Color.White)
+        Spacer(Modifier.width(4.dp))
+    }
+}
+
+@Composable
+private fun ToolIconCell(
+    icon: String,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.clickable { onClick() }.padding(vertical = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(56.dp).clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFFEDF0F8)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(icon, fontSize = 26.sp)
         }
+        Spacer(Modifier.height(6.dp))
+        Text(label, fontSize = 12.sp, color = TextPrimary, maxLines = 1,
+            overflow = TextOverflow.Ellipsis)
     }
 }
 
