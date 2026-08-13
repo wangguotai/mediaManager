@@ -60,19 +60,17 @@ kotlin {
         }
         androidMain {
             dependencies {
-                // Add Android-specific dependencies here. Note that this source set depends on
-                // commonMain by default and will correctly pull the Android artifacts of any KMP
-                // dependencies declared in commonMain.
-
                 // ============================================================================
                 // RN SDK (AAR)
-                // 经 settings.gradle.kts 声明的 flatDir 仓库（指向 rn-module/libs）以“外部依赖”
-                // 形式引用，而非 fileTree 直接依赖。原因：rn-module 是 com.android.library（产 AAR），
-                // AGP 的 hasLocalAarDeps 校验禁止“AAR 产物模块用 fileTree 直接依赖本地 .aar”
-                // （classes/resources 不会被打包进产出 AAR）。fileTree 形式会被拒绝，仅增量构建
-                // （不触发 bundleAar）时被缓存掩盖，clean assemble 全量构建才暴露。
-                // flatDir 下 group 默认为空；KMP 的 KotlinDependencyHandler 不接受 name/ext 形式，
-                // 故在文件底部 dependencies{} 用原生 add(mapOf) 走 androidMainImplementation 配置引用。
+                // KMP 的 `implementation(files(...))` 直接依赖本地 .aar 是受支持的（KMP Gradle
+                // plugin 会处理本地 AAR 的 classes/res，与 AGP 原生产 AAR 模块的 hasLocalAarDeps
+                // 校验不同，后者由 com.android.library 触发，禁止 fileTree 打包）。此前用
+                // settings 的 flatDir + 空 group 的 add(mapOf) 引用，在 AGP 8.12 + gradle 8.14 下
+                // flatDir 无法解析空 group 的 variant-aware AAR（AGP 8.x breaking change），
+                // 报 Could not find :rn-sdk-debug:。改回 files() 直接引用，绕开 flatDir。
+                // 用 api（非 implementation）使本地 AAR 依赖传递给 composeApp（composeApp 直接引用
+                // rn-sdk 的 class，不能只留 rn-module 内部私有）。
+                api(files("libs/rn-sdk-debug.aar"))
                 // ============================================================================
                 // ============================================================================
                 // React Native 编译依赖 (api 由 rn-sdk 提供，需要在应用中显式声明)
@@ -128,14 +126,8 @@ dependencies {
     add("kspCommonMainMetadata", project(":ksp-processor"))
     // 注意：不要添加 kspAndroid/kspAndroidMain，否则会导致重复生成
 
-    // RN SDK (AAR)：经 settings.gradle.kts 的 flatDir 仓库（指向 rn-module/libs）以“外部依赖”
-    // 形式引用。rn-module 是 com.android.library（产 AAR），AGP 的 hasLocalAarDeps 校验禁止
-    // 用 fileTree 直接依赖本地 .aar；改用原生 add(mapOf) 走 androidMainApi 配置，
-    // 使其作为仓库解析的外部依赖，绕过该校验。flatDir 按 name 匹配 rn-sdk-debug.aar。
-    // 用 api（非 implementation）使依赖传递给 composeApp，避免 composeApp 再声明一次导致
-    // duplicate class（同一 AAR 被 resolve 两次）。
-    add("androidMainApi", mapOf("group" to "", "name" to "rn-sdk-debug", "ext" to "aar"))
-}
+    } // dependencies 块结束。RN SDK 已在 androidMain sourceSets 用 implementation(files(...)) 引用。
+// （原 flatDir add(mapOf) 方案在 AGP 8.12 下无法解析空 group 的本地 AAR，已移除。）
 
 // 彻底禁用 KSP metadata 任务的构建缓存与 UP-TO-DATE 旁路。
 // 根因同 feature-common：org.gradle.caching + configuration-cache 下，
