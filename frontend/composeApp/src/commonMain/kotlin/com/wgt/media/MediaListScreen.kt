@@ -995,7 +995,8 @@ fun MediaListScreen(
             }
 
             // "照片" Tab(index=0)：标题 + 搜索栏 + 筛选条 + 时间线网格列表
-            Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            // PRD-v12 UI：与相册/查找/创意 Tab 统一一刻相册浅灰底，消除墨绿白差异。
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding().background(AppBackground)) {
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
                 // onSurface 主色；选择模式计数用 titleMedium。搜索图标用 onSurfaceVariant。

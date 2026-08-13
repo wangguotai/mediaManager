@@ -167,7 +167,9 @@ private fun DateGroupHeader(title: String) {
         label = "headerY"
     )
 
-    val surface = MaterialTheme.colorScheme.surface
+    // PRD-v12 UI：吸顶标题底色与照片 Tab 一刻相册浅灰底统一（AppBackground），
+    // 避免旧 surface(墨绿白) 与新背景出现色带割裂。
+    val surface = AppBackground
     val bgBrush = Brush.verticalGradient(
         colors = listOf(surface, surface.copy(alpha = 0.85f))
     )
