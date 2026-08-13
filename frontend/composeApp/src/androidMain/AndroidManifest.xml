@@ -11,6 +11,8 @@
     <!-- 网络权限：前端通过 ktor 连接后端 REST gateway（局域网 HTTP）必需 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- PRD-v12 拍摄：打开系统相机拍照入库 -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- 备份进度通知：Android 13+（API 33+）需运行时申请 POST_NOTIFICATIONS。
          targetSdk=36 故声明；低于 33 的设备自动忽略该权限。 -->

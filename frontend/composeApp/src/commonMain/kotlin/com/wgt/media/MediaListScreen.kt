@@ -190,6 +190,23 @@ fun MediaListScreen(
     // 展示索引状态/自动相册/人物聚类。"我的"Tab 的 MyTabContent 通过 onOpenAiCenter 触发。
     var showAiCenter by remember { mutableStateOf(false) }
 
+    // PRD-v12 拍摄: 底部居中"拍摄"拉起系统相机,拍完上传入库。
+    val cameraLauncher = rememberCameraLauncher(
+        onCaptured = { bytes ->
+            if (bytes != null && bytes.isNotEmpty()) {
+                mediaListScope.launch {
+                    val ok = com.wgt.feature.media.MediaService.uploadMedia(
+                        fileData = bytes,
+                        filename = "camera_${System.currentTimeMillis()}.jpg"
+                    )
+                    snackbarHostState.showSnackbar(if (ok) "照片已上传" else "照片上传失败")
+                }
+            } else {
+                mediaListScope.launch { snackbarHostState.showSnackbar("已取消拍照") }
+            }
+        }
+    )
+
     // ── 离线模式状态（PRD-v8 §1.5）──
     // 每 5 秒轮询 OfflineCacheManager.isOfflineMode()，驱动离线 banner 显隐。
     // 用户可手动关 banner（offlineBannerDismissed），但网络恢复后 dismissed 标记自动复位，
@@ -934,7 +951,7 @@ fun MediaListScreen(
                 ActivityBottomBar(
                     selectedTab = selectedTab,
                     onSelect = { selectedTab = it },
-                    onCamera = { viewModel.uploadSelectedLocalMedia() }
+                    onCamera = { cameraLauncher.launch?.invoke() }
                 )
             }
         },
