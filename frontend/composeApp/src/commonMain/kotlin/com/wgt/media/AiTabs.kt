@@ -162,6 +162,36 @@ fun AlbumTabScreen(
                     }
                 }
             }
+
+            // 云空间相册 —— 对标一刻相册「新建相册 + 按编辑时间 + 相册卡(封面+标题+N张)」
+            // 整段收敛到一个 item 渲染,避免多 item 分支造成漏渲染。
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("云空间相册", fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text("新建 · 编辑时间", fontSize = T_Label, color = TextSecondary)
+                    }
+                    if (albums.isEmpty()) {
+                        Text("暂无场景相册，先索引照片", fontSize = 13.sp, color = TextSecondary)
+                    } else {
+                        albums.take(6).chunked(2).forEach { rowAl ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(SPGap)) {
+                                rowAl.forEach { album ->
+                                    AlbumCoverCard(
+                                        scene = album.scene,
+                                        count = album.count,
+                                        onClick = { onOpenAlbum(album.scene) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                repeat(2 - rowAl.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -200,6 +230,35 @@ private fun ScenePill(scene: String, count: Int, onClick: () -> Unit, modifier: 
         Text(scene, fontSize = T_Label, fontWeight = FontWeight.Medium,
             color = TextPrimary, maxLines = 1)
         Text("$count 张", fontSize = 11.sp, color = TextSecondary)
+    }
+}
+
+/** 云空间相册封面卡 —— 对标一刻相册相册卡(封面图+标题+N张)。封面暂用emoji占位,可后续接sampleId真图。 */
+@Composable
+private fun AlbumCoverCard(
+    scene: String,
+    count: Int,
+    onClick: () -> Unit,
+    modifier: Modifier
+) {
+    Card(
+        modifier = modifier.clickable { onClick() },
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Column {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(72.dp)
+                    .background(Color(0xFFF8F6FE)),
+                contentAlignment = Alignment.Center
+            ) { Text("🖼", fontSize = 28.sp) }
+            Column(Modifier.padding(SPCardPad)) {
+                Text(scene, fontWeight = FontWeight.SemiBold, color = TextPrimary,
+                    fontSize = T_Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Text("$count 张", fontSize = T_Label, color = TextSecondary)
+            }
+        }
     }
 }
 
