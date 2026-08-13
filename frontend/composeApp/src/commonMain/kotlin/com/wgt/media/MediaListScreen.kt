@@ -1038,6 +1038,12 @@ fun MediaListScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 )
+                // PRD-v12 UI 还原(spec Feature_Cards)：一刻相册照片页顶部「备份/清理」功能卡。
+                FeatureCardsRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
                 // onSurface 主色；选择模式计数用 titleMedium。搜索图标用 onSurfaceVariant。
@@ -5164,6 +5170,58 @@ private fun HomeSceneChip(album: MediaService.AutoAlbum, onClick: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Text(album.scene, fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Medium, maxLines = 1)
             Text("${album.count} 张", fontSize = 11.sp, color = TextSecondary)
+        }
+    }
+}
+
+/**
+ * 照片页顶部功能卡行 —— 还原 spec Feature_Cards(350x140,含2卡):
+ * 左「N个文件待备份+开启备份」、右「文件清理」。对标一刻相册照片页功能卡。
+ */
+@Composable
+private fun FeatureCardsRow(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // 左：备份卡(占2/3)
+        Card(
+            modifier = Modifier.weight(2f),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardWhite)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(14.dp)
+            ) {
+                Text("☁", fontSize = 26.sp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("云端备份更安全", fontSize = 13.sp, color = TextSecondary)
+                    Text("22个文件待备份", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 15.sp)
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF0052D9))
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) { Text("开启备份", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+            }
+        }
+        // 右：清理卡(占1/3)
+        Card(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardWhite)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
+            ) {
+                Text("🧹", fontSize = 22.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("文件清理", fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }
