@@ -166,3 +166,36 @@ CREATE INDEX idx_persons_cluster ON media_persons(user_id, cluster_id);
 6. 人物聚类 + 联合检索
 7. 前端 UI + APK 实测
 8. 全链路 QA + 记忆归档
+
+---
+
+## §9 UI 对齐一刻相册 5 功能 Tab 对照（真机+qwen+apktool 逆向）
+
+> 2026-08-13 持续迁移。一刻相册 5 功能（照片/相册/拍摄/查找/创意）逐屏对齐。
+> 依据：真机截图 + qwen 结构化 spec + apktool 逆向 APK 资源。
+
+| 一刻相册 Tab | 我们现状 | 还原状态 |
+|---|---|---|
+| **照片**(时间线+年份) | 时间线网格+功能卡(备份/清理)+活动Banner+按时间\|相册切换 | ✅ 已对齐 |
+| **相册**(智能搜图成册+云空间相册) | 智能搜图成册浅蓝卡+云空间相册列表+人物+筛选+活动Banner+一键创建(真实图标) | ✅ 已对齐 |
+| **拍摄**(真相机) | 居中凸起渐变按钮→ACTION_IMAGE_CAPTURE 拉起系统相机→上传 | ✅ 已对齐 |
+| **查找**(智能聚合) | 场景/人物/足迹(点亮地图卡)/类型(截图视频动态)分区+AI语义搜索 | ✅ 已对齐 |
+| **创意**(工具网格) | 活动 Banner+2行4列8工具(时光足迹/美颜/AI消除等)+AI改图/导入双主按钮 | ✅ 已对齐 |
+
+### 图标还原
+- 底部 5 tab：apktool 逆向真实 webp（checked/unchecked 两态）+ tint 选中蓝/未选灰 ✅
+- 照片页搜索入口：真实放大镜图标 ✅
+- 相册创建入口：真实蓝圆白加号图标 ✅
+- 内部工具/分区：emoji 过渡（APK 无整齐对应小图标集）
+
+### 设计稿工具链（screenshot-to-spec skill）
+- `scripts/doc.py`：qwen 多模态产 Figma 式 JSON spec（含 audit 审计+补问循环）
+- `scripts/render_spec.py`：spec→HTML→Chrome 截图盲测基线
+- `scripts/extract_icons.py`：单独识别图标产出 iconRef+shape
+- `scripts/pixel_sampler.py`：截图像素采样取色
+- apktool 2.9.3（代理下载）逆向 APK 恢复真实资源名
+
+### 已知遗留
+- AiTabs 引用 Compose 资源 Res 需"同包函数封装"绕过（star=Int 冲突谜题）
+- 盲还原度 ~40-50%（结构 70%/色值 20%/间距 40%，图标 iconRef 仍是最大失真）
+- 拍完相机上传闭环需真人按键验证
