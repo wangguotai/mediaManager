@@ -487,6 +487,9 @@ fun CreativeTabScreen(
         verticalArrangement = Arrangement.spacedBy(SPGap)) {
         item { SectionTitle("创意") }
 
+        // 活动 Banner —— 还原 spec BannerAd(375x240 bg #E8F5E9): 创意页顶部活动区。
+        item { CreativePromoBanner() }
+
         // 两个大主按钮（对标"Ai改图/导入图片"）—— 像素采样一刻相册创意页:
         // 主按钮为清淡浅色底(#F8F6FE)+深色字,而非白字深色CTA,按像素严格对齐。
         item {
@@ -693,6 +696,28 @@ private fun AlbumPromoBanner() {
                 ) { Text("去看看", color = Color(0xFF47B4F5), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
             }
             Text("🏖", fontSize = 34.sp)
+        }
+    }
+}
+
+/** 创意Tab活动Banner —— 还原 spec BannerAd(bg #E8F5E9浅绿): 顶部活动入口。 */
+@Composable
+private fun CreativePromoBanner() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9))
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(SPCardPad)
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("AI 创作大赛", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 16.sp)
+                Spacer(Modifier.height(2.dp))
+                Text("一键生成创意大片，赢创作奖励", color = TextSecondary, fontSize = 13.sp)
+            }
+            Text("🎨", fontSize = 30.sp)
         }
     }
 }
