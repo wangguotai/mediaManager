@@ -696,11 +696,33 @@ func (s *Server) handleAISearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// UX 提示：结果空时不直接甩"未找到"，给出可行动的 hint。
+	// ① 库根本未索引（Indexed=0）→ 建议先索引；② 特征服务不可达 → 告知。
+	// 有结果或已索引但确实无匹配时 hint=""，前端不显示。
+	hint := ""
+	if len(results) == 0 {
+		prog, _ := s.store.AIProgress(r.Context(), uid)
+		hc := &http.Client{Timeout: 3 * time.Second}
+		svcOK := false
+		if resp, herr := hc.Get(aiFeatureSvcURL + "/health"); herr == nil {
+			svcOK = resp.StatusCode == 200
+			resp.Body.Close()
+		}
+		switch {
+		case prog != nil && prog.Indexed == 0:
+			hint = "媒体库尚未进行 AI 索引，先到 AI 智能管理里触发生成，或稍等后台索引完成"
+		case !svcOK:
+			hint = "AI 特征服务未就绪，暂时无法语义检索"
+		default:
+			hint = "没有匹配的照片，试试更具体的描述（如服装/场景/颜色）"
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results":      results,
 		"total":        len(results),
 		"query":        q,
 		"parsed_query": parseSmartQuery(q),
+		"hint":         hint,
 	})
 }
 
