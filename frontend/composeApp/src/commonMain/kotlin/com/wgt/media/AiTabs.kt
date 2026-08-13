@@ -467,19 +467,23 @@ fun CreativeTabScreen(
     val scope = rememberCoroutineScope()
     var videos by remember { mutableStateOf<List<MediaMetadata>>(emptyList()) }
 
-    // 工具项（对标一刻相册创意 Tab 的 2 行工具图标）
+    // 工具项 —— 对标一刻相册创意 Tab 2行4列共8工具,emoji按 icons_all 库 shape:
+    // 时光足迹=时钟/人像美颜=人脸星星/AI消除=橡皮擦/AI动图=方形播放/创意拼图=交错矩形/
+    // 一键成片=音符/朋友圈9图=九宫格/全部工具=四圆点。视频专区保留实际功能。
     val tools = listOf(
+        CreativeTool("🕐", "时光足迹", onSlideshow),
+        CreativeTool("💆", "人像美颜", {}),
+        CreativeTool("🧽", "AI 消除", {}),
+        CreativeTool("🎞", "AI 动图", {}),
+        CreativeTool("🧩", "创意拼图", {}),
+        CreativeTool("🎵", "一键成片", {}),
+        CreativeTool("🔲", "朋友圈9图", {}),
         CreativeTool("🎬", "视频专区", {
             scope.launch {
                 videos = MediaService.getMediaListPaged(cloud = true, pageSize = 40)
                     .list.filter { it.type == MediaType.VIDEO }
             }
-        }),
-        CreativeTool("🖼", "照片编辑", {}),
-        CreativeTool("📽", "幻灯片", onSlideshow),
-        CreativeTool("🧠", "AI 注解", {}),
-        CreativeTool("🧹", "文件清理", {}),
-        CreativeTool("⭐", "收藏夹", {})
+        })
     )
 
     LazyColumn(Modifier.fillMaxSize().background(AppBackground).statusBarsPadding()
