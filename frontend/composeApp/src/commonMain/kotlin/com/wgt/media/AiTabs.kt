@@ -97,19 +97,44 @@ fun AlbumTabScreen(
         if (loading) {
             item { CircularProgressIndicator(modifier = Modifier.padding(24.dp)) }
         } else {
-            // 智能相册（场景）— 一刻相册风格：横排圆圈封面卡
-            item { Text("智能相册 · 按场景", fontWeight = FontWeight.SemiBold) }
+            // 智能搜图成册 —— 一刻相册风格：浅蓝功能卡 + 白色胶囊场景标签。
+            // 动态场景来自 /api/ai/albums(AI 自动分类),点击标签即 AI 语义搜索该场景。
             if (albums.isEmpty()) {
                 item { EmptyHint("暂无场景分类，先到照片页索引你的照片") }
             } else {
                 item {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(albums.take(12)) { album ->
-                            SceneCard(
-                                title = album.scene,
-                                count = album.count,
-                                onClick = { onOpenAlbum(album.scene) }
-                            )
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(RadiusCard),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFFE3EBFA)  // 一刻相册「智能搜图成册」浅天蓝底
+                        )
+                    ) {
+                        Column(Modifier.padding(SPCardPad)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("✨", fontSize = 18.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Text("智能搜图成册", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            // 白色胶囊场景标签(FlowRow 近似:用 chunked 换行排列)
+                            albums.take(9).chunked(3).forEach { rowAlbums ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    rowAlbums.forEach { album ->
+                                        ScenePill(
+                                            scene = album.scene,
+                                            count = album.count,
+                                            onClick = { onOpenAlbum(album.scene) },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    // 补齐空位，保持每行3个视觉均等
+                                    repeat(3 - rowAlbums.size) {
+                                        Spacer(Modifier.weight(1f))
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                            }
                         }
                     }
                 }
@@ -156,6 +181,25 @@ private fun SceneCard(title: String, count: Int, onClick: () -> Unit) {
             Text("$count 张", fontSize = T_Label,
                 color = TextSecondary)
         }
+    }
+}
+
+/**
+ * 智能搜图成册的白色胶囊场景标签 —— 对标一刻相册相册页智能分类胶囊。
+ */
+@Composable
+private fun ScenePill(scene: String, count: Int, onClick: () -> Unit, modifier: Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(RadiusPill))
+            .background(CardWhite)
+            .clickable { onClick() }
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(scene, fontSize = T_Label, fontWeight = FontWeight.Medium,
+            color = TextPrimary, maxLines = 1)
+        Text("$count 张", fontSize = 11.sp, color = TextSecondary)
     }
 }
 
