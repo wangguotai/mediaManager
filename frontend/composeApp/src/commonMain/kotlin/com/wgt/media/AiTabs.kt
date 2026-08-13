@@ -56,6 +56,44 @@ fun AlbumTabScreen(
     ) {
         item { SectionTitle("相册") }
 
+        // 一键创建相册入口 —— 对标一刻相册「一键创建相册 >」
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable { onOpenAlbums() },
+                shape = RoundedCornerShape(RadiusCard),
+                colors = CardDefaults.cardColors(containerColor = CardWhite)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(SPCardPad)
+                ) {
+                    Text("＋", fontSize = 20.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Text("一键创建相册", fontWeight = FontWeight.Medium, color = TextPrimary,
+                        modifier = Modifier.weight(1f))
+                    Text("查看 ›", fontSize = T_Label, color = TextSecondary)
+                }
+            }
+        }
+
+        // 筛选 pill（全部 / 我的 / 共享）—— 对标一刻相册相册页筛选标签
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf("全部", "我的", "共享").forEach { tag ->
+                    val selected = tag == "全部"
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(RadiusPill))
+                            .background(if (selected) Primary else Color(0xFFEDF0F8))
+                            .clickable { }
+                            .padding(horizontal = 16.dp, vertical = 7.dp)
+                    ) {
+                        Text(tag, fontSize = T_Label, color = if (selected) Color.White else TextSecondary)
+                    }
+                }
+            }
+        }
+
         if (loading) {
             item { CircularProgressIndicator(modifier = Modifier.padding(24.dp)) }
         } else {
@@ -221,8 +259,17 @@ fun SearchTabScreen(
                         }
                     }
                 }
-                // 人物 —— 一刻相册风格：横排圆头像
-                item { Spacer(Modifier.height(8.dp)); Text("人物") }
+                // 人物 —— 一刻相册风格：横排圆头像 + 右侧「更多 >」
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("人物", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        if (persons.isNotEmpty()) {
+                            Text("更多 ›", fontSize = T_Label, color = TextSecondary)
+                        }
+                    }
+                }
                 if (persons.isEmpty()) {
                     item { EmptyHint("暂无人物聚类") }
                 } else {
