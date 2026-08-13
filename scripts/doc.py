@@ -24,7 +24,8 @@ def audit_spec(spec):
     盲测还原度低的根因: qwen 收到升级 prompt 仍不遵守, 这里硬校验抓出来,
     驱动针对性补问重试,把还原度从 55-60% 推向 ≥85%。"""
     gaps = []
-    frames = [n for n in walk_nodes(spec) if n.get("type") in ("FRAME", "COMPONENT")]
+    # 容器=有 children 的节点(不论 type 名,qwen 常给 type=None/缺失,不能靠 type=FRAME 筛)。
+    frames = [n for n in walk_nodes(spec) if n.get("children")]
     for i, fr in enumerate(frames):
         name = fr.get("name") or f"frame#{i}"
         miss = [f for f in REQUIRED_CONTAINER_FIELDS if f not in fr]
