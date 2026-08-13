@@ -485,16 +485,53 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 			}
 			boost = rawBoost
 		}
+		// PRD-v12 §5 混合排序:语义为主 + 时间近度(0.2) + 质量(0.1)。
+		// 时间近度:与当前时间差归一化(越近越高,0~0.2),1年内线性衰减。
+		// 质量:size 归一化(大图通常清晰度高,0~0.1,上限 5MB)。
+		// 权重为 sem 同量级的相对加成(非 PRD 理想 0.7/0.2/0.1 绝对值,因 sem 本身在 0.2~0.5)。
+		timeScore := recencyScore(m)
+		qualityScore := float32(0)
+		if m.Size > 0 {
+			qualityScore = 0.1 * float32(m.Size) / float32(5 * 1024 * 1024)
+			if qualityScore > 0.1 {
+				qualityScore = 0.1
+			}
+		}
 		mediaMap := mediaToMap(m)
 		mediaMap["thumbnail_url"] = "/api/media/stream/" + mid
 		out = append(out, aiSearchResult{
 			Media:   mediaMap,
-			Score:   cands[i].sem + boost,
+			Score:   cands[i].sem + boost + timeScore + qualityScore,
 			Caption: captionOf(ann),
 			Scene:   sceneOf(ann),
 		})
 	}
 	return out, nil
+}
+
+// recencyScore 时间近度评分（PRD-v12 §5 混合排序的 0.2 权重）。
+// 取 media 拍摄时间（taken_at 优先，否则 created_at）与 now 之差，1 年内线性衰减到 0。
+// 超 1 年或无时间返回 0；最新（近 0 天）返回 0.2。
+func recencyScore(m *storage.Media) float32 {
+	var t time.Time
+	if m.TakenAt > 0 {
+		t = time.UnixMilli(m.TakenAt)
+	} else {
+		t = m.CreatedAt
+	}
+	if t.IsZero() {
+		return 0
+	}
+	d := time.Since(t)
+	if d < 0 {
+		return 0.2 // 未来时间（时钟偏差）按最新处理
+	}
+	const year = 365 * 24 * time.Hour
+	if d >= year {
+		return 0
+	}
+	// 线性：0 天→0.2，365 天→0
+	return 0.2 * float32((year-d).Seconds()/year.Seconds())
 }
 
 // wordInQuery 判断 text 中是否有词（≥2 字）出现在 queryLower 中。
