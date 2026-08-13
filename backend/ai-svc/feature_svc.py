@@ -103,50 +103,55 @@ def _try_load_face():
                 print("[face] models missing, /face degraded", flush=True)
                 return
             det = cv2.FaceDetectorYN.create(yunet, "", (320, 320))
+            # 降低置信度阈值至 0.15(默认 0.6 过高, 会丢弃中等置信人脸; 诊断实测需 0.1~0.6)
+            det.setScoreThreshold(0.15)
             rec = cv2.FaceRecognizerSF.create(sface, "")
             _FACE_STATE.update(detector=det, recognizer=rec, ready=True)
-            print("[face] YuNet+SFace loaded", flush=True)
+            print("[face] YuNet+SFace loaded, score_thr=0.15", flush=True)
         except Exception as e:
             _FACE_STATE["err"] = str(e)
             print(f"[face] unavailable: {e}", flush=True)
 
 def _face_vectors_from_bytes(img_bytes):
-    """用 YuNet 检测人脸, SFace 提取向量。返回 list of {bbox, vec, score}。"""
+    """用 YuNet 检测人脸, SFace 提取向量。返回 list of {bbox, vec, score}。
+
+    YuNet 期望 BGR 输入(OpenCV 约定)。用 cv2.imdecode 读 BGR(勿用 PIL RGB,
+    会导致检测率骤降)。检测成功后逐人脸裁剪→SFace 提 128 维向量。
+    """
     if not _FACE_STATE["ready"]:
         _try_load_face()
     if not _FACE_STATE["ready"]:
         return []
     import cv2, numpy as np
-    from PIL import Image
-    import io
-    img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+    np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)  # BGR
+    if img is None:
+        return []
     h, w = img.shape[:2]
     det = _FACE_STATE["detector"]
     det.setInputSize((w, h))
     ok, faces = det.detect(img)
     out = []
-    if not ok or faces is None:
+    if not ok or faces is None or len(faces) == 0:
         return out
     for f in faces:
-        # f: [x, y, w, h, landmarks5..., score]
         x, y, fw, fh = f[0], f[1], f[2], f[3]
         score = float(f[-1]) if len(f) > 0 else 0.0
-        # 裁剪人脸区域(带margin)用于识别
         x0, y0 = max(0, int(x)), max(0, int(y))
-        x1, y1 = min(w, int(x+fw)), min(h, int(y+fh))
+        x1, y1 = min(w, int(x + fw)), min(h, int(y + fh))
         if x1 <= x0 or y1 <= y0:
             continue
-        face_img = img[y0:y1, x0:x1]
+        face_img = img[y0:y1, x0:x1]  # BGR crop
         try:
-            # SFace 输入处理: 归一化到112x112 float32
-            face_resized = cv2.resize(face_img, (112, 112))
-            face_input = cv2.cvtColor(face_resized, cv2.COLOR_RGB2BGR).astype(np.float32)
+            # SFace.feature 内部处理输入尺寸(NET和mean/std), 不要手动 resize(实测resize会致feature内部错)
+            face_input = face_img.astype(np.float32)
             feature = _FACE_STATE["recognizer"].feature(face_input)
-            # SFace 返回 float32 ndarray, 需转标准 Python float 才能 JSON 序列化
+            # feature shape (1,128), feature.tolist() 是 [[...]] 需取 [0]; flatten 更稳
             out.append({
-                "bbox": [round(float(x), 1) for x in (f[0], f[1], f[2], f[3])],
-                "vec": [float(v) for v in feature.tolist()],
-                "score": round(float(score), 3),
+                "bbox": [round(float(x), 1), round(float(y), 1),
+                         round(float(fw), 1), round(float(fh), 1)],
+                "vec": [float(v) for v in feature.reshape(-1).tolist()],
+                "score": round(score, 3),
             })
         except Exception as e:
             continue
