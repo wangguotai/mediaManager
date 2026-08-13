@@ -34,14 +34,23 @@ def audit_spec(spec):
         if miss:
             gaps.append((name, miss,
                          f"容器「{name}」缺 {'/'.join(miss)},请按视觉补全(紧贴=gap0/flex-start,居中=center)"))
-    # iconRef: 小矩形(≤48)疑似图标却无 iconRef
+    # iconRef: 疑似图标却无 iconRef。放宽判定(qwen 图标 type 常非 RECTANGLE):
+    # 小尺寸(≤64)非文字节点,或 name 含 icon/tab/nav/图标/camera/search 等关键词。
+    ICON_KW = ("icon", "tab", "nav", "图标", "camera", "search", "arrow", "back", "plus",
+               "bell", "avatar", "head", "face", "ic_")
     for n in walk_nodes(spec):
-        t = n.get("type")
+        t = (n.get("type") or "")
+        t_low = t.lower() if isinstance(t, str) else ""
+        if t_low in ("text",):  # 文字节点不是图标
+            continue
+        nm = (n.get("name") or "").lower()
         w = n.get("width"); h = n.get("height")
-        if t == "RECTANGLE" and isinstance(w, (int, float)) and isinstance(h, (int, float)) \
-           and w <= 48 and h <= 48 and "iconRef" not in n:
-            gaps.append((n.get("name", "rect"), ["iconRef"],
-                         f"小矩形「{n.get('name','rect')}」可能是图标,请补 iconRef 与形状描述"))
+        small = isinstance(w, (int, float)) and isinstance(h, (int, float)) and w <= 64 and h <= 64
+        named = any(k in nm for k in ICON_KW)
+        is_icon_type = t_low in ("icon", "image") and isinstance(w,(int,float)) and w <= 64
+        if (small or named or is_icon_type) and "iconRef" not in n:
+            gaps.append((n.get("name", "icon?"), ["iconRef"],
+                         f"节点「{n.get('name','icon?')}」可能是图标,请补 iconRef(如 icon.tab.photo)与形状描述(如\"相机镜头圆+凸起\")"))
     # 底部 TabBar fixed
     for fr in frames:
         nm = (fr.get("name") or "").lower()
