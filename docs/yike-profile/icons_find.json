@@ -1,0 +1,88 @@
+{
+  "icons": [
+    {
+      "name": "文件备份",
+      "iconRef": "iconfont icon-backup",
+      "shape": "手机轮廓带云朵",
+      "color": "蓝白"
+    },
+    {
+      "name": "搜索",
+      "iconRef": "iconfont icon-search",
+      "shape": "放大镜",
+      "color": "黑色"
+    },
+    {
+      "name": "活动/红包",
+      "iconRef": "iconfont icon-redpacket",
+      "shape": "红包袋",
+      "color": "橙红色"
+    },
+    {
+      "name": "用户头像",
+      "iconRef": "iconfont icon-user",
+      "shape": "圆形人像",
+      "color": "多彩"
+    },
+    {
+      "name": "更多",
+      "iconRef": "iconfont icon-more",
+      "shape": "大于号箭头",
+      "color": "灰色"
+    },
+    {
+      "name": "地图定位",
+      "iconRef": "iconfont icon-map-loc",
+      "shape": "定位针加旗帜",
+      "color": "白色"
+    },
+    {
+      "name": "截图",
+      "iconRef": "iconfont icon-screenshot",
+      "shape": "方框带折角",
+      "color": "深灰"
+    },
+    {
+      "name": "动态照片",
+      "iconRef": "iconfont icon-livephoto",
+      "shape": "同心圆靶心",
+      "color": "深灰"
+    },
+    {
+      "name": "安全保障",
+      "iconRef": "iconfont icon-shield-check",
+      "shape": "盾牌加对勾",
+      "color": "蓝绿渐变"
+    },
+    {
+      "name": "照片",
+      "iconRef": "iconfont icon-photo",
+      "shape": "笑脸剪影",
+      "color": "浅灰"
+    },
+    {
+      "name": "相册",
+      "iconRef": "iconfont icon-album",
+      "shape": "圆角矩形胶卷",
+      "color": "浅灰"
+    },
+    {
+      "name": "拍摄",
+      "iconRef": "iconfont icon-camera",
+      "shape": "圆角相机镜头",
+      "color": "蓝紫渐变"
+    },
+    {
+      "name": "查找",
+      "iconRef": "iconfont icon-find",
+      "shape": "带笑脸放大镜",
+      "color": "黑色"
+    },
+    {
+      "name": "创意",
+      "iconRef": "iconfont icon-creative",
+      "shape": "加号与星形组合",
+      "color": "浅灰"
+    }
+  ]
+}
