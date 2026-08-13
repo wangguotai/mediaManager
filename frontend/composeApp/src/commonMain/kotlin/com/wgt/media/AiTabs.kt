@@ -50,11 +50,11 @@ fun AlbumTabScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().statusBarsPadding(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        modifier = Modifier.fillMaxSize().background(AppBackground).statusBarsPadding(),
+        contentPadding = PaddingValues(horizontal = PagePadding, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(SPGap)
     ) {
-        item { Text("相册", fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+        item { SectionTitle("相册") }
 
         if (loading) {
             item { CircularProgressIndicator(modifier = Modifier.padding(24.dp)) }
@@ -107,15 +107,16 @@ fun AlbumTabScreen(
 private fun SceneCard(title: String, count: Int, onClick: () -> Unit) {
     Card(
         modifier = Modifier.width(150.dp).clickable { onClick() },
-        shape = RoundedCornerShape(Dimens.cardCornerRadius)
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
     ) {
-        Column(Modifier.padding(14.dp)) {
+        Column(Modifier.padding(SPCardPad)) {
             Text("🖼", fontSize = 30.sp)
             Spacer(Modifier.height(10.dp))
-            Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1,
+            Text(title, fontWeight = FontWeight.SemiBold, color = TextPrimary, maxLines = 1,
                 overflow = TextOverflow.Ellipsis)
-            Text("$count 张", fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$count 张", fontSize = T_Label,
+                color = TextSecondary)
         }
     }
 }
@@ -135,7 +136,7 @@ private fun PersonAvatar(
         // 圆形头像(此刻用 emoji 占位,后续可接人脸缩略图)
         Box(
             modifier = Modifier.size(64.dp).clip(RoundedCornerShape(32.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                .background(Color(0xFFEDF0F8)),
             contentAlignment = Alignment.Center
         ) {
             Text("🙂", fontSize = 30.sp)
@@ -148,9 +149,9 @@ private fun PersonAvatar(
             TextButton(onClick = { onRename(name); editing = false }) { Text("保存") }
         } else {
             Text(if (cluster.name.isEmpty()) "未命名" else cluster.name,
-                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${cluster.faceCount} 张", fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                fontSize = T_Label, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${cluster.faceCount} 张", fontSize = 12.sp,
+                color = TextSecondary)
             TextButton(onClick = { editing = true }) { Text("命名") }
         }
     }
@@ -180,9 +181,10 @@ fun SearchTabScreen(
         loading = false
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("查找", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+    Column(Modifier.fillMaxSize().background(AppBackground).statusBarsPadding()
+        .padding(horizontal = PagePadding, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(SPGap)) {
+        SectionTitle("查找")
         // AI 语义搜索
         OutlinedTextField(
             value = query,
