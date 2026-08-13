@@ -913,11 +913,12 @@ fun MediaListScreen(
                     }
                 )
             } else {
-                // 正常模式：5-Tab 底部导航栏（MIUI 风格 + 中间圆形凸起"活动"Tab）
-                // 顺序：0 本地图片 / 1 已上传 / 2 活动(凸起,RN) / 3 网盘图片 / 4 我的
+                // 正常模式：5-功能底部导航栏（一刻相册式，中间"拍摄"凸起按钮）
+                // 顺序：照片 / 相册 / (拍摄) / 查找 / 创意
                 ActivityBottomBar(
                     selectedTab = selectedTab,
-                    onSelect = { selectedTab = it }
+                    onSelect = { selectedTab = it },
+                    onCamera = { viewModel.uploadSelectedLocalMedia() }
                 )
             }
         },
@@ -1416,12 +1417,12 @@ fun MediaListScreen(
 @Composable
 private fun ActivityBottomBar(
     selectedTab: Int,
-    onSelect: (Int) -> Unit
+    onSelect: (Int) -> Unit,
+    onCamera: () -> Unit = {}
 ) {
     // 贴底导航栏：去除浮卡圆角与外层 padding，直接贴边贴底，
     // 顶部 0.5dp outlineVariant 分隔线 + 8dp shadowElevation 营造稳重浮起感。
-    // 对标 Google Photos / iOS：导航栏应为一整条贴底面板，而非悬浮卡片。
-    // PRD-v12 UI 对齐一刻相册：四位 Tab = 照片 / 相册 / 查找 / 创意。
+    // PRD-v12 UI 对齐一刻相册五功能：照片 / 相册 / (拍摄·居中凸起) / 查找 / 创意。
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RectangleShape,
@@ -1447,6 +1448,11 @@ private fun ActivityBottomBar(
                 label = "相册",
                 selected = selectedTab == 1,
                 onClick = { onSelect(1) }
+            )
+            // 居中"拍摄"大按钮(一刻相册式渐变凸起)——触发相机/拍摄,不切 tab。
+            CenterCameraFab(
+                selected = false,
+                onClick = onCamera
             )
             NavTab(
                 icon = Res.drawable.ic_search,
@@ -1527,32 +1533,17 @@ private fun NavTab(
 }
 
 /**
- * 中间"活动"Tab：精致圆形凸起 FAB。
+ * 居中"拍摄"大按钮 —— 一刻相册式：凸起渐变圆 + 相机图标。
  *
- * - 尺寸 48dp（更精致），elevation 始终 4dp
- * - 选中：primary 背景 + onPrimary 图标
- * - 未选中：primaryContainer 背景 + onPrimaryContainer 图标
- * - 颜色 tween(200) 柔和过渡；图标 24dp
+ * 视觉对齐一刻相册底部居中的拍摄大按钮(蓝→紫渐变凸起,白色相机图标)。
+ * 相机图标用 emoji(📷,跨平台 KMP 无需额外 drawable 资源)。点击触发
+ * [onCamera](上传/拍照入口),不切换当前 Tab。
  */
 @Composable
-private fun CenterActivityFab(
+private fun CenterCameraFab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val containerColor = if (selected) MaterialTheme.colorScheme.primary
-    else MaterialTheme.colorScheme.primaryContainer
-    val iconColor = if (selected) MaterialTheme.colorScheme.onPrimary
-    else MaterialTheme.colorScheme.onPrimaryContainer
-    val animContainerColor by animateColorAsState(
-        targetValue = containerColor,
-        animationSpec = tween(200),
-        label = "fabContainer"
-    )
-    val animIconColor by animateColorAsState(
-        targetValue = iconColor,
-        animationSpec = tween(200),
-        label = "fabIcon"
-    )
     Column(
         modifier = Modifier
             .clickable(
@@ -1562,33 +1553,28 @@ private fun CenterActivityFab(
             ),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Surface(
-            shape = CircleShape,
-            color = animContainerColor,
-            shadowElevation = 4.dp,
+        // 凸起渐变圆(一刻相册拍摄按钮)：蓝→紫,白图标,凸起高出底栏。
+        Box(
             modifier = Modifier
-                .size(48.dp)
-                .offset(y = (-10).dp)
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    painter = painterResource(Res.drawable.ic_cloud),
-                    contentDescription = "活动",
-                    tint = animIconColor,
-                    modifier = Modifier.size(24.dp)
+                .size(52.dp)
+                .offset(y = (-12).dp)
+                .background(
+                    brush = Brush.linearGradient(
+                        listOf(Color(0xFF4884F0), Color(0xFF7A5AF8))
+                    ),
+                    shape = CircleShape
                 )
-            }
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("📷", fontSize = 24.sp)
         }
         // 文案回补凸起位移，与左右 Tab 文案视觉齐平。
         Text(
-            "活动",
+            "拍摄",
             fontSize = 12.sp,
-            color = if (selected) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Normal,
             maxLines = 1,
             modifier = Modifier.offset(y = (-6).dp)
         )
