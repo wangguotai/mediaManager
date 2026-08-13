@@ -1277,6 +1277,25 @@ fun MediaListScreen(
                     )
                 }
 
+                // PRD-v12 UI：照片首页「智能聚合」区 —— 对齐一刻相册首页主体(人物/足迹/场景)。
+                // 复用 MediaService 的 persons/geo/albums 数据,照片首页也能智能推荐入口,
+                // 而非纯时间线。选择模式/搜索态下隐藏,避免与批量操作/搜索结果冲突。
+                if (!viewModel.hasSelection && !viewModel.favoritesOnly) {
+                    HomeAggregationSection(
+                        onOpenPerson = { clusterId ->
+                            advancedSearchScope.launch {
+                                viewModel.applyAdvancedSearchResults(MediaService.getPersonMedia(clusterId))
+                            }
+                        },
+                        onOpenScene = { scene ->
+                            advancedSearchScope.launch {
+                                viewModel.applyAdvancedSearchResults(
+                                    MediaService.getAISearch(scene, 100)?.results?.map { it.media } ?: emptyList())
+                            }
+                        }
+                    )
+                }
+
                 // Tab 切换整体淡入淡出（照片 Tab 内：内容本质是云端时间线）
                 Crossfade(
                     targetState = selectedTab,
@@ -4987,6 +5006,138 @@ private fun PromoBannerCard(modifier: Modifier = Modifier) {
                 }
                 Text("📸", fontSize = 30.sp)
             }
+        }
+    }
+}
+
+/**
+ * 照片首页「智能聚合」区 —— 对齐一刻相册首页主体：人物(横排头像) / 足迹(统计卡) /
+ * 场景(横排卡)。复用 MediaService 的 persons/geo/albums(照片页也讲智能),而非纯时间线。
+ *
+ * 数据加载与渲染独立于主列表,避免扰动时间线逻辑。loading 态不阻塞照片列表。
+ */
+@Composable
+private fun HomeAggregationSection(
+    onOpenPerson: (String) -> Unit = {},
+    onOpenScene: (String) -> Unit = {}
+) {
+    var persons by remember { mutableStateOf<List<MediaService.PersonCluster>>(emptyList()) }
+    var geos by remember { mutableStateOf<List<MediaService.GeoCluster>>(emptyList()) }
+    var albums by remember { mutableStateOf<List<MediaService.AutoAlbum>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        val personsJob = launch { persons = MediaService.getPersons().orEmpty() }
+        val geosJob = launch { geos = MediaService.getGeoClusters().orEmpty() }
+        val albumsJob = launch { albums = MediaService.getAutoAlbums() }
+        personsJob.join(); geosJob.join(); albumsJob.join()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // 人物 横排圆头像
+        if (persons.isNotEmpty()) {
+            SectionHeaderText("人物", showMore = true)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                items(persons.take(8)) { pc ->
+                    HomePersonAvatar(pc = pc, onClick = { onOpenPerson(pc.id) })
+                }
+            }
+        }
+        // 足迹 统计卡
+        if (geos.isNotEmpty()) {
+            SectionHeaderText("足迹", showMore = true)
+            HomeFootprintCard(geos)
+        }
+        // 场景 横排卡(一键点开该场景AI检索)
+        if (albums.isNotEmpty()) {
+            SectionHeaderText("事物", showMore = true)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(albums.take(8)) { album ->
+                    HomeSceneChip(album = album, onClick = { onOpenScene(album.scene) })
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+@Composable
+private fun SectionHeaderText(title: String, showMore: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(title, fontWeight = FontWeight.SemiBold, color = TextPrimary, fontSize = 16.sp)
+        Spacer(Modifier.weight(1f))
+        if (showMore) Text("更多 ›", fontSize = 13.sp, color = TextSecondary)
+    }
+}
+
+@Composable
+private fun HomePersonAvatar(pc: MediaService.PersonCluster, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable { onClick() }
+    ) {
+        Box(
+            modifier = Modifier.size(56.dp)
+                .clip(RoundedCornerShape(28.dp))
+                .background(Color(0xFFF8F6FE)),
+            contentAlignment = Alignment.Center
+        ) { Text("🙂", fontSize = 26.sp) }
+        Spacer(Modifier.height(4.dp))
+        Text(if (pc.name.isEmpty()) "未命名" else pc.name,
+            fontSize = 12.sp, color = TextPrimary, maxLines = 1)
+    }
+}
+
+@Composable
+private fun HomeFootprintCard(geos: List<MediaService.GeoCluster>) {
+    val locCount = geos.size
+    val photoCount = geos.sumOf { it.count }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text("🗺", fontSize = 26.sp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("点亮地图", fontWeight = FontWeight.Bold, color = TextPrimary)
+                Spacer(Modifier.height(3.dp))
+                Text("旅程 $photoCount · 地点 $locCount", fontSize = 13.sp, color = TextSecondary)
+            }
+            // 蓝色胶囊"点亮地图"按钮(一刻相册式)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xFF3478F6))
+                    .clickable { }
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) { Text("点亮地图", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+        }
+    }
+}
+
+@Composable
+private fun HomeSceneChip(album: MediaService.AutoAlbum, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(CardWhite)
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("🖼", fontSize = 22.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(album.scene, fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text("${album.count} 张", fontSize = 11.sp, color = TextSecondary)
         }
     }
 }
