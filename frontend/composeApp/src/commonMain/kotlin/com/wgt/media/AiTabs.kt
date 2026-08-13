@@ -70,7 +70,7 @@ fun AlbumTabScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(SPCardPad)
                 ) {
-                    Text("＋", fontSize = 20.sp)
+                    YkCreateAlbumIcon(size = 26)
                     Spacer(Modifier.width(12.dp))
                     Text("一键创建相册", fontWeight = FontWeight.Medium, color = TextPrimary,
                         modifier = Modifier.weight(1f))

@@ -5268,3 +5268,15 @@ private fun FeatureCardsRow(modifier: Modifier = Modifier) {
         }
     }
 }
+
+/** 一刻相册真实"创建相册"图标(蓝圆白加号,逆向APK)。定义在此文件(有Res star import),
+ * 供 AiTabs 等同包文件调用,绕过各自 Res import 差异。 */
+@Composable
+fun YkCreateAlbumIcon(modifier: Modifier = Modifier, size: Int = 28) {
+    Icon(
+        painter = painterResource(Res.drawable.yk_ic_create_album),
+        contentDescription = "创建相册",
+        tint = Color.Unspecified,  // 用webp原色(蓝圆白加号),不被LocalContentColor染黑
+        modifier = modifier.size(size.dp)
+    )
+}
