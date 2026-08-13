@@ -54,6 +54,11 @@ def _try_load_clip():
         if _CLIP_STATE["ready"] or _CLIP_STATE["err"]:
             return
         try:
+            # 离线优先: AI_HF_OFFLINE=1 时强制 HF/本地缓存加载,绝不联网重试,
+            # 根治"HF下载超时→ai-svc崩溃"运维陷阱。模型已缓存则纯本地可用。
+            if os.environ.get("AI_HF_OFFLINE", "0") == "1":
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
             import open_clip
             import torch
             # pretrained='openai' 让 open_clip 下载训过权的 ViT-B-32（与 OpenAI CLIP 同空间）。
