@@ -247,17 +247,20 @@ fun SearchTabScreen(
                         }
                     }
                 }
-                // 足迹
-                item { Spacer(Modifier.height(8.dp)); Text("足迹", fontWeight = FontWeight.SemiBold) }
+                // 足迹 —— 一刻相册风格：大地图统计卡 + 可点击地点
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("足迹", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
                 if (geos.isEmpty()) {
-                    item { EmptyHint("暂无足迹聚类") }
+                    item { EmptyHint("暂无位置数据（照片需含 GPS）") }
                 } else {
-                    items(geos.take(8)) { g ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("📍", fontSize = 20.sp)
-                            Spacer(Modifier.width(10.dp))
-                            Text("${g.lat}, ${g.lng} · ${g.count} 张", fontSize = 14.sp)
-                        }
+                    item { FootprintSummaryCard(geos) }
+                    items(geos.take(6)) { g ->
+                        FootprintRow(g)
                     }
                 }
             }
@@ -398,6 +401,75 @@ private fun VideoRow(v: MediaMetadata) {
         supportingContent = { Text("视频 · ${v.size} 字节") },
         leadingContent = { Text("🎬", fontSize = 22.sp) }
     )
+}
+
+/**
+ * 足迹「点亮地图」统计大卡 —— 对标一刻相册查找页的地图统计卡。
+ * 数据层面我们只有 GPS 聚类点（无反向地理编码的城市/国家），故用
+ * 「地点数 + 总照片数」作为旅程/城市/国家的映射，视觉上与一刻相册对齐。
+ */
+@Composable
+private fun FootprintSummaryCard(geos: List<MediaService.GeoCluster>) {
+    val locCount = geos.size
+    val photoCount = geos.sumOf { it.count }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Column(Modifier.padding(SPCardPad)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🗺", fontSize = 28.sp)
+                Spacer(Modifier.width(12.dp))
+                Text("点亮地图", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 16.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(SPGap)) {
+                FootprintStat("地点", locCount.toString(), Modifier.weight(1f))
+                FootprintStat("照片", photoCount.toString(), Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(6.dp))
+            Text("照片含 GPS 方可聚类定位", fontSize = T_Label, color = TextSecondary)
+        }
+    }
+}
+
+@Composable
+private fun FootprintStat(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(RadiusCard))
+            .background(Color(0xFFEDF0F8))
+            .padding(vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(value, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = TextPrimary)
+        Spacer(Modifier.height(2.dp))
+        Text(label, fontSize = T_Label, color = TextSecondary)
+    }
+}
+
+/** 单个足迹地点行 —— 卡片化，替代扁平文本。 */
+@Composable
+private fun FootprintRow(g: MediaService.GeoCluster) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { },
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = SPCardPad, vertical = 10.dp)
+        ) {
+            Text("📍", fontSize = 20.sp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("%.3f, %.3f".format(g.lat, g.lng),
+                    fontSize = T_Body, fontWeight = FontWeight.Medium, color = TextPrimary)
+                Text("${g.count} 张照片", fontSize = T_Label, color = TextSecondary)
+            }
+        }
+    }
 }
 
 @Composable
