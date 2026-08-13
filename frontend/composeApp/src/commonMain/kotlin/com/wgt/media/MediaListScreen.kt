@@ -1093,7 +1093,7 @@ fun MediaListScreen(
                     // PRD-v12 UI：对标一刻相册「按时间 | 按相册」+ 🔍搜索页入口。
                     if (!viewModel.hasSelection) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            // 🔍 打开一刻相册式分区搜索页(大点击区,确保命中)
+                            // 🔍 打开一刻相册式分区搜索页(真实一刻搜索图标)
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
@@ -1101,7 +1101,12 @@ fun MediaListScreen(
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text("🔍", fontSize = 18.sp, color = TextPrimary)
+                                Icon(
+                                    painter = painterResource(Res.drawable.yk_ic_search),
+                                    contentDescription = "搜索",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(22.dp)
+                                )
                             }
                             Text("按时间",
                                 fontSize = 14.sp, fontWeight = FontWeight.Bold,
