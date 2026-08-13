@@ -1587,7 +1587,7 @@ private fun NavTab(
                 painter = painterResource(res),
                 contentDescription = label,
                 tint = if (selected) MaterialTheme.colorScheme.primary
-                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                       else TextSecondary,  // 未选浅灰#8C8C8C,一刻相册tab未选是浅灰非深黑
                 modifier = Modifier
                     .size(Dimens.navIconSize)
                     .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
