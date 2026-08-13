@@ -416,16 +416,16 @@ fun SearchTabScreen(
                         FootprintRow(g)
                     }
                 }
-                // 类型 —— 对标一刻相册查找页「类型」区(截图/视频/动态照片/生活记录)
+                // 类型 —— 对标一刻相册查找页「类型」区。收敛单 item 渲染(多 item 曾漏渲染)。
                 item {
-                    Spacer(Modifier.height(8.dp))
-                    Text("类型", fontWeight = FontWeight.SemiBold)
-                }
-                item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(SPGap)) {
-                        TypeCard("截图", "📱", { onSemanticSearch("截图") }, Modifier.weight(1f))
-                        TypeCard("视频", "🎬", { onSemanticSearch("视频") }, Modifier.weight(1f))
-                        TypeCard("动态照片", "📷", { onSemanticSearch("动态照片") }, Modifier.weight(1f))
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("类型", fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(SPGap)) {
+                            TypeCard("截图", "📱", { onSemanticSearch("截图") }, Modifier.weight(1f))
+                            TypeCard("视频", "🎬", { onSemanticSearch("视频") }, Modifier.weight(1f))
+                            TypeCard("动态照片", "📷", { onSemanticSearch("动态照片") }, Modifier.weight(1f))
+                        }
                     }
                 }
             }
