@@ -114,6 +114,82 @@ func clusterByEmbeddings(embeds map[string][]float32, simThreshold float32) map[
 	return out
 }
 
+// clusterFacesByMedia 用真人脸向量做凝聚聚类，返回 mediaID -> clusterIndex。
+// 每张脸是一个聚类点；一张图的多张脸(不同人)可能归不同簇。最终 map 以 media 为粒度
+// （若 media 有脸在簇 A 与其他簇，取覆盖它的强簇；简化：任一簇命中即标记，由后续
+// 去重）。阈值 faceThr 建议 0.5（人脸空间余弦，比整图 0.7 区分度更高）。无人脸返回 nil。
+func clusterFacesByMedia(faces []storage.FaceRec, faceThr float32) map[string]int {
+	if len(faces) == 0 {
+		return nil
+	}
+	// 每张脸一个点
+	type pt struct{ media string; vec []float32 }
+	pts := make([]pt, 0, len(faces))
+	for _, f := range faces {
+		if len(f.FaceVector) > 0 {
+			pts = append(pts, pt{f.MediaID, f.FaceVector})
+		}
+	}
+	if len(pts) < 2 {
+		return nil
+	}
+	n := len(pts)
+	parent := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	// 凝聚: 合并同簇内两点的最大相似度>=thr
+	sim := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		sim[i] = make([]float32, n)
+		for j := 0; j < n; j++ {
+			if i == j {
+				sim[i][j] = 1
+			} else {
+				sim[i][j] = storage.Cosine(pts[i].vec, pts[j].vec)
+			}
+		}
+	}
+	for {
+		bestI, bestJ := -1, -1
+		var best float32 = faceThr
+		for i := 0; i < n; i++ {
+			for j := i + 1; j < n; j++ {
+				if parent[i] == parent[j] {
+					continue
+				}
+				if sim[i][j] > best {
+					best, bestI, bestJ = sim[i][j], i, j
+				}
+			}
+		}
+		if bestI < 0 {
+			break
+		}
+		from, to := parent[bestJ], parent[bestI]
+		for k := range parent {
+			if parent[k] == from {
+				parent[k] = to
+			}
+		}
+	}
+	// 重编号
+	remap := map[int]int{}
+	next := 0
+	for i := range pts {
+		c := parent[i]
+		if _, ok := remap[c]; !ok {
+			remap[c] = next
+			next++
+		}
+	}
+	out := map[string]int{}
+	for i, p := range pts {
+		out[p.media] = remap[parent[i]]
+	}
+	return out
+}
+
 // ReclusterPersons 为某用户重算人物聚类。
 // 流程：读全部图像向量 → 层次聚类 → 为每簇建/复用 person_cluster → 写 media_persons。
 // 已有用户命名的 cluster 尽量保留（按代表 media 匹配）。
@@ -125,10 +201,23 @@ func (s *Server) ReclusterPersons(ctx context.Context, userID string, simThresho
 	if err != nil {
 		return 0, err
 	}
-	if len(embeds) < 2 {
-		return 0, nil
+	// 真人脸聚类优先（PRD §3.3 长相记忆）：若用户有人脸向量则按脸聚类（更准），
+	// 否则回退 CLIP 整图向量（近似）。脸阈值 0.5（人脸空间区分度>整图）。
+	faces, _ := s.store.ListAllFaceVectors(ctx, userID)
+	var clusters map[string]int
+	hasFace := len(faces) >= 2
+	if hasFace {
+		clusters = clusterFacesByMedia(faces, 0.5)
+		if clusters == nil {
+			hasFace = false
+		}
 	}
-	clusters := clusterByEmbeddings(embeds, simThreshold)
+	if !hasFace {
+		if len(embeds) < 2 {
+			return 0, nil
+		}
+		clusters = clusterByEmbeddings(embeds, simThreshold)
+	}
 	// 收集每簇成员
 	clusterMembers := map[int][]string{}
 	for mid, c := range clusters {

@@ -273,6 +273,13 @@ func (s *Store) ListUnindexedMedia(ctx context.Context, userID string, limit int
 	return out, rows.Err()
 }
 
+// ClearMediaPersons 删除某用户某媒体的全部人脸记录（索引重算人脸时先清旧避免累积）。
+func (s *Store) ClearMediaPersons(ctx context.Context, userID, mediaID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM media_persons WHERE user_id=? AND media_id=?`, userID, mediaID)
+	return err
+}
+
 // ClearPersonsForUser 删除某用户的全部人物聚类与 media_persons 记录。
 // ReclusterPersons 重建前调用，避免重复 recluster 累积旧 cluster（v3 修 bug：
 // 旧版只 Create 不清，每次 recluster cluster 数翻倍）。

@@ -74,6 +74,20 @@ type captionResp struct {
 	ModelVer string   `json:"model_ver"`
 }
 
+// faceItem 是 /face 返回的单张人脸。
+type faceItem struct {
+	BBox  []float32 `json:"bbox"`  // [x,y,w,h]
+	Vec   []float32 `json:"vec"`   // 128 维 SFace 人脸向量
+	Score float32   `json:"score"`
+}
+
+// faceResp 是 /face 返回。
+type faceResp struct {
+	Faces []faceItem `json:"faces"`
+	Count int        `json:"count"`
+	Model string     `json:"model"`
+}
+
 // EmbedText 文本向量化（检索查询用）。
 func (c *AIClient) EmbedText(ctx context.Context, text string) (*embedResp, error) {
 	body, _ := json.Marshal(map[string]string{"text": text})
@@ -111,6 +125,31 @@ func (c *AIClient) CaptionImageFile(ctx context.Context, path string) (*captionR
 		return nil, err
 	}
 	return &cr, nil
+}
+
+// FaceImageFile 对磁盘图片做人脸检测+识别, 返回各人脸 bbox+128维向量。
+// 与 caption 同款: raw 字节 + Content-Type 由扩展名推。失败返回 nil(降级, 不阻塞索引)。
+func (c *AIClient) FaceImageFile(ctx context.Context, path string) (*faceResp, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/face", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", mimeFromExt(filepath.Ext(path)))
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("face status %d: %s", resp.StatusCode, string(b))
+	}
+	var fr faceResp
+	if err := json.NewDecoder(resp.Body).Decode(&fr); err != nil {
+		return nil, err
+	}
+	return &fr, nil
 }
 
 func (c *AIClient) doJSON(ctx context.Context, path string, body []byte) (*embedResp, error) {
@@ -345,6 +384,23 @@ func (a *AIIndexer) indexOne(ctx context.Context, uid, mediaID string) error {
 		ann.ModelVer = cr.ModelVer
 	}
 	_ = a.server.store.UpsertAnnotation(ctx, ann)
+	// 3. 人脸检测/识别（PRD-v12 §3.3 长相记忆）：调 /face 得人脸 128 维向量，
+	// 写入 media_persons（供按 face_vector 聚类"长得像"）。失败/无人脸降级不阻塞。
+	if fr, ferr := a.ai.FaceImageFile(ctx, path); ferr == nil && fr != nil && len(fr.Faces) > 0 {
+		// 更新前清掉该 media 旧人脸记录，避免重复 accumulate
+		if perr := a.server.store.ClearMediaPersons(ctx, uid, mediaID); perr == nil {
+			for _, f := range fr.Faces {
+				bboxJSON, _ := json.Marshal(f.BBox)
+				_ = a.server.store.AddMediaPerson(ctx, &storage.MediaPerson{
+					MediaID:   mediaID,
+					UserID:    uid,
+					ClusterID: "unassigned", // 由 ReclusterPersons 分配
+					Bbox:      string(bboxJSON),
+					FaceVector: f.Vec,
+				})
+			}
+		}
+	}
 	// G：新向量落库，失效该用户缓存，下次检索重新加载（含本次）。
 	a.InvalidateEmbedCache(uid)
 	return nil
