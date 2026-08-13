@@ -232,9 +232,11 @@ object SettingsState {
     private const val DEFAULT_BACKEND_URL = "http://localhost:8080"
 
     /**
-     * V8 开发环境预设凭据——登录界面自动填充，省去每次手输。
-     * 生产环境改为空串即可禁用预填（LoginScreen 据此跳过预填）。
+     * V8 开发环境预设——登录界面无条件预填，省去每次手输。
+     * 地址强制回默认 localhost:8080（覆盖存储里任何旧地址），方便连开发后端。
+     * 生产环境将 DEV_DEFAULT_USERNAME/DEV_DEFAULT_PASSWORD 置空即禁用账号预填。
      */
+    const val DEV_DEFAULT_BACKEND_URL = DEFAULT_BACKEND_URL
     const val DEV_DEFAULT_USERNAME = "admin"
     const val DEV_DEFAULT_PASSWORD = "admin123"
 }

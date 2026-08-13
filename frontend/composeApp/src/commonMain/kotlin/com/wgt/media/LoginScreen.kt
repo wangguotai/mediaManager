@@ -70,18 +70,16 @@ fun LoginScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    // 服务端地址默认取已存设置；为空时给占位提示，不阻断输入。
-    var serverUrl by remember { mutableStateOf(SettingsState.backendUrl) }
-
-    // V8 开发环境预填——地址为默认值或空时自动填入 admin 凭据，省去每次手输。
-    // 生产环境将 DEV_DEFAULT_USERNAME/PASSWORD 置空即自动禁用预填（isDevDefault 仍为 true 但
-    // 填入的是空串，等同于不预填），避免真机用户看到无关的预填账号。
-    val isDevDefault = serverUrl.isBlank() || serverUrl == "http://localhost:8080"
+    // 开发阶段：无条件预填默认后端地址 localhost:8080 + 测试凭据，省去每次手输。
+    // 不管之前保存过什么地址，进入登录页都强制回默认，方便连开发后端。
+    // 生产环境将 DEV_DEFAULT_USERNAME/DEV_DEFAULT_PASSWORD 置空即禁用账号预填；
+    // 若连地址也不预填，改回读取 SettingsState.backendUrl 即可。
+    var serverUrl by remember { mutableStateOf(SettingsState.DEV_DEFAULT_BACKEND_URL) }
     var username by remember {
-        mutableStateOf(if (isDevDefault && SettingsState.DEV_DEFAULT_USERNAME.isNotEmpty()) SettingsState.DEV_DEFAULT_USERNAME else "")
+        mutableStateOf(SettingsState.DEV_DEFAULT_USERNAME)
     }
     var password by remember {
-        mutableStateOf(if (isDevDefault && SettingsState.DEV_DEFAULT_PASSWORD.isNotEmpty()) SettingsState.DEV_DEFAULT_PASSWORD else "")
+        mutableStateOf(SettingsState.DEV_DEFAULT_PASSWORD)
     }
     var passwordVisible by remember { mutableStateOf(false) }
     var isSubmitting by remember { mutableStateOf(false) }
