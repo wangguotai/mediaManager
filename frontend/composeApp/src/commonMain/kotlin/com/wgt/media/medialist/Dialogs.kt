@@ -528,7 +528,9 @@ fun BatchRenameDialog(
 
 /**
  * V8：媒体详情对话框 — 调 /api/media/info/{id} 显示完整信息。
+ * PRD-v12 H: 改一刻相册式 ModalBottomSheet(沉浸式从底滑出)。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaInfoDialog(
     mediaId: String,
@@ -549,10 +551,15 @@ fun MediaInfoDialog(
         }
     }
 
-    AlertDialog(
+    // PRD-v12 H: 改一刻相册式 ModalBottomSheet(沉浸式从底滑出),原 AlertDialog。
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("媒体详情") },
-        text = {
+        sheetState = sheetState
+    ) {
+        Text("媒体详情", fontSize = 18.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+        Column(modifier = Modifier.padding(horizontal = 20.dp).verticalScroll(rememberScrollState())) {
             info?.let { i ->
                 Column {
                     InfoRow("文件名", i.filename)
@@ -701,11 +708,13 @@ fun MediaInfoDialog(
                     CircularProgressIndicator()
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            Spacer(modifier = Modifier.height(16.dp))
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            ) { Text("关闭") }
         }
-    )
+    }
 }
 
 
