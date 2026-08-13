@@ -2,15 +2,18 @@
 // 复用既有 MediaService AI 全套 API（人物聚类 / 自动场景相册 / geo 聚类 / AI 检索）。
 package com.wgt.media
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,31 +59,25 @@ fun AlbumTabScreen(
         if (loading) {
             item { CircularProgressIndicator(modifier = Modifier.padding(24.dp)) }
         } else {
-            // 智能相册（场景）
+            // 智能相册（场景）— 一刻相册风格：横排圆圈封面卡
             item { Text("智能相册 · 按场景", fontWeight = FontWeight.SemiBold) }
             if (albums.isEmpty()) {
                 item { EmptyHint("暂无场景分类，先到照片页索引你的照片") }
             } else {
-                items(albums.take(12)) { album ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth().clickable { onOpenAlbum(album.scene) },
-                        shape = RoundedCornerShape(Dimens.cardCornerRadius)
-                    ) {
-                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("🖼", fontSize = 28.sp)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(album.scene, fontWeight = FontWeight.SemiBold)
-                                Text("${album.count} 张", fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Text("›", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(albums.take(12)) { album ->
+                            SceneCard(
+                                title = album.scene,
+                                count = album.count,
+                                onClick = { onOpenAlbum(album.scene) }
+                            )
                         }
                     }
                 }
             }
 
-            // 人物（长相聚类）
+            // 人物（长相聚类）—— 一刻相册风格：横向圆形头像
             item {
                 Spacer(Modifier.height(8.dp))
                 Text("人物 · 按长相分组", fontWeight = FontWeight.SemiBold)
@@ -88,14 +85,18 @@ fun AlbumTabScreen(
             if (persons.isEmpty()) {
                 item { EmptyHint("暂无人物聚类，索引后可在 AI 中心点重聚类") }
             } else {
-                items(persons.take(6)) { pc ->
-                    PersonRow(
-                        cluster = pc,
-                        onClick = { onOpenPerson(pc.id) },
-                        onRename = { name ->
-                            scope.launch { MediaService.renamePerson(pc.id, name) }
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        items(persons.take(8)) { pc ->
+                            PersonAvatar(
+                                cluster = pc,
+                                onClick = { onOpenPerson(pc.id) },
+                                onRename = { name ->
+                                    scope.launch { MediaService.renamePerson(pc.id, name) }
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             }
         }
@@ -103,35 +104,56 @@ fun AlbumTabScreen(
 }
 
 @Composable
-private fun PersonRow(
+private fun SceneCard(title: String, count: Int, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.width(150.dp).clickable { onClick() },
+        shape = RoundedCornerShape(Dimens.cardCornerRadius)
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text("🖼", fontSize = 30.sp)
+            Spacer(Modifier.height(10.dp))
+            Text(title, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                overflow = TextOverflow.Ellipsis)
+            Text("$count 张", fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PersonAvatar(
     cluster: PersonCluster,
     onClick: () -> Unit,
     onRename: (String) -> Unit
 ) {
     var name by remember(cluster.id) { mutableStateOf(cluster.name) }
     var editing by remember(cluster.id) { mutableStateOf(false) }
-    ListItem(
-        headlineContent = {
-            if (editing) {
-                OutlinedTextField(
-                    value = name, onValueChange = { name = it },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(0.5f)
-                )
-            } else {
-                Text(if (cluster.name.isEmpty()) "未命名人物" else cluster.name)
-            }
-        },
-        supportingContent = { Text("${cluster.faceCount} 张照片") },
-        leadingContent = { Text("🙂", fontSize = 26.sp) },
-        trailingContent = {
-            if (editing) {
-                TextButton(onClick = { onRename(name); editing = false }) { Text("保存") }
-            } else {
-                TextButton(onClick = { editing = true }) { Text("命名") }
-            }
-        },
-        modifier = Modifier.clickable { onClick() }
-    )
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable { if (!editing) onClick() }
+    ) {
+        // 圆形头像(此刻用 emoji 占位,后续可接人脸缩略图)
+        Box(
+            modifier = Modifier.size(64.dp).clip(RoundedCornerShape(32.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("🙂", fontSize = 30.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        if (editing) {
+            OutlinedTextField(
+                value = name, onValueChange = { name = it },
+                singleLine = true, modifier = Modifier.width(96.dp))
+            TextButton(onClick = { onRename(name); editing = false }) { Text("保存") }
+        } else {
+            Text(if (cluster.name.isEmpty()) "未命名" else cluster.name,
+                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${cluster.faceCount} 张", fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = { editing = true }) { Text("命名") }
+        }
+    }
 }
 
 /**
