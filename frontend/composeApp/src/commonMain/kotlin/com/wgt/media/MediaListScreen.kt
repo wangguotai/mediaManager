@@ -5237,7 +5237,7 @@ private fun FeatureCardsRow(modifier: Modifier = Modifier) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(14.dp)
             ) {
-                Text("☁", fontSize = 26.sp)
+                YkBackupIcon(size = 26)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text("云端备份更安全", fontSize = 13.sp, color = TextSecondary)
@@ -5261,7 +5261,7 @@ private fun FeatureCardsRow(modifier: Modifier = Modifier) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
             ) {
-                Text("🧹", fontSize = 22.sp)
+                YkCleanIcon(size = 22)
                 Spacer(Modifier.height(4.dp))
                 Text("文件清理", fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
             }
@@ -5279,4 +5279,18 @@ fun YkCreateAlbumIcon(modifier: Modifier = Modifier, size: Int = 28) {
         tint = Color.Unspecified,  // 用webp原色(蓝圆白加号),不被LocalContentColor染黑
         modifier = modifier.size(size.dp)
     )
+}
+
+/** 一刻相册真实"云端备份"图标(云朵+上箭头),同包封装供各处调用。 */
+@Composable
+fun YkBackupIcon(modifier: Modifier = Modifier, size: Int = 26) {
+    Icon(painter = painterResource(Res.drawable.yk_ic_backup), contentDescription = "云端备份",
+        tint = Color.Unspecified, modifier = modifier.size(size.dp))
+}
+
+/** 一刻相册真实"文件清理"图标,同包封装。 */
+@Composable
+fun YkCleanIcon(modifier: Modifier = Modifier, size: Int = 22) {
+    Icon(painter = painterResource(Res.drawable.yk_ic_clean), contentDescription = "文件清理",
+        tint = Color.Unspecified, modifier = modifier.size(size.dp))
 }
