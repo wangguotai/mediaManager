@@ -1493,14 +1493,16 @@ private fun ActivityBottomBar(
                 label = "照片",
                 selected = selectedTab == 0,
                 onClick = { onSelect(0) },
-                emoji = "🖼"  // 一刻shape=笑脸剪影/照片堆,用相片图标
+                iconOn = Res.drawable.yk_tab_photo_on,
+                iconOff = Res.drawable.yk_tab_photo_off
             )
             NavTab(
                 icon = Res.drawable.ic_cloud,
                 label = "相册",
                 selected = selectedTab == 1,
                 onClick = { onSelect(1) },
-                emoji = "📁"  // 一刻shape=圆角矩形胶卷/相册堆
+                iconOn = Res.drawable.yk_tab_album_on,
+                iconOff = Res.drawable.yk_tab_album_off
             )
             // 居中"拍摄"大按钮(一刻相册式渐变凸起)——触发相机/拍摄,不切 tab。
             CenterCameraFab(
@@ -1512,14 +1514,16 @@ private fun ActivityBottomBar(
                 label = "查找",
                 selected = selectedTab == 2,
                 onClick = { onSelect(2) },
-                emoji = "🔍"  // 一刻shape=放大镜
+                iconOn = Res.drawable.yk_tab_find_on,
+                iconOff = Res.drawable.yk_tab_find_off
             )
             NavTab(
                 icon = Res.drawable.ic_palette,
                 label = "创意",
                 selected = selectedTab == 3,
                 onClick = { onSelect(3) },
-                emoji = "✨"  // 一刻shape=加号与星形组合
+                iconOn = Res.drawable.yk_tab_create_on,
+                iconOff = Res.drawable.yk_tab_create_off
             )
         }
     }
@@ -1540,7 +1544,9 @@ private fun NavTab(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
-    emoji: String? = null  // PRD-v12: 可选 emoji 覆盖 drawable,更贴近一刻相册图标 shape
+    emoji: String? = null,  // 兼容旧 emoji(已弃用,优先用 iconOn/iconOff)
+    iconOn: DrawableResource? = null,   // PRD-v12: 一刻相册真实tab图标(选中态)
+    iconOff: DrawableResource? = null   // 一刻相册真实tab图标(未选中态)
 ) {
     val baseColor = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
@@ -1569,7 +1575,20 @@ private fun NavTab(
             .padding(horizontal = Dimens.spacingMedium),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (emoji != null) {
+        // PRD-v12: 优先用一刻相册真实tab图标(iconOn/iconOff,选中/未选中两态webp);
+        // 次 emoji; 末原 Material drawable。
+        val res = if (selected && iconOn != null) iconOn
+                  else if (!selected && iconOff != null) iconOff
+                  else icon
+        if (iconOn != null || iconOff != null) {
+            Icon(
+                painter = painterResource(res),
+                contentDescription = label,
+                modifier = Modifier
+                    .size(Dimens.navIconSize)
+                    .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
+            )
+        } else if (emoji != null) {
             Text(
                 emoji,
                 fontSize = 22.sp,
@@ -1633,7 +1652,7 @@ private fun CenterCameraFab(
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
-            Text("📷", fontSize = 24.sp)
+            Text("📷", fontSize = 22.sp)  // 凸起拍摄按钮图标(原 emoji,保留;一刻相机webp在外层渐变圆上)
         }
         // 文案回补凸起位移，与左右 Tab 文案视觉齐平。
         Text(
