@@ -1,0 +1,416 @@
+{
+  "name": "手机相册界面",
+  "width": 1080,
+  "height": 2400,
+  "backgroundColor": "#F7F8FA",
+  "children": [
+    {
+      "name": "顶部状态栏",
+      "type": "FRAME",
+      "width": 1080,
+      "height": 44,
+      "children": [
+        {
+          "name": "时间",
+          "type": "TEXT",
+          "content": "21:16",
+          "fontSize": 16,
+          "color": "#000000",
+          "position": "left"
+        },
+        {
+          "name": "状态图标",
+          "type": "FRAME",
+          "width": 200,
+          "height": 44,
+          "position": "right",
+          "children": [
+            {
+              "type": "ICON",
+              "name": "5G信号"
+            },
+            {
+              "type": "ICON",
+              "name": "WiFi"
+            },
+            {
+              "type": "ICON",
+              "name": "电池",
+              "content": "65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "顶部活动Banner",
+      "type": "FRAME",
+      "width": 1080,
+      "height": 600,
+      "backgroundColor": "#000000",
+      "children": [
+        {
+          "name": "背景图片",
+          "type": "IMAGE",
+          "width": 1080,
+          "height": 600,
+          "opacity": 0.8
+        },
+        {
+          "name": "顶部功能图标",
+          "type": "FRAME",
+          "width": 300,
+          "height": 50,
+          "position": "top-right",
+          "layout": "row",
+          "spacing": 20,
+          "children": [
+            {
+              "type": "CIRCLE",
+              "backgroundColor": "#9B89E3",
+              "children": [
+                {
+                  "type": "ICON",
+                  "content": "Q"
+                }
+              ]
+            },
+            {
+              "type": "IMAGE",
+              "name": "红包图标"
+            },
+            {
+              "type": "CIRCLE",
+              "name": "用户头像"
+            }
+          ]
+        },
+        {
+          "name": "活动标题",
+          "type": "TEXT",
+          "content": "我的鸵鸟先生-邀你合影",
+          "fontSize": 36,
+          "fontWeight": "bold",
+          "color": "#FFFFFF",
+          "position": "bottom-left"
+        },
+        {
+          "name": "活动副标题",
+          "type": "TEXT",
+          "content": "一键get亲签等好礼",
+          "fontSize": 20,
+          "color": "#FFFFFF",
+          "position": "bottom-left"
+        }
+      ]
+    },
+    {
+      "name": "功能卡片区域",
+      "type": "FRAME",
+      "width": 1080,
+      "height": 400,
+      "layout": "row",
+      "spacing": 20,
+      "padding": 20,
+      "marginTop": -100,
+      "children": [
+        {
+          "name": "备份卡片",
+          "type": "FRAME",
+          "width": 700,
+          "height": 360,
+          "backgroundColor": "#FFFFFF",
+          "borderRadius": 24,
+          "padding": 20,
+          "children": [
+            {
+              "name": "备份内容",
+              "type": "FRAME",
+              "layout": "row",
+              "children": [
+                {
+                  "type": "IMAGE",
+                  "name": "备份示意图",
+                  "width": 100,
+                  "height": 100
+                },
+                {
+                  "type": "FRAME",
+                  "children": [
+                    {
+                      "type": "TEXT",
+                      "content": "22个文件待备份 >",
+                      "fontSize": 24,
+                      "fontWeight": "bold"
+                    },
+                    {
+                      "type": "TEXT",
+                      "content": "云端备份更安全",
+                      "fontSize": 18,
+                      "color": "#8F95A3"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "开启备份按钮",
+              "type": "BUTTON",
+              "content": "开启备份",
+              "width": 600,
+              "height": 80,
+              "backgroundColor": "#4069E6",
+              "borderRadius": 40,
+              "color": "#FFFFFF",
+              "fontSize": 20,
+              "position": "bottom"
+            }
+          ]
+        },
+        {
+          "name": "清理卡片",
+          "type": "FRAME",
+          "width": 300,
+          "height": 360,
+          "backgroundColor": "#FFFFFF",
+          "borderRadius": 24,
+          "justifyContent": "center",
+          "alignItems": "center",
+          "children": [
+            {
+              "name": "环形进度条",
+              "type": "RING",
+              "width": 240,
+              "height": 240,
+              "strokeColor": "#B3D1FF",
+              "children": [
+                {
+                  "type": "TEXT",
+                  "content": "17.5MB",
+                  "fontSize": 24,
+                  "fontWeight": "bold"
+                },
+                {
+                  "type": "TEXT",
+                  "content": "文件清理 >",
+                  "fontSize": 18,
+                  "color": "#000000"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "主内容区",
+      "type": "FRAME",
+      "width": 1080,
+      "height": 1000,
+      "children": [
+        {
+          "name": "Tab导航",
+          "type": "FRAME",
+          "layout": "row",
+          "spacing": 40,
+          "paddingLeft": 20,
+          "children": [
+            {
+              "type": "TEXT",
+              "content": "本机",
+              "fontSize": 28,
+              "fontWeight": "bold",
+              "color": "#000000"
+            },
+            {
+              "type": "TEXT",
+              "content": "云空间",
+              "fontSize": 28,
+              "color": "#999999"
+            }
+          ]
+        },
+        {
+          "name": "年份标题",
+          "type": "TEXT",
+          "content": "2026年",
+          "fontSize": 32,
+          "fontWeight": "bold",
+          "paddingLeft": 20,
+          "marginTop": 30
+        },
+        {
+          "name": "排序选项",
+          "type": "FRAME",
+          "layout": "row",
+          "position": "right",
+          "paddingRight": 20,
+          "children": [
+            {
+              "type": "TEXT",
+              "content": "按时间",
+              "fontSize": 20,
+              "fontWeight": "bold"
+            },
+            {
+              "type": "TEXT",
+              "content": "|",
+              "fontSize": 20,
+              "color": "#CCCCCC"
+            },
+            {
+              "type": "TEXT",
+              "content": "按相册",
+              "fontSize": 20,
+              "color": "#999999"
+            }
+          ]
+        },
+        {
+          "name": "照片网格",
+          "type": "GRID",
+          "columns": 2,
+          "gap": 15,
+          "padding": 15,
+          "children": [
+            {
+              "name": "照片1",
+              "type": "IMAGE",
+              "width": 510,
+              "height": 510,
+              "borderRadius": 16,
+              "children": [
+                {
+                  "name": "日期水印",
+                  "type": "TEXT",
+                  "content": "4\n八月",
+                  "fontSize": 20,
+                  "color": "#FFFFFF",
+                  "position": "bottom-left",
+                  "padding": 10
+                }
+              ]
+            },
+            {
+              "name": "照片2",
+              "type": "IMAGE",
+              "width": 510,
+              "height": 510,
+              "borderRadius": 16,
+              "children": [
+                {
+                  "name": "日期水印",
+                  "type": "TEXT",
+                  "content": "8\n七月",
+                  "fontSize": 20,
+                  "color": "#FFFFFF",
+                  "position": "bottom-left",
+                  "padding": 10
+                }
+              ]
+            },
+            {
+              "name": "照片3",
+              "type": "IMAGE",
+              "width": 510,
+              "height": 510,
+              "borderRadius": 16,
+              "children": [
+                {
+                  "name": "日期水印",
+                  "type": "TEXT",
+                  "content": "1\n六月",
+                  "fontSize": 20,
+                  "color": "#FFFFFF",
+                  "position": "bottom-left",
+                  "padding": 10
+                }
+              ]
+            },
+            {
+              "name": "照片4",
+              "type": "IMAGE",
+              "width": 510,
+              "height": 510,
+              "borderRadius": 16,
+              "children": [
+                {
+                  "name": "日期水印",
+                  "type": "TEXT",
+                  "content": "8\n三月",
+                  "fontSize": 20,
+                  "color": "#FFFFFF",
+                  "position": "bottom-left",
+                  "padding": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "2025年标题",
+          "type": "TEXT",
+          "content": "2025年",
+          "fontSize": 32,
+          "fontWeight": "bold",
+          "paddingLeft": 20
+        }
+      ]
+    },
+    {
+      "name": "底部导航栏",
+      "type": "FRAME",
+      "width": 1080,
+      "height": 100,
+      "backgroundColor": "#FFFFFF",
+      "position": "absolute",
+      "bottom": 0,
+      "layout": "row",
+      "justifyContent": "space-around",
+      "alignItems": "center",
+      "children": [
+        {
+          "name": "照片Tab",
+          "type": "NAV_ITEM",
+          "icon": "chart",
+          "label": "照片",
+          "active": true
+        },
+        {
+          "name": "相册Tab",
+          "type": "NAV_ITEM",
+          "icon": "folder",
+          "label": "相册"
+        },
+        {
+          "name": "中间扫描按钮",
+          "type": "BUTTON",
+          "width": 80,
+          "height": 80,
+          "backgroundColor": "#FFFFFF",
+          "border": "2px solid #E0E0E0",
+          "borderRadius": 40,
+          "children": [
+            {
+              "type": "ICON",
+              "content": "scan",
+              "color": "#4069E6"
+            }
+          ]
+        },
+        {
+          "name": "查找Tab",
+          "type": "NAV_ITEM",
+          "icon": "search",
+          "label": "查找"
+        },
+        {
+          "name": "创意Tab",
+          "type": "NAV_ITEM",
+          "icon": "sparkle",
+          "label": "创意"
+        }
+      ]
+    }
+  ]
+}
