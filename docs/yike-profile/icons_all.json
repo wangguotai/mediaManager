@@ -1,0 +1,334 @@
+{
+  "icons": [
+    {
+      "name": "search",
+      "iconRef": "iconfont icon-search",
+      "shape": "magnifying glass",
+      "color": "#9b86fc"
+    },
+    {
+      "name": "red_packet",
+      "iconRef": "iconfont icon-gift",
+      "shape": "gift box",
+      "color": "#ff9500"
+    },
+    {
+      "name": "avatar",
+      "iconRef": "iconfont icon-user",
+      "shape": "circle with face",
+      "color": "#000000"
+    },
+    {
+      "name": "album",
+      "iconRef": "iconfont icon-photo",
+      "shape": "pie chart",
+      "color": "#000000"
+    },
+    {
+      "name": "photolibrary",
+      "iconRef": "iconfont icon-image",
+      "shape": "rectangles stack",
+      "color": "#c7c7cc"
+    },
+    {
+      "name": "camera",
+      "iconRef": "iconfont icon-camera",
+      "shape": "camera lens",
+      "color": "#9b86fc"
+    },
+    {
+      "name": "find",
+      "iconRef": "iconfont icon-search",
+      "shape": "magnifying glass",
+      "color": "#c7c7cc"
+    },
+    {
+      "name": "creative",
+      "iconRef": "iconfont icon-star",
+      "shape": "sparkle plus",
+      "color": "#c7c7cc"
+    },
+    {
+      "name": "backup-reminder",
+      "iconRef": "iconfont icon-phone-cloud",
+      "shape": "手机轮廓内有云朵",
+      "color": "蓝色/灰色"
+    },
+    {
+      "name": "red-envelope",
+      "iconRef": "iconfont icon-redpacket",
+      "shape": "红包方形+金线装饰",
+      "color": "红色"
+    },
+    {
+      "name": "arrow-right",
+      "iconRef": "iconfont icon-arrow-right",
+      "shape": "右箭头",
+      "color": "黑色"
+    },
+    {
+      "name": "close",
+      "iconRef": "iconfont icon-close",
+      "shape": "叉号",
+      "color": "黑色"
+    },
+    {
+      "name": "smart-search",
+      "iconRef": "iconfont icon-smart-search",
+      "shape": "放大镜+星星",
+      "color": "黑色"
+    },
+    {
+      "name": "id-card",
+      "iconRef": "iconfont icon-id-card",
+      "shape": "卡片矩形",
+      "color": "蓝色/白色"
+    },
+    {
+      "name": "screenshot",
+      "iconRef": "iconfont icon-screenshot",
+      "shape": "手机矩形",
+      "color": "黑色/白色"
+    },
+    {
+      "name": "food",
+      "iconRef": "iconfont icon-food",
+      "shape": "餐盘/图片混合",
+      "color": "彩色"
+    },
+    {
+      "name": "new-album",
+      "iconRef": "iconfont icon-new-album",
+      "shape": "图片+加号",
+      "color": "黑色"
+    },
+    {
+      "name": "sort",
+      "iconRef": "iconfont icon-sort",
+      "shape": "向下箭头",
+      "color": "黑色"
+    },
+    {
+      "name": "menu",
+      "iconRef": "iconfont icon-menu",
+      "shape": "三横线",
+      "color": "黑色"
+    },
+    {
+      "name": "add-fab",
+      "iconRef": "iconfont icon-plus",
+      "shape": "圆形加号",
+      "color": "蓝色背景白色加号"
+    },
+    {
+      "name": "tab-photos",
+      "iconRef": "iconfont icon-photos",
+      "shape": "波浪线圆圈",
+      "color": "灰色"
+    },
+    {
+      "name": "tab-album",
+      "iconRef": "iconfont icon-album",
+      "shape": "圆角矩形框",
+      "color": "黑色"
+    },
+    {
+      "name": "tab-camera",
+      "iconRef": "iconfont icon-camera",
+      "shape": "圆环快门",
+      "color": "紫色/白色"
+    },
+    {
+      "name": "tab-find",
+      "iconRef": "iconfont icon-find",
+      "shape": "气泡+放大镜",
+      "color": "灰色"
+    },
+    {
+      "name": "tab-creative",
+      "iconRef": "iconfont icon-creative",
+      "shape": "加号+闪光",
+      "color": "灰色"
+    },
+    {
+      "name": "文件备份",
+      "iconRef": "iconfont icon-backup",
+      "shape": "手机轮廓带云朵",
+      "color": "蓝白"
+    },
+    {
+      "name": "搜索",
+      "iconRef": "iconfont icon-search",
+      "shape": "放大镜",
+      "color": "黑色"
+    },
+    {
+      "name": "活动/红包",
+      "iconRef": "iconfont icon-redpacket",
+      "shape": "红包袋",
+      "color": "橙红色"
+    },
+    {
+      "name": "用户头像",
+      "iconRef": "iconfont icon-user",
+      "shape": "圆形人像",
+      "color": "多彩"
+    },
+    {
+      "name": "更多",
+      "iconRef": "iconfont icon-more",
+      "shape": "大于号箭头",
+      "color": "灰色"
+    },
+    {
+      "name": "地图定位",
+      "iconRef": "iconfont icon-map-loc",
+      "shape": "定位针加旗帜",
+      "color": "白色"
+    },
+    {
+      "name": "截图",
+      "iconRef": "iconfont icon-screenshot",
+      "shape": "方框带折角",
+      "color": "深灰"
+    },
+    {
+      "name": "动态照片",
+      "iconRef": "iconfont icon-livephoto",
+      "shape": "同心圆靶心",
+      "color": "深灰"
+    },
+    {
+      "name": "安全保障",
+      "iconRef": "iconfont icon-shield-check",
+      "shape": "盾牌加对勾",
+      "color": "蓝绿渐变"
+    },
+    {
+      "name": "照片",
+      "iconRef": "iconfont icon-photo",
+      "shape": "笑脸剪影",
+      "color": "浅灰"
+    },
+    {
+      "name": "相册",
+      "iconRef": "iconfont icon-album",
+      "shape": "圆角矩形胶卷",
+      "color": "浅灰"
+    },
+    {
+      "name": "拍摄",
+      "iconRef": "iconfont icon-camera",
+      "shape": "圆角相机镜头",
+      "color": "蓝紫渐变"
+    },
+    {
+      "name": "查找",
+      "iconRef": "iconfont icon-find",
+      "shape": "带笑脸放大镜",
+      "color": "黑色"
+    },
+    {
+      "name": "创意",
+      "iconRef": "iconfont icon-creative",
+      "shape": "加号与星形组合",
+      "color": "浅灰"
+    },
+    {
+      "name": "查找",
+      "iconRef": "iconfont icon-search",
+      "shape": "圆形内含笑脸气泡",
+      "color": "灰色"
+    },
+    {
+      "name": "时光足迹",
+      "iconRef": "iconfont icon-clock",
+      "shape": "时钟表盘",
+      "color": "黑色"
+    },
+    {
+      "name": "人像美颜",
+      "iconRef": "iconfont icon-beauty",
+      "shape": "人脸轮廓加星星",
+      "color": "黑色"
+    },
+    {
+      "name": "AI消除",
+      "iconRef": "iconfont icon-eraser",
+      "shape": "倾斜的橡皮擦",
+      "color": "黑色"
+    },
+    {
+      "name": "AI动图",
+      "iconRef": "iconfont icon-gif",
+      "shape": "方形图片框加播放键",
+      "color": "黑色"
+    },
+    {
+      "name": "创意拼图",
+      "iconRef": "iconfont icon-puzzle",
+      "shape": "两个交错的矩形",
+      "color": "黑色"
+    },
+    {
+      "name": "一键成片",
+      "iconRef": "iconfont icon-music",
+      "shape": "方形框加音符",
+      "color": "黑色"
+    },
+    {
+      "name": "朋友圈9图",
+      "iconRef": "iconfont icon-grid",
+      "shape": "九宫格加圆形镜头",
+      "color": "黑色"
+    },
+    {
+      "name": "全部工具",
+      "iconRef": "iconfont icon-grid4",
+      "shape": "四个小圆点",
+      "color": "黑色"
+    },
+    {
+      "name": "AI改图",
+      "iconRef": "iconfont icon-paint",
+      "shape": "画笔加星星",
+      "color": "白色"
+    },
+    {
+      "name": "导入图片",
+      "iconRef": "iconfont icon-add",
+      "shape": "加号",
+      "color": "白色"
+    },
+    {
+      "name": "更多",
+      "iconRef": "iconfont icon-arrow-right",
+      "shape": "右向箭头",
+      "color": "黑色"
+    },
+    {
+      "name": "头像",
+      "iconRef": "iconfont icon-avatar",
+      "shape": "圆形人像",
+      "color": "彩色"
+    },
+    {
+      "name": "作品集",
+      "iconRef": "iconfont icon-play",
+      "shape": "三角形播放键",
+      "color": "灰色"
+    },
+    {
+      "name": "AD",
+      "iconRef": "iconfont icon-ad",
+      "shape": "圆角矩形文字",
+      "color": "橙色"
+    },
+    {
+      "name": "通知",
+      "iconRef": "iconfont icon-bell",
+      "shape": "铃铛",
+      "color": "白色"
+    }
+  ]
+}
