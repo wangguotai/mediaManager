@@ -1492,13 +1492,15 @@ private fun ActivityBottomBar(
                 icon = Res.drawable.ic_photo,
                 label = "照片",
                 selected = selectedTab == 0,
-                onClick = { onSelect(0) }
+                onClick = { onSelect(0) },
+                emoji = "🖼"  // 一刻shape=笑脸剪影/照片堆,用相片图标
             )
             NavTab(
                 icon = Res.drawable.ic_cloud,
                 label = "相册",
                 selected = selectedTab == 1,
-                onClick = { onSelect(1) }
+                onClick = { onSelect(1) },
+                emoji = "📁"  // 一刻shape=圆角矩形胶卷/相册堆
             )
             // 居中"拍摄"大按钮(一刻相册式渐变凸起)——触发相机/拍摄,不切 tab。
             CenterCameraFab(
@@ -1509,13 +1511,15 @@ private fun ActivityBottomBar(
                 icon = Res.drawable.ic_search,
                 label = "查找",
                 selected = selectedTab == 2,
-                onClick = { onSelect(2) }
+                onClick = { onSelect(2) },
+                emoji = "🔍"  // 一刻shape=放大镜
             )
             NavTab(
                 icon = Res.drawable.ic_palette,
                 label = "创意",
                 selected = selectedTab == 3,
-                onClick = { onSelect(3) }
+                onClick = { onSelect(3) },
+                emoji = "✨"  // 一刻shape=加号与星形组合
             )
         }
     }
@@ -1535,7 +1539,8 @@ private fun NavTab(
     icon: DrawableResource,
     label: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    emoji: String? = null  // PRD-v12: 可选 emoji 覆盖 drawable,更贴近一刻相册图标 shape
 ) {
     val baseColor = if (selected) MaterialTheme.colorScheme.primary
     else MaterialTheme.colorScheme.onSurfaceVariant
@@ -1564,14 +1569,24 @@ private fun NavTab(
             .padding(horizontal = Dimens.spacingMedium),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            painter = painterResource(icon),
-            contentDescription = label,
-            tint = baseColor.copy(alpha = alpha),
-            modifier = Modifier
-                .size(Dimens.navIconSize)
-                .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
-        )
+        if (emoji != null) {
+            Text(
+                emoji,
+                fontSize = 22.sp,
+                modifier = Modifier
+                    .size(Dimens.navIconSize)
+                    .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
+            )
+        } else {
+            Icon(
+                painter = painterResource(icon),
+                contentDescription = label,
+                tint = baseColor.copy(alpha = alpha),
+                modifier = Modifier
+                    .size(Dimens.navIconSize)
+                    .graphicsLayer { scaleX = iconScale; scaleY = iconScale }
+            )
+        }
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             label,
