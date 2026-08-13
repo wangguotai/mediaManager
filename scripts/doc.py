@@ -37,12 +37,26 @@ SYSTEM = """你是资深UI/UX设计稿解析专家,把界面截图转成精确Fi
 - 只输出JSON对象,开头直接 {"""
 
 def build_prompt(_organize=False):
-    # 已验证能稳定触发 qwen 输出纯 JSON 的 prompt(ChatCompletions)。
-    return ("你是资深UI/UX设计稿解析专家,输出这张截图的Figma式JSON设计稿。"
-            "严格只输出一个JSON对象(不要markdown代码块,不要解释,直接用{\"type\":\"FRAME\"...}开头)。"
-            "包含:name,width,height,backgroundColor,layoutMode,children(栅格嵌套,含TEXT节点文字/fontSize/textColor,"
-            "RECTANGLE含fills/cornerRadius)。坐标原点截图左上角px,从顶部状态栏到左下底部TabBar,"
-            "底部标签含(照片/相册/拍摄/查找/创意)。不确定用null。")
+    # 升级版 S2 prompt(按 screenshot-to-spec skill 盲测结论): 强制补全blind还原最易缺失的
+    # 5类结构信息——gap/对齐/padding/网格columns/图标iconRef/底部fixed,把盲还原度推向≥85%。
+    return (
+        "你是资深UI设计稿解析专家。输出这张截图的Figma式JSON设计稿,只输出一个JSON对象"
+        "(不要markdown代码块,不要解释,直接用{\"type\":\"FRAME\"...}开头)。\n"
+        "强制规则(缺一不可,这是盲还原高保真的关键):\n"
+        "1. 每个容器(type=FRAME/布局行/网格)必须含: layoutMode(horizontal/vertical/wrap),"
+        "justifyContent(flex-start/center/flex-end/space-between),alignItems(flex-start/center/flex-end),"
+        "gap(子元素间距px,非0必填),padding{top,right,bottom,left}。\n"
+        "2. 网格类容器必须给 columns(列数),不要只靠wrap+尺寸推断。\n"
+        "3. 横排行哪怕子元素紧挨,也要显式标 gap(可为0)和 alignItems。\n"
+        "4. 图标节点不要只给色块: 必须含 iconRef(命名引用,如 icon.tab.photo/icon.expand/ic_arrow),"
+        "并尽量描述形状(如 \"相机镜头圆+凸起\"/\"放大镜圆+柄\")。图标是UI核心识别特征。\n"
+        "5. 底部TabBar/固定栏必须含 position:\"fixed\" + bottom:0,不要靠文档流末位;root容器padding含安全区(左右≥20)。\n"
+        "6. TEXT节点: characters+fontSize+fontWeight+textColor+fontFamily; RECTANGLE: fills+cornerRadius。\n"
+        "7. 每个有意义的卡片/按钮给 designToken(若能匹配到常见token名)。\n"
+        "8. 坐标px原点截图左上角;不确定用null,禁止猜。\n"
+        "顶层结构: name,width,height,backgroundColor,layoutMode:vertical,padding{...},children[]。"
+        "从顶部状态栏→各内容区块→底部TabBar(照片/相册/拍摄/查找/创意)。"
+    )
 
 if __name__ == "__main__":
     args = sys.argv[1:]

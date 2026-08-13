@@ -1,0 +1,1092 @@
+{
+  "type": "FRAME",
+  "name": "Root_Screen_Discover",
+  "width": 390,
+  "height": 844,
+  "backgroundColor": "#F7F9FC",
+  "layoutMode": "vertical",
+  "padding": {
+    "top": 0,
+    "right": 0,
+    "bottom": 0,
+    "left": 0
+  },
+  "children": [
+    {
+      "type": "FRAME",
+      "name": "Status_Bar",
+      "width": 390,
+      "height": 44,
+      "layoutMode": "horizontal",
+      "justifyContent": "space-between",
+      "alignItems": "center",
+      "padding": {
+        "top": 12,
+        "right": 20,
+        "bottom": 0,
+        "left": 20
+      },
+      "children": [
+        {
+          "type": "TEXT",
+          "name": "Time",
+          "characters": "21:16",
+          "fontSize": 16,
+          "fontWeight": 600,
+          "textColor": "#000000"
+        },
+        {
+          "type": "FRAME",
+          "name": "Status_Icons_Right",
+          "layoutMode": "horizontal",
+          "gap": 6,
+          "children": [
+            {
+              "type": "RECTANGLE",
+              "name": "Carrier",
+              "width": 20,
+              "height": 12,
+              "fills": [
+                {
+                  "color": "#FF5722"
+                }
+              ]
+            },
+            {
+              "type": "RECTANGLE",
+              "name": "Signal",
+              "width": 16,
+              "height": 12,
+              "fills": [
+                {
+                  "color": "#000000"
+                }
+              ]
+            },
+            {
+              "type": "RECTANGLE",
+              "name": "Wifi",
+              "width": 16,
+              "height": 12,
+              "fills": [
+                {
+                  "color": "#000000"
+                }
+              ]
+            },
+            {
+              "type": "RECTANGLE",
+              "name": "Battery",
+              "width": 24,
+              "height": 12,
+              "cornerRadius": 2,
+              "fills": [
+                {
+                  "color": "#34C759"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "FRAME",
+      "name": "Header_And_Content",
+      "layoutMode": "vertical",
+      "gap": 16,
+      "padding": {
+        "top": 12,
+        "right": 20,
+        "bottom": 100,
+        "left": 20
+      },
+      "children": [
+        {
+          "type": "FRAME",
+          "name": "Backup_Notification",
+          "width": 350,
+          "height": 56,
+          "backgroundColor": "#FFFFFF",
+          "cornerRadius": 28,
+          "layoutMode": "horizontal",
+          "alignItems": "center",
+          "padding": {
+            "top": 8,
+            "right": 16,
+            "bottom": 8,
+            "left": 16
+          },
+          "gap": 12,
+          "children": [
+            {
+              "type": "RECTANGLE",
+              "name": "Icon_Backup",
+              "width": 36,
+              "height": 40,
+              "cornerRadius": 8,
+              "fills": [
+                {
+                  "color": "#E1F0FF"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "name": "Backup_Text",
+              "characters": "22个文件待备份",
+              "fontSize": 16,
+              "fontWeight": 400,
+              "textColor": "#333333"
+            },
+            {
+              "type": "TEXT",
+              "name": "Action_Link",
+              "characters": "开启备份",
+              "fontSize": 16,
+              "fontWeight": 400,
+              "textColor": "#007AFF"
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Header_Icons",
+          "layoutMode": "horizontal",
+          "justifyContent": "flex-end",
+          "gap": 16,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Search",
+              "description": "放大镜圆+柄"
+            },
+            {
+              "type": "ICONS",
+              "name": "Icon_RedPacket",
+              "description": "红色红包形状"
+            },
+            {
+              "type": "RECTANGLE",
+              "name": "Avatar_User",
+              "width": 32,
+              "height": 32,
+              "cornerRadius": 16,
+              "fills": [
+                {
+                  "color": "#CCCCCC"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Section_Persons",
+          "layoutMode": "vertical",
+          "gap": 12,
+          "children": [
+            {
+              "type": "FRAME",
+              "name": "Section_Header",
+              "layoutMode": "horizontal",
+              "justifyContent": "space-between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "人物",
+                  "fontSize": 17,
+                  "fontWeight": 600,
+                  "textColor": "#1A1A1A"
+                },
+                {
+                  "type": "FRAME",
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "TEXT",
+                      "characters": "更多",
+                      "fontSize": 14,
+                      "textColor": "#8C8C8C"
+                    },
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_Arrow_Right",
+                      "description": "向右小箭头",
+                      "width": 12,
+                      "height": 12
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "FRAME",
+              "name": "Persons_Scroll",
+              "layoutMode": "horizontal",
+              "gap": 12,
+              "children": [
+                {
+                  "type": "RECTANGLE",
+                  "name": "Avatar_1",
+                  "width": 80,
+                  "height": 80,
+                  "cornerRadius": 40,
+                  "fills": [
+                    {
+                      "color": "#E0E0E0"
+                    }
+                  ]
+                },
+                {
+                  "type": "RECTANGLE",
+                  "name": "Avatar_2",
+                  "width": 80,
+                  "height": 80,
+                  "cornerRadius": 40,
+                  "fills": [
+                    {
+                      "color": "#E0E0E0"
+                    }
+                  ]
+                },
+                {
+                  "type": "RECTANGLE",
+                  "name": "Avatar_3",
+                  "width": 80,
+                  "height": 80,
+                  "cornerRadius": 40,
+                  "fills": [
+                    {
+                      "color": "#E0E0E0"
+                    }
+                  ]
+                },
+                {
+                  "type": "RECTANGLE",
+                  "name": "Avatar_4",
+                  "width": 80,
+                  "height": 80,
+                  "cornerRadius": 40,
+                  "fills": [
+                    {
+                      "color": "#E0E0E0"
+                    }
+                  ]
+                },
+                {
+                  "type": "RECTANGLE",
+                  "name": "Avatar_5",
+                  "width": 80,
+                  "height": 80,
+                  "cornerRadius": 40,
+                  "fills": [
+                    {
+                      "color": "#E0E0E0"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Section_Footprints",
+          "layoutMode": "vertical",
+          "gap": 12,
+          "children": [
+            {
+              "type": "FRAME",
+              "name": "Section_Header",
+              "layoutMode": "horizontal",
+              "justifyContent": "space-between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "足迹",
+                  "fontSize": 17,
+                  "fontWeight": 600,
+                  "textColor": "#1A1A1A"
+                },
+                {
+                  "type": "FRAME",
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "TEXT",
+                      "characters": "更多",
+                      "fontSize": 14,
+                      "textColor": "#8C8C8C"
+                    },
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_Arrow_Right",
+                      "description": "向右小箭头",
+                      "width": 12,
+                      "height": 12
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "FRAME",
+              "name": "Map_Card",
+              "width": 350,
+              "height": 200,
+              "backgroundColor": "#FFFFFF",
+              "cornerRadius": 16,
+              "layoutMode": "vertical",
+              "alignItems": "center",
+              "justifyContent": "center",
+              "padding": {
+                "top": 0,
+                "right": 0,
+                "bottom": 16,
+                "left": 0
+              },
+              "children": [
+                {
+                  "type": "RECTANGLE",
+                  "name": "Map_Background",
+                  "width": 350,
+                  "height": 160,
+                  "cornerRadius": 16,
+                  "fills": [
+                    {
+                      "color": "#F0F4F8"
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Button_LightMap",
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 6,
+                  "padding": {
+                    "top": 8,
+                    "right": 16,
+                    "bottom": 8,
+                    "left": 16
+                  },
+                  "backgroundColor": "#4E6EF0",
+                  "cornerRadius": 20,
+                  "children": [
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_Map_Pin",
+                      "description": "展开的地图+定位针",
+                      "width": 20,
+                      "height": 20,
+                      "fills": [
+                        {
+                          "color": "#FFFFFF"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "TEXT",
+                      "characters": "点亮地图",
+                      "fontSize": 16,
+                      "fontWeight": 500,
+                      "textColor": "#FFFFFF"
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Stats_Row",
+                  "layoutMode": "horizontal",
+                  "justifyContent": "space-between",
+                  "padding": {
+                    "top": 16,
+                    "right": 24,
+                    "bottom": 0,
+                    "left": 24
+                  },
+                  "children": [
+                    {
+                      "type": "FRAME",
+                      "layoutMode": "horizontal",
+                      "alignItems": "flex-end",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "旅程照片",
+                          "fontSize": 14,
+                          "textColor": "#666666"
+                        },
+                        {
+                          "type": "TEXT",
+                          "characters": "144",
+                          "fontSize": 20,
+                          "fontWeight": 700,
+                          "textColor": "#1A1A1A"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "layoutMode": "horizontal",
+                      "alignItems": "flex-end",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "城市",
+                          "fontSize": 14,
+                          "textColor": "#666666"
+                        },
+                        {
+                          "type": "TEXT",
+                          "characters": "6",
+                          "fontSize": 20,
+                          "fontWeight": 700,
+                          "textColor": "#1A1A1A"
+                        },
+                        {
+                          "type": "RECTANGLE",
+                          "name": "Badge_Plus1",
+                          "width": 24,
+                          "height": 18,
+                          "cornerRadius": 9,
+                          "fills": [
+                            {
+                              "color": "#FF4D4F"
+                            }
+                          ],
+                          "layoutMode": "horizontal",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "TEXT",
+                              "characters": "+1",
+                              "fontSize": 10,
+                              "textColor": "#FFFFFF"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "layoutMode": "horizontal",
+                      "alignItems": "flex-end",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "国家",
+                          "fontSize": 14,
+                          "textColor": "#666666"
+                        },
+                        {
+                          "type": "TEXT",
+                          "characters": "1",
+                          "fontSize": 20,
+                          "fontWeight": 700,
+                          "textColor": "#1A1A1A"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Section_Things",
+          "layoutMode": "vertical",
+          "gap": 12,
+          "children": [
+            {
+              "type": "FRAME",
+              "name": "Section_Header",
+              "layoutMode": "horizontal",
+              "justifyContent": "space-between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "事物",
+                  "fontSize": 17,
+                  "fontWeight": 600,
+                  "textColor": "#1A1A1A"
+                },
+                {
+                  "type": "FRAME",
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "TEXT",
+                      "characters": "更多",
+                      "fontSize": 14,
+                      "textColor": "#8C8C8C"
+                    },
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_Arrow_Right",
+                      "description": "向右小箭头",
+                      "width": 12,
+                      "height": 12
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "FRAME",
+              "name": "Things_Grid",
+              "layoutMode": "wrap",
+              "padding": {
+                "top": 0,
+                "right": 0,
+                "bottom": 0,
+                "left": 0
+              },
+              "gap": 12,
+              "children": [
+                {
+                  "type": "FRAME",
+                  "name": "Grid_Item_Scenery",
+                  "width": 165,
+                  "height": 160,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 12,
+                  "layoutMode": "vertical",
+                  "alignItems": "flex-end",
+                  "justifyContent": "flex-end",
+                  "children": [
+                    {
+                      "type": "RECTANGLE",
+                      "name": "Img_Scenery",
+                      "width": 165,
+                      "height": 160,
+                      "cornerRadius": 12,
+                      "fills": [
+                        {
+                          "color": "#B0BEC5"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "name": "Label",
+                      "padding": {
+                        "top": 4,
+                        "right": 12,
+                        "bottom": 4,
+                        "left": 12
+                      },
+                      "backgroundColor": "#2C3E50",
+                      "cornerRadius": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "风景",
+                          "fontSize": 14,
+                          "textColor": "#FFFFFF"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Grid_Item_Food",
+                  "width": 165,
+                  "height": 160,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 12,
+                  "layoutMode": "vertical",
+                  "alignItems": "flex-end",
+                  "justifyContent": "flex-end",
+                  "children": [
+                    {
+                      "type": "RECTANGLE",
+                      "name": "Img_Food",
+                      "width": 165,
+                      "height": 160,
+                      "cornerRadius": 12,
+                      "fills": [
+                        {
+                          "color": "#D7CCC8"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "name": "Label",
+                      "padding": {
+                        "top": 4,
+                        "right": 12,
+                        "bottom": 4,
+                        "left": 12
+                      },
+                      "backgroundColor": "#5D4037",
+                      "cornerRadius": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "美食",
+                          "fontSize": 14,
+                          "textColor": "#FFFFFF"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Grid_Item_Play",
+                  "width": 165,
+                  "height": 160,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 12,
+                  "layoutMode": "vertical",
+                  "alignItems": "flex-end",
+                  "justifyContent": "flex-end",
+                  "children": [
+                    {
+                      "type": "RECTANGLE",
+                      "name": "Img_Play",
+                      "width": 165,
+                      "height": 160,
+                      "cornerRadius": 12,
+                      "fills": [
+                        {
+                          "color": "#90A4AE"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "name": "Label",
+                      "padding": {
+                        "top": 4,
+                        "right": 12,
+                        "bottom": 4,
+                        "left": 12
+                      },
+                      "backgroundColor": "#37474F",
+                      "cornerRadius": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "玩乐",
+                          "fontSize": 14,
+                          "textColor": "#FFFFFF"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Grid_Item_Life",
+                  "width": 165,
+                  "height": 160,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 12,
+                  "layoutMode": "vertical",
+                  "alignItems": "flex-end",
+                  "justifyContent": "flex-end",
+                  "children": [
+                    {
+                      "type": "RECTANGLE",
+                      "name": "Img_Life",
+                      "width": 165,
+                      "height": 160,
+                      "cornerRadius": 12,
+                      "fills": [
+                        {
+                          "color": "#757575"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "name": "Label",
+                      "padding": {
+                        "top": 4,
+                        "right": 12,
+                        "bottom": 4,
+                        "left": 12
+                      },
+                      "backgroundColor": "#212121",
+                      "cornerRadius": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "生活记录",
+                          "fontSize": 14,
+                          "textColor": "#FFFFFF"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Section_Types",
+          "layoutMode": "vertical",
+          "gap": 12,
+          "children": [
+            {
+              "type": "FRAME",
+              "name": "Section_Header",
+              "layoutMode": "horizontal",
+              "justifyContent": "space-between",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "TEXT",
+                  "characters": "类型",
+                  "fontSize": 17,
+                  "fontWeight": 600,
+                  "textColor": "#1A1A1A"
+                }
+              ]
+            },
+            {
+              "type": "FRAME",
+              "name": "Types_List",
+              "layoutMode": "horizontal",
+              "gap": 12,
+              "children": [
+                {
+                  "type": "FRAME",
+                  "name": "Type_Card_Screenshot",
+                  "width": 165,
+                  "height": 84,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 16,
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 8,
+                  "padding": {
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 0,
+                    "left": 16
+                  },
+                  "children": [
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_Screenshot",
+                      "description": "带四个角的矩形框",
+                      "width": 24,
+                      "height": 24,
+                      "fills": [
+                        {
+                          "color": "#333333"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "layoutMode": "horizontal",
+                      "alignItems": "flex-end",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "截图",
+                          "fontSize": 16,
+                          "fontWeight": 500,
+                          "textColor": "#333333"
+                        },
+                        {
+                          "type": "TEXT",
+                          "characters": "12",
+                          "fontSize": 14,
+                          "textColor": "#999999"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "FRAME",
+                  "name": "Type_Card_Live",
+                  "width": 165,
+                  "height": 84,
+                  "backgroundColor": "#FFFFFF",
+                  "cornerRadius": 16,
+                  "layoutMode": "horizontal",
+                  "alignItems": "center",
+                  "gap": 8,
+                  "padding": {
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 0,
+                    "left": 16
+                  },
+                  "children": [
+                    {
+                      "type": "ICONS",
+                      "name": "Icon_LivePhoto",
+                      "description": "同心圆靶心形状",
+                      "width": 24,
+                      "height": 24,
+                      "fills": [
+                        {
+                          "color": "#333333"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FRAME",
+                      "layoutMode": "horizontal",
+                      "alignItems": "flex-end",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "TEXT",
+                          "characters": "动态照片",
+                          "fontSize": 16,
+                          "fontWeight": 500,
+                          "textColor": "#333333"
+                        },
+                        {
+                          "type": "TEXT",
+                          "characters": "1",
+                          "fontSize": 14,
+                          "textColor": "#999999"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Safety_Tip",
+          "width": 350,
+          "height": 48,
+          "backgroundColor": "#E8F0FE",
+          "cornerRadius": 24,
+          "layoutMode": "horizontal",
+          "alignItems": "center",
+          "justifyContent": "center",
+          "gap": 8,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Shield_Check",
+              "description": "盾牌形状中间有对勾",
+              "width": 20,
+              "height": 20,
+              "fills": [
+                {
+                  "color": "#4CAF50"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "characters": "一刻相册时刻保障您的数据安全",
+              "fontSize": 14,
+              "fontWeight": 400,
+              "textColor": "#666666"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "FRAME",
+      "name": "TabBar",
+      "width": 390,
+      "height": 83,
+      "backgroundColor": "#FFFFFF",
+      "layoutMode": "horizontal",
+      "justifyContent": "space-around",
+      "alignItems": "flex-start",
+      "padding": {
+        "top": 12,
+        "right": 0,
+        "bottom": 30,
+        "left": 0
+      },
+      "position": "fixed",
+      "bottom": 0,
+      "children": [
+        {
+          "type": "FRAME",
+          "layoutMode": "vertical",
+          "alignItems": "center",
+          "gap": 4,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Photo",
+              "description": "山景+太阳图标",
+              "width": 24,
+              "height": 24,
+              "fills": [
+                {
+                  "color": "#BDBDBD"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "characters": "照片",
+              "fontSize": 10,
+              "textColor": "#BDBDBD"
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "layoutMode": "vertical",
+          "alignItems": "center",
+          "gap": 4,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Album",
+              "description": "圆角矩形专辑封面图标",
+              "width": 24,
+              "height": 24,
+              "fills": [
+                {
+                  "color": "#BDBDBD"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "characters": "相册",
+              "fontSize": 10,
+              "textColor": "#BDBDBD"
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "name": "Center_Action_Button",
+          "top": -24,
+          "layoutMode": "vertical",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "RECTANGLE",
+              "name": "Camera_Icon_Background",
+              "width": 56,
+              "height": 56,
+              "cornerRadius": 28,
+              "fills": [
+                {
+                  "color": "#FFFFFF"
+                },
+                {
+                  "type": "GRADIENT",
+                  "stops": [
+                    {
+                      "color": "#E0C3FC"
+                    },
+                    {
+                      "color": "#8EC5FC"
+                    }
+                  ]
+                }
+              ],
+              "layoutMode": "horizontal",
+              "justifyContent": "center",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "ICONS",
+                  "name": "Icon_Camera",
+                  "description": "相机机身+镜头圆",
+                  "width": 28,
+                  "height": 28,
+                  "fills": [
+                    {
+                      "color": "#FFFFFF"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "layoutMode": "vertical",
+          "alignItems": "center",
+          "gap": 4,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Search",
+              "description": "放大镜+笑脸",
+              "width": 24,
+              "height": 24,
+              "fills": [
+                {
+                  "color": "#000000"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "characters": "查找",
+              "fontSize": 10,
+              "textColor": "#000000"
+            }
+          ]
+        },
+        {
+          "type": "FRAME",
+          "layoutMode": "vertical",
+          "alignItems": "center",
+          "gap": 4,
+          "children": [
+            {
+              "type": "ICONS",
+              "name": "Icon_Creative",
+              "description": "四角星+加号",
+              "width": 24,
+              "height": 24,
+              "fills": [
+                {
+                  "color": "#BDBDBD"
+                }
+              ]
+            },
+            {
+              "type": "TEXT",
+              "characters": "创意",
+              "fontSize": 10,
+              "textColor": "#BDBDBD"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
