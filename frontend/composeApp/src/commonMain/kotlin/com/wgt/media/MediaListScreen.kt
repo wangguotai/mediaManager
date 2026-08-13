@@ -125,10 +125,9 @@ fun MediaListScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // TopAppBar 滚动行为：列表滚动时 TopAppBar elevation 动画升高，增强层次感。
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
-    // 默认打开"网盘图片" Tab（index=3）：5-Tab 重构后，网盘图片从 2 后移到 3。
-    // 真机启动即对后端发 q=source=cloud 请求，便于第一时间验证后端连通与
-    // cloud 图片（data/cloud-images）加载。新增的"活动"Tab(index=2)是 RN 嵌入页，不拉媒体。
-    var selectedTab by remember { mutableStateOf(3) }
+    // PRD-v12 对齐一刻相册 4-Tab：0=照片 / 1=相册 / 2=查找 / 3=创意。
+    // 默认进入"照片"Tab（index=0），加载云端时间线。此前默认网盘图片(index=3)。
+    var selectedTab by remember { mutableStateOf(0) }
 
     // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
     // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
@@ -279,9 +278,10 @@ fun MediaListScreen(
     LaunchedEffect(selectedTab) {
         // 切换 Tab 时清空选中状态，避免上一 Tab 的选中项串到新 Tab（选中 ID 不匹配新列表）
         viewModel.deselectAll()
-        // "活动"(2)和"我的"(4) Tab 不加载媒体数据。
-        if (selectedTab == 2 || selectedTab == 4) return@LaunchedEffect
-        // 切换 Tab 即切换数据源：清空搜索关键词与类型筛选，避免上个 Tab 的过滤条件
+        // PRD-v12 4-Tab：1=相册 / 2=查找 / 3=创意 不加载主媒体时间线（各 Tab 自行加载
+        // 其聚合数据：人物/场景/足迹等）。仅"照片"(0) 加载云端时间线。
+        if (selectedTab != 0) return@LaunchedEffect
+        // 切换 Tab 即切换数据源：清空搜索关键词与媒体类型筛选，避免上个 Tab 的过滤条件
         // 串到新 Tab 造成“列表为空/对不上”的困惑。
         viewModel.clearSearchAndFilter()
         // 切换 Tab 自动退出"服务端收藏"筛选：收藏视图是跨 Tab 的临时筛选态，
@@ -290,15 +290,10 @@ fun MediaListScreen(
             viewModel.toggleFavoritesOnly()
         }
         searchExpanded = false
-        if (selectedTab == 0 && viewModel.canAccessGallery) {
-            viewModel.loadMediaFromGallery(forceRefresh = false)
-        } else if (selectedTab == 1) {
-            // "已上传" Tab 现为云端媒体视图：展示 sync/changes 增量同步累积的 cloudMedia，
-            // 进入即触发后台增量续拉。保留 loadCloudViewForTab 的"秒开已有视图 + 增量刷新"语义。
-            viewModel.loadCloudViewForTab(forceRefresh = false)
-        } else if (selectedTab == 3) {
-            viewModel.loadCloudMediaList(forceRefresh = false)
-        }
+        // "照片" Tab：展示云端时间线（网盘图片源 + 增量同步累积 cloudMedia）。
+        // 优先秒开云端视图并增量续拉，保证时间线完整、体验流畅。
+        viewModel.loadCloudViewForTab(forceRefresh = false)
+        viewModel.loadCloudMediaList(forceRefresh = false)
     }
 
     // 关闭"服务端收藏"筛选时，按当前 Tab 重新加载正常媒体源，恢复筛选前列表。
@@ -307,13 +302,11 @@ fun MediaListScreen(
     // 此 effect 也会触发一次 loadXxx——幂等且都走缓存秒开,重复一次无副作用。
     LaunchedEffect(viewModel.favoritesOnly) {
         if (!viewModel.favoritesOnly) {
-            // 仅对媒体 Tab 触发恢复；活动/我的 Tab 无媒体源,跳过。
-            if (selectedTab != 2 && selectedTab != 4) {
-                when (selectedTab) {
-                    0 -> if (viewModel.canAccessGallery) viewModel.loadMediaFromGallery(forceRefresh = false)
-                    1 -> viewModel.loadCloudViewForTab(forceRefresh = false)
-                    3 -> viewModel.loadCloudMediaList(forceRefresh = false)
-                }
+            // 仅照片 Tab(0) 有媒体源；相册/查找/创意由各自 Screen 聚合数据,不在此触发。
+            if (selectedTab == 0) {
+                // 照片 Tab：秒开云端时间线并增量续拉（与原"已上传"增量同步一致）。
+                viewModel.loadCloudViewForTab(forceRefresh = false)
+                viewModel.loadCloudMediaList(forceRefresh = false)
             }
         }
     }
@@ -327,9 +320,8 @@ fun MediaListScreen(
             // 文件来源标签：依当前 Tab 语义——本地相册 / 已上传 / 网盘图片，
             // 与加载源（LOCAL vs BACKEND）一致，供详情面板展示。
             val sourceLabel = when (selectedTab) {
-                0 -> "本地相册"
-                1 -> "云端"
-                else -> "网盘图片"
+                0 -> "云端"
+                else -> "照片"
             }
             // 视频项通过 onMediaClick 直接走 VideoPlayer 路径（不设 previewIndex），
             // 但 filteredList 仍含视频项，图片预览 pager 左右滑动到视频位会尝试以图片方式加载失败。
@@ -942,34 +934,67 @@ fun MediaListScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues)) {
-            // "活动" Tab(index=2)：直接嵌入 RN 活动中心页面（无 TopAppBar/返回按钮，
-            // 由底部 Tab 切换进出）。RnContainer 加载 assets/index.android.bundle，
-            // 组件名 "rndemo"。hostId 用独立标识避免与导航到 RnActivityScreen 的
-            // 那个 host 复用（两者场景不同：此为常驻 Tab，彼为 push 页）。
+            // PRD-v12 对齐一刻相册 4-Tab。
+            // "相册" Tab(index=1)：智能相册（场景/人物/自建）聚合页。
+            if (selectedTab == 1) {
+                AlbumTabScreen(
+                    onDismiss = {},
+                    onOpenAlbum = { scene ->
+                        // 用 AI 语义搜索该场景，结果灌入主列表并切回照片 Tab
+                        selectedTab = 0
+                        advancedSearchScope.launch {
+                            val res = MediaService.getAISearch(scene, 100)
+                            viewModel.applyAdvancedSearchResults(res?.results?.map { it.media } ?: emptyList())
+                        }
+                    },
+                    onOpenPerson = { clusterId ->
+                        selectedTab = 0
+                        advancedSearchScope.launch {
+                            viewModel.applyAdvancedSearchResults(MediaService.getPersonMedia(clusterId))
+                        }
+                    },
+                    onOpenAlbums = onNavigateToAlbums
+                )
+                return@Box
+            }
+
+            // "查找" Tab(index=2)：智能查找聚合（AI 语义搜索 + 人物 + 场景 + 足迹）。
             if (selectedTab == 2) {
-                RnContainer(
-                    componentName = "rndemo",
-                    bundleAssetName = "index.android.bundle",
-                    hostId = "activity-tab",
-                    modifier = Modifier.fillMaxSize().statusBarsPadding()
+                SearchTabScreen(
+                    onSemanticSearch = { query ->
+                        selectedTab = 0
+                        advancedSearchScope.launch {
+                            val res = MediaService.getAISearch(query, 100)
+                            viewModel.applyAdvancedSearchResults(res?.results?.map { it.media } ?: emptyList())
+                        }
+                    },
+                    onOpenScene = { scene ->
+                        selectedTab = 0
+                        advancedSearchScope.launch {
+                            val res = MediaService.getAISearch(scene, 100)
+                            viewModel.applyAdvancedSearchResults(res?.results?.map { it.media } ?: emptyList())
+                        }
+                    },
+                    onOpenPerson = { clusterId ->
+                        selectedTab = 0
+                        advancedSearchScope.launch {
+                            viewModel.applyAdvancedSearchResults(MediaService.getPersonMedia(clusterId))
+                        }
+                    }
                 )
                 return@Box
             }
 
-            // "我的" Tab(index=4)：设置 / 相册入口页，不渲染媒体网格
-            if (selectedTab == 4) {
-                MyTabContent(
-                    onNavigateToSettings = onNavigateToSettings,
-                    onNavigateToAlbums = onNavigateToAlbums,
-                    onNavigateToFileManagement = onNavigateToFileManagement,
-                    onNavigateToInsights = onNavigateToInsights,
-                    offlineQueueSize = offlineQueueSize,
-                    onOpenAiCenter = { showAiCenter = true }
+            // "创意" Tab(index=3)：视频专区 / 照片编辑器等工具入口。
+            if (selectedTab == 3) {
+                CreativeTabScreen(
+                    onOpenEditor = { media -> editorMedia = media },
+                    onSlideshow = { slideshowActive = true }
                 )
                 return@Box
             }
 
-            // 媒体 Tab（0-2）：标题 + 搜索栏 + 筛选条 + 网格列表
+            // "照片" Tab(index=0)：标题 + 搜索栏 + 筛选条 + 时间线网格列表
             Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
@@ -1215,8 +1240,9 @@ fun MediaListScreen(
                 // 的月份聚合入口，不随网格过滤变化），但选择模式下隐藏（避免与批量操作冲突）。
                 // cloudMedia 为空时 memoryMonths 为空列表，AnimatedVisibility 自动收起。
                 val memoryMonths = viewModel.memoryMonths
+                // PRD-v12：时光回忆卡——照片 Tab(0) 顶部展示基于 cloudMedia 的月份聚合入口。
                 AnimatedVisibility(
-                    visible = selectedTab == 1 && memoryMonths.isNotEmpty() && !viewModel.hasSelection,
+                    visible = selectedTab == 0 && memoryMonths.isNotEmpty() && !viewModel.hasSelection,
                     enter = fadeIn(tween(280)),
                     exit = fadeOut(tween(220))
                 ) {
@@ -1226,21 +1252,14 @@ fun MediaListScreen(
                     )
                 }
 
-                // Tab 切换整体淡入淡出
+                // Tab 切换整体淡入淡出（照片 Tab 内：内容本质是云端时间线）
                 Crossfade(
                     targetState = selectedTab,
                     animationSpec = tween(280),
                     label = "tabSwitch",
                     modifier = Modifier.weight(1f)
                 ) { selectedTab ->
-                    val isLoading = when (selectedTab) {
-                        0 -> viewModel.isGalleryLoading
-                        // "已上传" Tab 的同步态由 isSyncing 驱动（loadCloudViewForTab 先秒开
-                        // 已有视图，isSyncing 期间叠加刷新指示）。
-                        1 -> viewModel.isSyncing
-                        3 -> viewModel.isCloudLoading
-                        else -> viewModel.isLoading
-                    }
+                    val isLoading = viewModel.isCloudLoading
                     // 服务端收藏筛选激活时，loading 态改用收藏加载指示，
                     // 下拉刷新改为续拉收藏列表（而非该 Tab 的正常媒体源）。
                     val effectiveLoading = if (viewModel.favoritesOnly) {
@@ -1253,10 +1272,8 @@ fun MediaListScreen(
                     val onRefresh = {
                         if (viewModel.favoritesOnly) {
                             viewModel.loadFavorites()
-                        } else when (selectedTab) {
-                            0 -> viewModel.loadMediaFromGallery(forceRefresh = true)
-                            1 -> viewModel.loadCloudViewForTab(forceRefresh = true)
-                            else -> viewModel.loadCloudMediaList(forceRefresh = true)
+                        } else {
+                            viewModel.loadCloudMediaList(forceRefresh = true)
                         }
                     }
 
@@ -1334,7 +1351,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (viewModel.favoritesOnly) null else if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (viewModel.favoritesOnly) null else { { viewModel.loadMoreCloudList() } },
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 } else {
@@ -1348,7 +1365,7 @@ fun MediaListScreen(
                                         searchQuery = viewModel.searchQuery,
                                         favoriteIds = viewModel.favoriteIds,
                                         onFavoriteToggle = { viewModel.toggleFavorite(it) },
-                                        onLoadMore = if (viewModel.favoritesOnly) null else if (selectedTab == 0) { { viewModel.loadMoreGallery() } } else if (selectedTab == 1) { { viewModel.loadMoreCloudChanges() } } else if (selectedTab == 3) { { viewModel.loadMoreCloudList() } } else null,
+                                        onLoadMore = if (viewModel.favoritesOnly) null else { { viewModel.loadMoreCloudList() } },
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
@@ -1380,6 +1397,7 @@ private fun ActivityBottomBar(
     // 贴底导航栏：去除浮卡圆角与外层 padding，直接贴边贴底，
     // 顶部 0.5dp outlineVariant 分隔线 + 8dp shadowElevation 营造稳重浮起感。
     // 对标 Google Photos / iOS：导航栏应为一整条贴底面板，而非悬浮卡片。
+    // PRD-v12 UI 对齐一刻相册：四位 Tab = 照片 / 相册 / 查找 / 创意。
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RectangleShape,
@@ -1396,31 +1414,27 @@ private fun ActivityBottomBar(
         ) {
             NavTab(
                 icon = Res.drawable.ic_photo,
-                label = "本地图片",
+                label = "照片",
                 selected = selectedTab == 0,
                 onClick = { onSelect(0) }
             )
             NavTab(
-                icon = Res.drawable.ic_file_upload,
-                label = "已上传",
+                icon = Res.drawable.ic_cloud,
+                label = "相册",
                 selected = selectedTab == 1,
                 onClick = { onSelect(1) }
             )
-            CenterActivityFab(
+            NavTab(
+                icon = Res.drawable.ic_search,
+                label = "查找",
                 selected = selectedTab == 2,
                 onClick = { onSelect(2) }
             )
             NavTab(
-                icon = Res.drawable.ic_cloud,
-                label = "网盘图片",
+                icon = Res.drawable.ic_palette,
+                label = "创意",
                 selected = selectedTab == 3,
                 onClick = { onSelect(3) }
-            )
-            NavTab(
-                icon = Res.drawable.ic_settings,
-                label = "我的",
-                selected = selectedTab == 4,
-                onClick = { onSelect(4) }
             )
         }
     }
