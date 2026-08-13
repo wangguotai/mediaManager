@@ -968,7 +968,10 @@ func (s *Server) handlePersonsRecluster(w http.ResponseWriter, r *http.Request) 
 	}
 	// 清空旧聚类（保留命名由 ReclusterPersons 内部尽量保留）
 	// 简化：直接重建。用户命名若丢失前端可重新命名。
-	threshold := float32(0.82)
+	// 默认阈值 0.70（用真实手机照片实测调优：0.82 过严导致相似办公/室内照片碎片化
+	// 各成一簇；0.70 能把 4 张相似室内照片正确聚一簇。CLIP 整图向量相似度分布更密，
+	// 阈值应低于真人脸向量聚类所需的 0.5~0.6 场景。接 face_vector 时改用人脸空间阈值。）
+	threshold := float32(0.70)
 	if v := r.URL.Query().Get("threshold"); v != "" {
 		var f float32
 		if _, err := fmt.Sscanf(v, "%f", &f); err == nil && f > 0 {
