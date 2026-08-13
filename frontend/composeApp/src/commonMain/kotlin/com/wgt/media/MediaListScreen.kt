@@ -1043,6 +1043,22 @@ fun MediaListScreen(
                             )
                         }
                     }
+                    // PRD-v12 UI：对标一刻相册照片页标题右侧的「按时间 | 按相册」文字切换。
+                    // 本列表恒按时间分组(DateGroupedGrid)，故「按时间」为选中态；「按相册」
+                    // 点击切到相册Tab(index=1)呈现按场景/人物分组——真实可用，非假UI。
+                    if (!viewModel.hasSelection) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("按时间",
+                                fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                                color = TextPrimary)
+                            Text("  |  ", fontSize = 14.sp, color = TextSecondary)
+                            Text(
+                                "按相册",
+                                fontSize = 14.sp, color = TextSecondary,
+                                modifier = Modifier.clickable { selectedTab = 1 }
+                            )
+                        }
+                    }
                 }
                 // 搜索栏：自带 IconButton 展开收起，无需额外图标
                 // 媒体 Tab（0/1/3）才显示搜索 + 筛选；"活动"(2)/"我的"(4)在上面 return@Box 了。
