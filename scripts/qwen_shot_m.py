@@ -1,5 +1,5 @@
 import sys,json,urllib.request,urllib.error,base64,os,time
-img=sys.argv[1]; prompt=sys.argv[2]; model=sys.argv[3] if len(sys.argv)>3 else "dimcode-qwen3627b/Qwen3.6-27B"
+img=sys.argv[1]; prompt=sys.argv[2]; model=sys.argv[3] if len(sys.argv)>3 else "claude-qwen3627b/Qwen3.6-27B"
 key=open('/tmp/ccr_key.txt').read().strip()
 mt="image/jpeg"; ext=os.path.splitext(img)[1].lower()
 if ext==".png": mt="image/png"

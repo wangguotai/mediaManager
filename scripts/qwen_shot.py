@@ -7,7 +7,7 @@ ext=os.path.splitext(img)[1].lower()
 if ext in (".png",): mt="image/png"
 elif ext in (".webp",): mt="image/webp"
 b64=base64.b64encode(open(img,'rb').read()).decode()
-payload={"model":"dimcode-qwen3627b/Qwen3.6-27B","max_tokens":1200,
+payload={"model":"claude-qwen3627b/Qwen3.6-27B","max_tokens":1200,
  "messages":[{"role":"user","content":[
    {"type":"image_url","image_url":{"url":f"data:{mt};base64,{b64}"}},
    {"type":"text","text":prompt}]}]}
