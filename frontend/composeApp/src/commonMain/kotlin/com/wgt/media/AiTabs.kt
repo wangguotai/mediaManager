@@ -56,6 +56,9 @@ fun AlbumTabScreen(
     ) {
         item { SectionTitle("相册") }
 
+        // 活动 Banner —— 还原 spec Ad_Banner(361x172 bg #47B4F5): 营销横幅卡。
+        item { AlbumPromoBanner() }
+
         // 一键创建相册入口 —— 对标一刻相册「一键创建相册 >」
         item {
             Card(
@@ -413,7 +416,38 @@ fun SearchTabScreen(
                         FootprintRow(g)
                     }
                 }
+                // 类型 —— 对标一刻相册查找页「类型」区(截图/视频/动态照片/生活记录)
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    Text("类型", fontWeight = FontWeight.SemiBold)
+                }
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(SPGap)) {
+                        TypeCard("截图", "📱", { onSemanticSearch("截图") }, Modifier.weight(1f))
+                        TypeCard("视频", "🎬", { onSemanticSearch("视频") }, Modifier.weight(1f))
+                        TypeCard("动态照片", "📷", { onSemanticSearch("动态照片") }, Modifier.weight(1f))
+                    }
+                }
             }
+        }
+    }
+}
+
+/** 查找页「类型」卡 —— 扁平白卡,一刻相册类型区风格。点击做语义搜索该类型。 */
+@Composable
+private fun TypeCard(label: String, icon: String, onClick: () -> Unit, modifier: Modifier) {
+    Card(
+        modifier = modifier.clickable { onClick() },
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = SPCardPad, vertical = 14.dp)
+        ) {
+            Text(icon, fontSize = 20.sp)
+            Spacer(Modifier.width(10.dp))
+            Text(label, fontSize = T_Body, fontWeight = FontWeight.Medium, color = TextPrimary)
         }
     }
 }
@@ -632,5 +666,33 @@ private fun EmptyHint(text: String) {
         contentAlignment = Alignment.Center
     ) {
         Text(text, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+/** 相册Tab活动Banner —— 还原 spec Ad_Banner(bg#47B4F5,夏日出逃计划/赢2000元旅行金/CTA)。 */
+@Composable
+private fun AlbumPromoBanner() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF47B4F5))
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(SPCardPad)
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("夏日出逃计划", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 17.sp)
+                Spacer(Modifier.height(2.dp))
+                Text("赢2000元旅行金", color = Color.White.copy(alpha = 0.92f), fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White)
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                ) { Text("去看看", color = Color(0xFF47B4F5), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+            }
+            Text("🏖", fontSize = 34.sp)
+        }
     }
 }
