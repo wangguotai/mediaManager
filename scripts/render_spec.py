@@ -33,11 +33,13 @@ def _flex_dir(v):
 def render_node(node):
     """递归返回 (html_str, is_block)。RN/Figma 双 schema 兼容。"""
     if not isinstance(node, dict): return "", False
-    t = node.get("type", "")
-    name = node.get("name", "")
+    t = (node.get("type", "") or "")
+    # schema 归一化: qwen 偶发 "Frame"(首字母大写)/"FRAME"/"View" 指同一容器,统一小写比较。
+    t_low = t.lower() if isinstance(t, str) else ""
+    name = node.get("name", "") or ""
     children = node.get("children", []) or []
-    # ---- 容器(View/FRAME/COMPONENT) ----
-    if t in ("View", "FRAME", "COMPONENT", "ScrollView"):
+    # ---- 容器(View/FRAME/Frame/COMPONENT/ScrollView,大小写兼容) ----
+    if t_low in ("view", "frame", "component", "scrollview"):
         p = node.get("props", {}) or node  # RN:props 内; Figma:平铺
         styles = []
         fd = p.get("flexDirection") or p.get("layoutMode")
@@ -70,7 +72,7 @@ def render_node(node):
         attrs = f'class="{cls}" data-name="{html.escape(name)}" data-type="{t}"'
         return f'<div {attrs} style="{";".join(styles)}">{inner}</div>', True
     # ---- 文字(Text/TEXT) ----
-    if t in ("Text", "TEXT"):
+    if t_low in ("text","text"):
         p = node.get("props", {}) or node
         s = []
         for k,css in [("fontSize","font-size"),("fontWeight","font-weight"),("color","color"),("fontFamily","font-family")]:
@@ -82,7 +84,7 @@ def render_node(node):
         txt = p.get("text") or node.get("text") or node.get("characters") or ""
         return f'<span style="{";".join(s)}">{html.escape(str(txt))}</span>', False
     # ---- 图标(Icon/RECTANGLE 小) ----
-    if t in ("Icon","ICON"):
+    if t_low in ("icon",):
         p = node.get("props",{}) or node
         ref = p.get("iconRef") or node.get("iconRef") or name or "?"
         col = p.get("color") or node.get("color") or (node.get("fills",[{}])[0].get("color") if node.get("fills") else "#888")
@@ -92,7 +94,7 @@ def render_node(node):
         return (f'<span class="icon" style="display:inline-flex;align-items:center;justify-content:center;'
                 f'width:{w};height:{h};background:{col};border-radius:4px;color:#fff;font-size:9px;'
                 f'overflow:hidden" title="{html.escape(ref)}">{html.escape(ref[:6])}</span>'), False
-    if t in ("Image","IMAGE"):
+    if t_low in ("image",):
         p = node.get("props",{}) or node
         w = _num(p.get("width") or node.get("width") or "100%")
         h = _num(p.get("height") or node.get("height") or 80)
@@ -101,7 +103,7 @@ def render_node(node):
         return (f'<div class="img" style="width:{w};height:{h};background:{bg};'
                 f'display:flex;align-items:flex-end;font-size:9px;color:#999;padding:2px">'
                 f'{html.escape(str(ref))}</div>'), True
-    if t in ("RECTANGLE","CIRCLE","VECTOR"):
+    if t_low in ("rectangle","circle","vector"):
         p = node.get("props",{}) or node
         w = _num(p.get("width") or node.get("width") or 20)
         h = _num(p.get("height") or node.get("height") or 20)
@@ -122,7 +124,7 @@ def spec_to_html(spec):
     bg = spec.get("backgroundColor") or (spec.get("props",{}) or {}).get("backgroundColor") or "#F2F4F8"
     body, _ = render_node(spec)
     # 若 root 本身就是 View,body 已含样式;否则套一个画布
-    if spec.get("type") in ("View","FRAME") or (spec.get("props",{}) or {}).get("flexDirection"):
+    if (spec.get("type","") or "").lower() in ("view","frame") or (spec.get("props",{}) or {}).get("flexDirection"):
         canvas = body
     else:
         canvas = f'<div style="width:{wv};height:{hv};background:{bg};overflow:hidden">{body}</div>'
