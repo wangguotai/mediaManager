@@ -188,3 +188,4 @@ build/
 frontend/iosApp/Vendor/React.xcframework/
 frontend/iosApp/iosApp/main.jsbundle
 frontend/iosApp/iosApp.xcworkspace/
+test-images/real/

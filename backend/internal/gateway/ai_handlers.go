@@ -59,19 +59,19 @@ func NewAIClient(baseURL string) *AIClient {
 
 // embedResp 是特征服务 /embed、/text-embed 的返回。
 type embedResp struct {
-	Vector    []float32 `json:"vector"`
-	Dim       int       `json:"dim"`
-	ModelVer  string    `json:"model_ver"`
+	Vector   []float32 `json:"vector"`
+	Dim      int       `json:"dim"`
+	ModelVer string    `json:"model_ver"`
 }
 
 // captionResp 是 /caption 返回。
 type captionResp struct {
-	Caption   string   `json:"caption"`
-	Scene     string   `json:"scene"`
-	Objects   []string `json:"objects"`
-	Colors    []string `json:"colors"`
-	Mood      string   `json:"mood"`
-	ModelVer  string   `json:"model_ver"`
+	Caption  string   `json:"caption"`
+	Scene    string   `json:"scene"`
+	Objects  []string `json:"objects"`
+	Colors   []string `json:"colors"`
+	Mood     string   `json:"mood"`
+	ModelVer string   `json:"model_ver"`
 }
 
 // EmbedText 文本向量化（检索查询用）。
@@ -186,11 +186,11 @@ type AIIndexer struct {
 // NewAIIndexer 创建索引器。logf 为空时用标准日志。
 func (s *Server) NewAIIndexer() *AIIndexer {
 	return &AIIndexer{
-		server:      s,
-		ai:          NewAIClient(aiFeatureSvcURL),
-		logf:        func(format string, args ...any) { slog.Info("ai-indexer: "+format, args...) },
-		stopCh:      make(chan struct{}),
-		embedCache:  make(map[string]map[string][]float32),
+		server:     s,
+		ai:         NewAIClient(aiFeatureSvcURL),
+		logf:       func(format string, args ...any) { slog.Info("ai-indexer: "+format, args...) },
+		stopCh:     make(chan struct{}),
+		embedCache: make(map[string]map[string][]float32),
 	}
 }
 
@@ -354,10 +354,10 @@ func (a *AIIndexer) indexOne(ctx context.Context, uid, mediaID string) error {
 
 // aiSearchResult 单条检索结果。
 type aiSearchResult struct {
-	Media    map[string]any `json:"media"`
-	Score    float32        `json:"score"`
-	Caption  string         `json:"caption,omitempty"`
-	Scene    string         `json:"scene,omitempty"`
+	Media   map[string]any `json:"media"`
+	Score   float32        `json:"score"`
+	Caption string         `json:"caption,omitempty"`
+	Scene   string         `json:"scene,omitempty"`
 }
 
 // SearchSemantic 执行语义检索：文本→向量→内存余弦 top-k→混合排序。
@@ -423,23 +423,29 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 	}
 	cands := make([]cand, 0, len(embeds))
 	for mid, mv := range embeds {
-		// 人物词过滤在排序前做：若启用了 personClusterMedia 限制，仅收该 cluster 成员为候选。
+		// 人物词过滤在排序前做：若使用了 personClusterMedia 限制，仅收该 cluster 成员为候选。
 		// 旧版在 fetchN=limit*2 窗口内过滤，大库下 cluster 成员在 top 窗口稀疏，会漏相关项/返回不足。
 		if personClusterMedia != nil && !personClusterMedia[mid] {
 			continue
 		}
 		cands = append(cands, cand{mid, storage.Cosine(qv, mv)})
 	}
-	// 混合排序后取 top-k
+	// 纯语义分排序，用于裁剪候选窗口（fetchN）。真正的最终排序在算出混合分后做，
+	// 避免硬过滤/时间近度/质量加成把高分项排到窗外的正确项前面。
 	sort.Slice(cands, func(i, j int) bool { return cands[i].sem > cands[j].sem })
 
-	// 取 top limit*2 候选（够过滤），补 metadata 做硬过滤与时间近度
+	// 取 top limit*2 候选（够过滤），补 metadata 做硬过滤与混合分。
+	// 这里不再直接输出：先对窗口内每个候选算完整 finalScore，再按 finalScore 排序取 limit。
 	fetchN := limit * 2
 	if fetchN > len(cands) {
 		fetchN = len(cands)
 	}
-	out := make([]aiSearchResult, 0, limit)
-	for i := 0; i < fetchN && len(out) < limit; i++ {
+	type scored struct {
+		result aiSearchResult
+		total  float32
+	}
+	scoreds := make([]scored, 0, fetchN)
+	for i := 0; i < fetchN; i++ {
 		mid := cands[i].mediaID
 		m, err := s.store.GetMedia(ctx, mid)
 		if err != nil || m == nil || m.UserID != uid {
@@ -465,11 +471,11 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 		sem := cands[i].sem
 		if ann != nil && sem >= 0.22 {
 			rawBoost := float32(0)
-			// caption/manual_note 词级命中 query（非整串包含——query 是自然语言长句，
-			// caption 是短描述，整串 Contains 几乎永不命中，是 v2 引入的逻辑 bug）。
-			// 策略：caption/manual_note 按非中文标点/空白切分，任一词（≥2字）出现在 query 中即命中。
+			// caption/manual_note 词级命中 query（phrase 即自然语言长句，caption 是短描述，
+			// 整串 Contains 几乎永不命中，是 v2 引入的逻辑 bug）。
+			// 按非中文标点/空白切分，任一词（≥2 字）出现在 query 中即命中。
 			qLower := strings.ToLower(query)
-		captionHit := wordInQuery(ann.Caption, qLower) || wordInQuery(ann.ManualNote, qLower)
+			captionHit := wordInQuery(ann.Caption, qLower) || wordInQuery(ann.ManualNote, qLower)
 			if captionHit {
 				rawBoost += 0.15
 			}
@@ -485,26 +491,37 @@ func (s *Server) SearchSemantic(ctx context.Context, uid, query string, limit in
 			}
 			boost = rawBoost
 		}
-		// PRD-v12 §5 混合排序:语义为主 + 时间近度(0.2) + 质量(0.1)。
-		// 时间近度:与当前时间差归一化(越近越高,0~0.2),1年内线性衰减。
-		// 质量:size 归一化(大图通常清晰度高,0~0.1,上限 5MB)。
+		// PRD-v12 §5 混合排序:语义为主 + 时间近度(0~0.2) + 质量(0~0.1)。
+		// 时间近度:与当前时刻差归一化(越近越高),1 年内线性衰减。
+		// 质量:size 归一化(大图通常清晰度高,上限 5MB)。
 		// 权重为 sem 同量级的相对加成(非 PRD 理想 0.7/0.2/0.1 绝对值,因 sem 本身在 0.2~0.5)。
 		timeScore := recencyScore(m)
 		qualityScore := float32(0)
 		if m.Size > 0 {
-			qualityScore = 0.1 * float32(m.Size) / float32(5 * 1024 * 1024)
+			qualityScore = 0.1 * float32(m.Size) / float32(5*1024*1024)
 			if qualityScore > 0.1 {
 				qualityScore = 0.1
 			}
 		}
 		mediaMap := mediaToMap(m)
 		mediaMap["thumbnail_url"] = "/api/media/stream/" + mid
-		out = append(out, aiSearchResult{
-			Media:   mediaMap,
-			Score:   cands[i].sem + boost + timeScore + qualityScore,
-			Caption: captionOf(ann),
-			Scene:   sceneOf(ann),
+		scoreds = append(scoreds, scored{
+			result: aiSearchResult{
+				Media:   mediaMap,
+				Score:   cands[i].sem + boost + timeScore + qualityScore,
+				Caption: captionOf(ann),
+				Scene:   sceneOf(ann),
+			},
+			total: cands[i].sem + boost + timeScore + qualityScore,
 		})
+	}
+	// 最终排序用的是完整混合分（sem+boost+time+quality），而不是纯 sem。
+	// 否则高分（新上大图时间近+质量高）项会被纯语义分高的旧合成图压到后面，
+	// 前端看到"分数更高却排更后"的错乱。
+	sort.SliceStable(scoreds, func(i, j int) bool { return scoreds[i].total > scoreds[j].total })
+	out := make([]aiSearchResult, 0, limit)
+	for i := 0; i < len(scoreds) && len(out) < limit; i++ {
+		out = append(out, scoreds[i].result)
 	}
 	return out, nil
 }
@@ -623,13 +640,13 @@ func sceneOf(a *storage.Annotation) string {
 
 func mediaToMap(m *storage.Media) map[string]any {
 	return map[string]any{
-		"id":       m.ID,
-		"filename": m.Filename,
-		"type":     m.Type,
-		"size":     m.Size,
-		"width":    m.Width,
-		"height":   m.Height,
-		"taken_at": m.TakenAt,
+		"id":         m.ID,
+		"filename":   m.Filename,
+		"type":       m.Type,
+		"size":       m.Size,
+		"width":      m.Width,
+		"height":     m.Height,
+		"taken_at":   m.TakenAt,
 		"created_at": m.CreatedAt,
 	}
 }
@@ -715,7 +732,7 @@ func (s *Server) handleAIStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"progress": prog,
+		"progress":    prog,
 		"feature_svc": svcHealth,
 	})
 }
@@ -797,8 +814,8 @@ func (s *Server) handleAIAutoAlbums(w http.ResponseWriter, r *http.Request) {
 	// 额外按 objects 聚合（汉服等）
 	// 简化：先返回 scene 相册 + objects 标签云
 	writeJSON(w, http.StatusOK, map[string]any{
-		"albums":     scenes,
-		"total":      len(scenes),
+		"albums": scenes,
+		"total":  len(scenes),
 	})
 }
 
@@ -904,7 +921,9 @@ func (s *Server) handlePersonsItem(w http.ResponseWriter, r *http.Request) {
 	}
 	// PUT /api/persons/{id} 命名
 	if r.Method == http.MethodPut {
-		var body struct{ Name string `json:"name"` }
+		var body struct {
+			Name string `json:"name"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body"})
 			return
