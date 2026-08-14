@@ -1,0 +1,1240 @@
+{
+ "type": "View",
+ "description": "应用主界面容器",
+ "props": {
+  "x": 0,
+  "y": 0,
+  "width": 1000,
+  "height": 1000,
+  "fill": "#FFFFFF"
+ },
+ "children": [
+  {
+   "type": "View",
+   "description": "顶部状态栏区域",
+   "props": {
+    "x": 0,
+    "y": 0,
+    "width": 1000,
+    "height": 44
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "当前时间显示",
+     "props": {
+      "x": 62,
+      "y": 16,
+      "width": 60,
+      "height": 20,
+      "fill": "#FFFFFF",
+      "fontSize": 16
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "应用通知图标",
+     "props": {
+      "x": 150,
+      "y": 16,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Text",
+     "description": "更多选项省略号",
+     "props": {
+      "x": 200,
+      "y": 16,
+      "width": 20,
+      "height": 20,
+      "fill": "#FFFFFF"
+     }
+    },
+    {
+     "type": "View",
+     "description": "右侧系统状态图标组",
+     "props": {
+      "x": 700,
+      "y": 10,
+      "width": 280,
+      "height": 30
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "勿扰模式月亮图标",
+       "props": {
+        "x": 0,
+        "y": 5,
+        "width": 20,
+        "height": 20
+       }
+      },
+      {
+       "type": "Text",
+       "description": "5G网络标识",
+       "props": {
+        "x": 25,
+        "y": 5,
+        "width": 20,
+        "height": 20,
+        "fill": "#FFFFFF"
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "信号强度图标",
+       "props": {
+        "x": 50,
+        "y": 5,
+        "width": 20,
+        "height": 20
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "Wi-Fi信号图标",
+       "props": {
+        "x": 75,
+        "y": 5,
+        "width": 20,
+        "height": 20
+       }
+      },
+      {
+       "type": "View",
+       "description": "电池电量显示",
+       "props": {
+        "x": 100,
+        "y": 5,
+        "width": 60,
+        "height": 20
+       },
+       "children": [
+        {
+         "type": "Text",
+         "description": "剩余电量百分比",
+         "props": {
+          "x": 10,
+          "y": 0,
+          "width": 30,
+          "height": 20,
+          "fill": "#FFFFFF"
+         }
+        },
+        {
+         "type": "Icon",
+         "description": "电池充电图标",
+         "props": {
+          "x": 40,
+          "y": 0,
+          "width": 20,
+          "height": 20
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "顶部广告横幅区域",
+   "props": {
+    "x": 0,
+    "y": 44,
+    "width": 1000,
+    "height": 400
+   },
+   "children": [
+    {
+     "type": "Image",
+     "description": "广告背景图片（情侣合影）",
+     "props": {
+      "x": 0,
+      "y": 0,
+      "width": 1000,
+      "height": 400
+     }
+    },
+    {
+     "type": "Button",
+     "description": "左上角作品集入口",
+     "props": {
+      "x": 40,
+      "y": 60,
+      "width": 120,
+      "height": 40,
+      "borderRadius": 20,
+      "fill": "rgba(255,255,255,0.3)"
+     },
+     "children": [
+      {
+       "type": "Image",
+       "description": "用户头像",
+       "props": {
+        "x": 5,
+        "y": 5,
+        "width": 30,
+        "height": 30,
+        "borderRadius": 15
+       }
+      },
+      {
+       "type": "Text",
+       "description": "作品集文字",
+       "props": {
+        "x": 40,
+        "y": 10,
+        "width": 60,
+        "height": 20,
+        "fill": "#FFFFFF"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "右上角功能图标组",
+     "props": {
+      "x": 800,
+      "y": 60,
+      "width": 160,
+      "height": 40
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "广告标识AD",
+       "props": {
+        "x": 0,
+        "y": 0,
+        "width": 40,
+        "height": 25,
+        "fill": "#FFFFFF",
+        "borderRadius": 4
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "消息通知铃铛图标",
+       "props": {
+        "x": 100,
+        "y": 5,
+        "width": 30,
+        "height": 30
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "右侧广告文案区域",
+     "props": {
+      "x": 500,
+      "y": 100,
+      "width": 450,
+      "height": 200
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "广告主标题",
+       "props": {
+        "x": 0,
+        "y": 0,
+        "width": 400,
+        "height": 40,
+        "fill": "#FFFFFF",
+        "fontSize": 32
+       }
+      },
+      {
+       "type": "Text",
+       "description": "广告副标题",
+       "props": {
+        "x": 0,
+        "y": 50,
+        "width": 300,
+        "height": 40,
+        "fill": "#FFFFFF",
+        "fontSize": 28
+       }
+      },
+      {
+       "type": "Image",
+       "description": "螃蟹装饰图标",
+       "props": {
+        "x": 300,
+        "y": 50,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Button",
+       "description": "一键获取好礼按钮",
+       "props": {
+        "x": 0,
+        "y": 100,
+        "width": 350,
+        "height": 50,
+        "fill": "#FF69B4",
+        "borderRadius": 25
+       },
+       "children": [
+        {
+         "type": "Text",
+         "description": "按钮文字",
+         "props": {
+          "x": 20,
+          "y": 15,
+          "width": 300,
+          "height": 20,
+          "fill": "#FFFFFF"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "轮播图指示器",
+     "props": {
+      "x": 850,
+      "y": 370,
+      "width": 100,
+      "height": 10
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "当前页指示点",
+       "props": {
+        "x": 0,
+        "y": 0,
+        "width": 10,
+        "height": 10,
+        "fill": "#FFFFFF",
+        "borderRadius": 5
+       }
+      },
+      {
+       "type": "View",
+       "description": "非当前页指示点",
+       "props": {
+        "x": 20,
+        "y": 0,
+        "width": 10,
+        "height": 10,
+        "fill": "rgba(255,255,255,0.5)",
+        "borderRadius": 5
+       }
+      },
+      {
+       "type": "View",
+       "description": "非当前页指示点",
+       "props": {
+        "x": 40,
+        "y": 0,
+        "width": 10,
+        "height": 10,
+        "fill": "rgba(255,255,255,0.5)",
+        "borderRadius": 5
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "核心功能网格区域",
+   "props": {
+    "x": 0,
+    "y": 400,
+    "width": 1000,
+    "height": 300
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "功能项：时光足迹",
+     "props": {
+      "x": 50,
+      "y": 50,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "时钟图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "时光足迹文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：人像美颜",
+     "props": {
+      "x": 280,
+      "y": 50,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "人脸美颜图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "人像美颜文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：AI消除",
+     "props": {
+      "x": 510,
+      "y": 50,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "橡皮擦图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "AI消除文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：AI动图",
+     "props": {
+      "x": 740,
+      "y": 50,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "图片播放图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "AI动图文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：创意拼图",
+     "props": {
+      "x": 50,
+      "y": 200,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "拼图图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "创意拼图文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：一键成片",
+     "props": {
+      "x": 280,
+      "y": 200,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "视频音符图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "一键成片文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：朋友圈9图",
+     "props": {
+      "x": 510,
+      "y": 200,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "九宫格图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "New标签",
+       "props": {
+        "x": 100,
+        "y": -10,
+        "width": 40,
+        "height": 20,
+        "fill": "#007AFF",
+        "borderRadius": 10
+       }
+      },
+      {
+       "type": "Text",
+       "description": "朋友圈9图文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "功能项：全部工具",
+     "props": {
+      "x": 740,
+      "y": 200,
+      "width": 200,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "四方块图标",
+       "props": {
+        "x": 70,
+        "y": 0,
+        "width": 60,
+        "height": 60
+       }
+      },
+      {
+       "type": "Text",
+       "description": "全部工具文字",
+       "props": {
+        "x": 40,
+        "y": 70,
+        "width": 120,
+        "height": 20,
+        "fill": "#333333"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "主要操作按钮区域",
+   "props": {
+    "x": 0,
+    "y": 720,
+    "width": 1000,
+    "height": 80
+   },
+   "children": [
+    {
+     "type": "Button",
+     "description": "AI改图按钮",
+     "props": {
+      "x": 30,
+      "y": 0,
+      "width": 460,
+      "height": 80,
+      "fill": "#FF9EBB",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "魔法棒图标",
+       "props": {
+        "x": 20,
+        "y": 20,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "AI改图文字",
+       "props": {
+        "x": 70,
+        "y": 30,
+        "width": 100,
+        "height": 20,
+        "fill": "#FFFFFF",
+        "fontSize": 24
+       }
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "导入图片按钮",
+     "props": {
+      "x": 510,
+      "y": 0,
+      "width": 460,
+      "height": 80,
+      "fill": "#FF9EBB",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "加号图标",
+       "props": {
+        "x": 20,
+        "y": 20,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "导入图片文字",
+       "props": {
+        "x": 70,
+        "y": 30,
+        "width": 120,
+        "height": 20,
+        "fill": "#FFFFFF",
+        "fontSize": 24
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "夏日玩法推荐区域",
+   "props": {
+    "x": 0,
+    "y": 820,
+    "width": 1000,
+    "height": 300
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "区域标题栏",
+     "props": {
+      "x": 0,
+      "y": 0,
+      "width": 1000,
+      "height": 40
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "高温退退退标题",
+       "props": {
+        "x": 30,
+        "y": 10,
+        "width": 600,
+        "height": 20,
+        "fill": "#333333",
+        "fontSize": 20
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "右侧箭头图标",
+       "props": {
+        "x": 950,
+        "y": 10,
+        "width": 20,
+        "height": 20
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "横向滚动卡片列表",
+     "props": {
+      "x": 0,
+      "y": 50,
+      "width": 1000,
+      "height": 250
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "推荐卡片1",
+       "props": {
+        "x": 30,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "女生拿花图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "夏天的另一种打开...",
+         "props": {
+          "x": 0,
+          "y": 210,
+          "width": 280,
+          "height": 20,
+          "fill": "#333333"
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片2",
+       "props": {
+        "x": 330,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "小孩拿荷叶图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "萌宝拍照新姿势",
+         "props": {
+          "x": 0,
+          "y": 210,
+          "width": 280,
+          "height": 20,
+          "fill": "#333333"
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片3",
+       "props": {
+        "x": 630,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "男生海边图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "拥抱夏日",
+         "props": {
+          "x": 0,
+          "y": 210,
+          "width": 280,
+          "height": 20,
+          "fill": "#333333"
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片4（部分可见）",
+       "props": {
+        "x": 930,
+        "y": 0,
+        "width": 100,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "部分可见的图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 200,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "美丽...",
+         "props": {
+          "x": 0,
+          "y": 210,
+          "width": 100,
+          "height": 20,
+          "fill": "#333333"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "超级英雄玩法推荐区域",
+   "props": {
+    "x": 0,
+    "y": 1120,
+    "width": 1000,
+    "height": 300
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "区域标题栏",
+     "props": {
+      "x": 0,
+      "y": 0,
+      "width": 1000,
+      "height": 40
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "超级英雄回归标题",
+       "props": {
+        "x": 30,
+        "y": 10,
+        "width": 700,
+        "height": 20,
+        "fill": "#333333",
+        "fontSize": 20
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "右侧箭头图标",
+       "props": {
+        "x": 950,
+        "y": 10,
+        "width": 20,
+        "height": 20
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "横向滚动卡片列表",
+     "props": {
+      "x": 0,
+      "y": 50,
+      "width": 1000,
+      "height": 250
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "推荐卡片1",
+       "props": {
+        "x": 30,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "男生背影图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片2",
+       "props": {
+        "x": 330,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "女生举手机图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片3",
+       "props": {
+        "x": 630,
+        "y": 0,
+        "width": 280,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "女生和蜘蛛侠图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 280,
+          "height": 200,
+          "borderRadius": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "推荐卡片4（部分可见）",
+       "props": {
+        "x": 930,
+        "y": 0,
+        "width": 100,
+        "height": 250
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "城市风景图片",
+         "props": {
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 200,
+          "borderRadius": 20
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "底部导航栏",
+   "props": {
+    "x": 0,
+    "y": 1420,
+    "width": 1000,
+    "height": 100
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "导航项：照片",
+     "props": {
+      "x": 50,
+      "y": 20,
+      "width": 150,
+      "height": 60
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "人像图标",
+       "props": {
+        "x": 50,
+        "y": 0,
+        "width": 50,
+        "height": 50
+       }
+      },
+      {
+       "type": "Text",
+       "description": "照片文字",
+       "props": {
+        "x": 40,
+        "y": 50,
+        "width": 70,
+        "height": 15,
+        "fill": "#666666"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "导航项：相册",
+     "props": {
+      "x": 250,
+      "y": 20,
+      "width": 150,
+      "height": 60
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "胶卷图标",
+       "props": {
+        "x": 50,
+        "y": 0,
+        "width": 50,
+        "height": 50
+       }
+      },
+      {
+       "type": "Text",
+       "description": "相册文字",
+       "props": {
+        "x": 40,
+        "y": 50,
+        "width": 70,
+        "height": 15,
+        "fill": "#666666"
+       }
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "中间主功能按钮",
+     "props": {
+      "x": 420,
+      "y": -20,
+      "width": 160,
+      "height": 100,
+      "fill": "#FFFFFF",
+      "borderRadius": 50,
+      "shadow": true
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "紫色相机/快门图标",
+       "props": {
+        "x": 50,
+        "y": 20,
+        "width": 60,
+        "height": 60
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "导航项：查找",
+     "props": {
+      "x": 600,
+      "y": 20,
+      "width": 150,
+      "height": 60
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "放大镜图标",
+       "props": {
+        "x": 50,
+        "y": 0,
+        "width": 50,
+        "height": 50
+       }
+      },
+      {
+       "type": "Text",
+       "description": "查找文字",
+       "props": {
+        "x": 40,
+        "y": 50,
+        "width": 70,
+        "height": 15,
+        "fill": "#666666"
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "导航项：创意",
+     "props": {
+      "x": 800,
+      "y": 20,
+      "width": 150,
+      "height": 60
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "加号星号图标",
+       "props": {
+        "x": 50,
+        "y": 0,
+        "width": 50,
+        "height": 50
+       }
+      },
+      {
+       "type": "Text",
+       "description": "创意文字",
+       "props": {
+        "x": 40,
+        "y": 50,
+        "width": 70,
+        "height": 15,
+        "fill": "#666666"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

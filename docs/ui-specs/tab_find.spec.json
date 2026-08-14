@@ -1,0 +1,982 @@
+{
+ "type": "View",
+ "description": "相册应用的查找页面主容器",
+ "props": {
+  "x": 0,
+  "y": 0,
+  "width": 1000,
+  "height": 2000,
+  "fill": "#F5F7FA"
+ },
+ "children": [
+  {
+   "type": "View",
+   "description": "顶部状态栏区域",
+   "props": {
+    "x": 0,
+    "y": 0,
+    "width": 1000,
+    "height": 50
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "当前时间显示",
+     "props": {
+      "x": 60,
+      "y": 15,
+      "width": 100,
+      "height": 25,
+      "fill": "#000000",
+      "fontSize": 20
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "运营商或通知图标",
+     "props": {
+      "x": 170,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "更多菜单省略号图标",
+     "props": {
+      "x": 200,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "月亮模式图标",
+     "props": {
+      "x": 700,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Text",
+     "description": "5G网络标识",
+     "props": {
+      "x": 730,
+      "y": 10,
+      "width": 30,
+      "height": 15,
+      "fill": "#000000",
+      "fontSize": 12
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "信号强度图标",
+     "props": {
+      "x": 760,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "Wi-Fi连接图标",
+     "props": {
+      "x": 800,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    },
+    {
+     "type": "Text",
+     "description": "电池电量百分比",
+     "props": {
+      "x": 850,
+      "y": 15,
+      "width": 30,
+      "height": 20,
+      "fill": "#FFFFFF",
+      "fontSize": 12
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "电池充电图标",
+     "props": {
+      "x": 890,
+      "y": 15,
+      "width": 20,
+      "height": 20
+     }
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "顶部功能操作栏",
+   "props": {
+    "x": 0,
+    "y": 50,
+    "width": 1000,
+    "height": 80
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "文件备份提示胶囊",
+     "props": {
+      "x": 30,
+      "y": 60,
+      "width": 500,
+      "height": 60,
+      "fill": "#FFFFFF",
+      "borderRadius": 30
+     },
+     "children": [
+      {
+       "type": "Image",
+       "description": "备份图标",
+       "props": {
+        "x": 50,
+        "y": 70,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "待备份文件数量提示",
+       "props": {
+        "x": 100,
+        "y": 75,
+        "width": 200,
+        "height": 30,
+        "fill": "#333333",
+        "fontSize": 18
+       }
+      },
+      {
+       "type": "Text",
+       "description": "开启备份操作链接",
+       "props": {
+        "x": 300,
+        "y": 75,
+        "width": 150,
+        "height": 30,
+        "fill": "#007AFF",
+        "fontSize": 18
+       }
+      }
+     ]
+    },
+    {
+     "type": "Icon",
+     "description": "搜索功能图标",
+     "props": {
+      "x": 700,
+      "y": 70,
+      "width": 30,
+      "height": 30
+     }
+    },
+    {
+     "type": "Icon",
+     "description": "红包或活动图标",
+     "props": {
+      "x": 790,
+      "y": 65,
+      "width": 40,
+      "height": 40
+     }
+    },
+    {
+     "type": "Image",
+     "description": "用户头像入口",
+     "props": {
+      "x": 890,
+      "y": 65,
+      "width": 40,
+      "height": 40,
+      "borderRadius": 20
+     }
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "人物相册分类区域",
+   "props": {
+    "x": 0,
+    "y": 130,
+    "width": 1000,
+    "height": 250
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "人物分类标题",
+     "props": {
+      "x": 40,
+      "y": 140,
+      "width": 100,
+      "height": 30,
+      "fill": "#000000",
+      "fontSize": 22
+     }
+    },
+    {
+     "type": "Text",
+     "description": "查看更多人物入口",
+     "props": {
+      "x": 850,
+      "y": 140,
+      "width": 100,
+      "height": 30,
+      "fill": "#999999",
+      "fontSize": 18
+     }
+    },
+    {
+     "type": "View",
+     "description": "人物头像列表容器",
+     "props": {
+      "x": 0,
+      "y": 180,
+      "width": 1000,
+      "height": 150
+     },
+     "children": [
+      {
+       "type": "Image",
+       "description": "第一个人物头像",
+       "props": {
+        "x": 20,
+        "y": 190,
+        "width": 140,
+        "height": 140,
+        "borderRadius": 70
+       }
+      },
+      {
+       "type": "Image",
+       "description": "第二个人物头像",
+       "props": {
+        "x": 180,
+        "y": 190,
+        "width": 140,
+        "height": 140,
+        "borderRadius": 70
+       }
+      },
+      {
+       "type": "Image",
+       "description": "第三个人物头像",
+       "props": {
+        "x": 340,
+        "y": 190,
+        "width": 140,
+        "height": 140,
+        "borderRadius": 70
+       }
+      },
+      {
+       "type": "Image",
+       "description": "第四个人物头像",
+       "props": {
+        "x": 500,
+        "y": 190,
+        "width": 140,
+        "height": 140,
+        "borderRadius": 70
+       }
+      },
+      {
+       "type": "Image",
+       "description": "第五个人物头像",
+       "props": {
+        "x": 660,
+        "y": 190,
+        "width": 140,
+        "height": 140,
+        "borderRadius": 70
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "足迹地图统计区域",
+   "props": {
+    "x": 0,
+    "y": 380,
+    "width": 1000,
+    "height": 400
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "足迹分类标题",
+     "props": {
+      "x": 40,
+      "y": 390,
+      "width": 100,
+      "height": 30,
+      "fill": "#000000",
+      "fontSize": 22
+     }
+    },
+    {
+     "type": "Text",
+     "description": "查看更多足迹入口",
+     "props": {
+      "x": 850,
+      "y": 390,
+      "width": 100,
+      "height": 30,
+      "fill": "#999999",
+      "fontSize": 18
+     }
+    },
+    {
+     "type": "View",
+     "description": "地图展示卡片",
+     "props": {
+      "x": 20,
+      "y": 430,
+      "width": 960,
+      "height": 300,
+      "fill": "#FFFFFF",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Image",
+       "description": "地图背景图",
+       "props": {
+        "x": 20,
+        "y": 430,
+        "width": 960,
+        "height": 300
+       }
+      },
+      {
+       "type": "Button",
+       "description": "点亮地图功能按钮",
+       "props": {
+        "x": 350,
+        "y": 520,
+        "width": 300,
+        "height": 60,
+        "fill": "#4F6EF7",
+        "borderRadius": 30
+       },
+       "children": [
+        {
+         "type": "Icon",
+         "description": "地图图标",
+         "props": {
+          "x": 370,
+          "y": 535,
+          "width": 20,
+          "height": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "按钮文字",
+         "props": {
+          "x": 400,
+          "y": 535,
+          "width": 100,
+          "height": 30,
+          "fill": "#FFFFFF",
+          "fontSize": 18
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "统计数据栏",
+       "props": {
+        "x": 20,
+        "y": 650,
+        "width": 960,
+        "height": 60
+       },
+       "children": [
+        {
+         "type": "Text",
+         "description": "旅程照片数量统计",
+         "props": {
+          "x": 80,
+          "y": 660,
+          "width": 200,
+          "height": 30,
+          "fill": "#333333",
+          "fontSize": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "城市数量统计",
+         "props": {
+          "x": 400,
+          "y": 660,
+          "width": 100,
+          "height": 30,
+          "fill": "#333333",
+          "fontSize": 20
+         }
+        },
+        {
+         "type": "View",
+         "description": "新增城市角标",
+         "props": {
+          "x": 480,
+          "y": 650,
+          "width": 30,
+          "height": 20,
+          "fill": "#FF3B30",
+          "borderRadius": 10
+         },
+         "children": [
+          {
+           "type": "Text",
+           "description": "新增数量",
+           "props": {
+            "x": 485,
+            "y": 652,
+            "width": 20,
+            "height": 15,
+            "fill": "#FFFFFF",
+            "fontSize": 10
+           }
+          }
+         ]
+        },
+        {
+         "type": "Text",
+         "description": "国家数量统计",
+         "props": {
+          "x": 700,
+          "y": 660,
+          "width": 100,
+          "height": 30,
+          "fill": "#333333",
+          "fontSize": 20
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "事物相册分类区域",
+   "props": {
+    "x": 0,
+    "y": 780,
+    "width": 1000,
+    "height": 350
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "事物分类标题",
+     "props": {
+      "x": 40,
+      "y": 790,
+      "width": 100,
+      "height": 30,
+      "fill": "#000000",
+      "fontSize": 22
+     }
+    },
+    {
+     "type": "Text",
+     "description": "查看更多事物入口",
+     "props": {
+      "x": 850,
+      "y": 790,
+      "width": 100,
+      "height": 30,
+      "fill": "#999999",
+      "fontSize": 18
+     }
+    },
+    {
+     "type": "View",
+     "description": "事物分类卡片列表",
+     "props": {
+      "x": 0,
+      "y": 830,
+      "width": 1000,
+      "height": 250
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "风景分类卡片",
+       "props": {
+        "x": 20,
+        "y": 840,
+        "width": 230,
+        "height": 230,
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "风景封面图",
+         "props": {
+          "x": 20,
+          "y": 840,
+          "width": 230,
+          "height": 230,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "风景标签",
+         "props": {
+          "x": 80,
+          "y": 1030,
+          "width": 100,
+          "height": 30,
+          "fill": "#FFFFFF",
+          "fontSize": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "美食分类卡片",
+       "props": {
+        "x": 270,
+        "y": 840,
+        "width": 230,
+        "height": 230,
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "美食封面图",
+         "props": {
+          "x": 270,
+          "y": 840,
+          "width": 230,
+          "height": 230,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "美食标签",
+         "props": {
+          "x": 330,
+          "y": 1030,
+          "width": 100,
+          "height": 30,
+          "fill": "#FFFFFF",
+          "fontSize": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "玩乐分类卡片",
+       "props": {
+        "x": 520,
+        "y": 840,
+        "width": 230,
+        "height": 230,
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "玩乐封面图",
+         "props": {
+          "x": 520,
+          "y": 840,
+          "width": 230,
+          "height": 230,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "玩乐标签",
+         "props": {
+          "x": 580,
+          "y": 1030,
+          "width": 100,
+          "height": 30,
+          "fill": "#FFFFFF",
+          "fontSize": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "生活记录分类卡片",
+       "props": {
+        "x": 770,
+        "y": 840,
+        "width": 210,
+        "height": 230,
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Image",
+         "description": "生活记录封面图(二维码)",
+         "props": {
+          "x": 770,
+          "y": 840,
+          "width": 210,
+          "height": 230,
+          "borderRadius": 20
+         }
+        },
+        {
+         "type": "Text",
+         "description": "生活记录标签",
+         "props": {
+          "x": 800,
+          "y": 1030,
+          "width": 150,
+          "height": 30,
+          "fill": "#FFFFFF",
+          "fontSize": 20
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "类型相册分类区域",
+   "props": {
+    "x": 0,
+    "y": 1130,
+    "width": 1000,
+    "height": 250
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "类型分类标题",
+     "props": {
+      "x": 40,
+      "y": 1140,
+      "width": 100,
+      "height": 30,
+      "fill": "#000000",
+      "fontSize": 22
+     }
+    },
+    {
+     "type": "View",
+     "description": "类型分类卡片列表",
+     "props": {
+      "x": 0,
+      "y": 1180,
+      "width": 1000,
+      "height": 150
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "截图分类卡片",
+       "props": {
+        "x": 40,
+        "y": 1190,
+        "width": 450,
+        "height": 130,
+        "fill": "#FFFFFF",
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Icon",
+         "description": "截图图标",
+         "props": {
+          "x": 70,
+          "y": 1220,
+          "width": 30,
+          "height": 30
+         }
+        },
+        {
+         "type": "Text",
+         "description": "截图分类名称及数量",
+         "props": {
+          "x": 110,
+          "y": 1220,
+          "width": 150,
+          "height": 30,
+          "fill": "#333333",
+          "fontSize": 20
+         }
+        }
+       ]
+      },
+      {
+       "type": "View",
+       "description": "动态照片分类卡片",
+       "props": {
+        "x": 510,
+        "y": 1190,
+        "width": 450,
+        "height": 130,
+        "fill": "#FFFFFF",
+        "borderRadius": 20
+       },
+       "children": [
+        {
+         "type": "Icon",
+         "description": "动态照片图标",
+         "props": {
+          "x": 540,
+          "y": 1220,
+          "width": 30,
+          "height": 30
+         }
+        },
+        {
+         "type": "Text",
+         "description": "动态照片分类名称及数量",
+         "props": {
+          "x": 580,
+          "y": 1220,
+          "width": 200,
+          "height": 30,
+          "fill": "#333333",
+          "fontSize": 20
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "数据安全提示条",
+   "props": {
+    "x": 80,
+    "y": 1350,
+    "width": 840,
+    "height": 60,
+    "fill": "#E6F7FF",
+    "borderRadius": 30
+   },
+   "children": [
+    {
+     "type": "Icon",
+     "description": "安全盾牌图标",
+     "props": {
+      "x": 100,
+      "y": 1365,
+      "width": 25,
+      "height": 25
+     }
+    },
+    {
+     "type": "Text",
+     "description": "数据安全提示文案",
+     "props": {
+      "x": 140,
+      "y": 1365,
+      "width": 600,
+      "height": 30,
+      "fill": "#666666",
+      "fontSize": 16
+     }
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "底部导航栏",
+   "props": {
+    "x": 0,
+    "y": 1850,
+    "width": 1000,
+    "height": 150,
+    "fill": "#FFFFFF"
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "照片导航项",
+     "props": {
+      "x": 100,
+      "y": 1880,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "照片图标",
+       "props": {
+        "x": 130,
+        "y": 1890,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "照片文字",
+       "props": {
+        "x": 130,
+        "y": 1940,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "相册导航项",
+     "props": {
+      "x": 280,
+      "y": 1880,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "相册图标",
+       "props": {
+        "x": 310,
+        "y": 1890,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "相册文字",
+       "props": {
+        "x": 310,
+        "y": 1940,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "查找导航项(当前选中)",
+     "props": {
+      "x": 460,
+      "y": 1860,
+      "width": 100,
+      "height": 120
+     },
+     "children": [
+      {
+       "type": "View",
+       "description": "选中状态背景圈",
+       "props": {
+        "x": 460,
+        "y": 1860,
+        "width": 100,
+        "height": 100,
+        "fill": "#F0F4FF",
+        "borderRadius": 50
+       }
+      },
+      {
+       "type": "Icon",
+       "description": "查找图标",
+       "props": {
+        "x": 490,
+        "y": 1880,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "查找文字",
+       "props": {
+        "x": 490,
+        "y": 1940,
+        "width": 40,
+        "height": 20,
+        "fill": "#000000",
+        "fontSize": 14
+       }
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "创意导航项",
+     "props": {
+      "x": 800,
+      "y": 1880,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "创意图标",
+       "props": {
+        "x": 830,
+        "y": 1890,
+        "width": 40,
+        "height": 40
+       }
+      },
+      {
+       "type": "Text",
+       "description": "创意文字",
+       "props": {
+        "x": 830,
+        "y": 1940,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

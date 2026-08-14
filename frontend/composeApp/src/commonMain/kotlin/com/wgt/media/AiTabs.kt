@@ -428,6 +428,21 @@ fun SearchTabScreen(
                         }
                     }
                 }
+                // 数据安全提示条 —— 还原 find spec 底部安全提示。扁平浅底圆角横条。
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(RadiusPill))
+                            .background(Color(0xFFF2F4F7))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("🛡️", fontSize = 14.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("数据本地加密存储，AI 识别不上传云端",
+                            fontSize = 12.sp, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
             }
         }
     }
@@ -532,12 +547,48 @@ fun CreativeTabScreen(
             }
         }
 
+        // 夏日玩法推荐 —— 还原 creative spec「夏日玩法推荐区域」(标题+横向滚动卡片)。
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("夏日玩法推荐", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(SUMMER_RECOMMENDATIONS) { rec ->
+                        SummerRecommendCard(rec)
+                    }
+                }
+            }
+        }
+
         // 视频列表（点"视频专区"后加载）
         if (videos.isNotEmpty()) {
             item { Spacer(Modifier.height(8.dp)); Text("视频", fontWeight = FontWeight.SemiBold, color = TextPrimary) }
             items(videos.take(20)) { v ->
                 VideoRow(v)
             }
+        }
+    }
+}
+
+/** 夏日玩法推荐数据（对标一刻相册创意页推荐区,浅色卡+emoji+一句话文案）。 */
+private data class SummerRecommend(val emoji: String, val title: String, val subtitle: String)
+
+private val SUMMER_RECOMMENDATIONS = listOf(
+    SummerRecommend("🎞️", "一键成片", "旅行片段自动剪成大片"),
+    SummerRecommend("🧩", "AI 拼图", "多张照片智能套版"),
+    SummerRecommend("🏖", "夏日清爽", "清凉滤镜一键套用")
+)
+
+@Composable
+private fun SummerRecommendCard(rec: SummerRecommend) {
+    Card(
+        modifier = Modifier.width(220.dp),
+        shape = RoundedCornerShape(RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = CardWhite)
+    ) {
+        Column(Modifier.padding(SPCardPad), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(rec.emoji, fontSize = 28.sp)
+            Text(rec.title, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+            Text(rec.subtitle, fontSize = 12.sp, color = TextSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }

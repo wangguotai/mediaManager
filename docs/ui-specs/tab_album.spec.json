@@ -1,0 +1,1046 @@
+{
+ "type": "View",
+ "description": "整个应用界面背景",
+ "props": {
+  "x": 0,
+  "y": 0,
+  "width": 1080,
+  "height": 2400,
+  "fill": "#F5F7FA"
+ },
+ "children": [
+  {
+   "type": "View",
+   "description": "顶部状态栏区域",
+   "props": {
+    "x": 0,
+    "y": 0,
+    "width": 1080,
+    "height": 44
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "当前时间显示",
+     "props": {
+      "x": 57,
+      "y": 12,
+      "width": 80,
+      "height": 24,
+      "fill": "#000000",
+      "fontSize": 16
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "顶部通知图标",
+     "props": {
+      "x": 145,
+      "y": 16,
+      "width": 20,
+      "height": 20,
+      "fill": "#FF5722"
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "顶部更多选项图标",
+     "props": {
+      "x": 200,
+      "y": 16,
+      "width": 20,
+      "height": 20,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "勿扰模式图标",
+     "props": {
+      "x": 700,
+      "y": 12,
+      "width": 24,
+      "height": 24,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "5G网络标识",
+     "props": {
+      "x": 730,
+      "y": 12,
+      "width": 30,
+      "height": 20,
+      "fill": "#000000",
+      "fontSize": 12
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "信号强度图标",
+     "props": {
+      "x": 760,
+      "y": 12,
+      "width": 30,
+      "height": 24,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "WiFi信号图标",
+     "props": {
+      "x": 790,
+      "y": 12,
+      "width": 30,
+      "height": 24,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "电池电量百分比",
+     "props": {
+      "x": 860,
+      "y": 16,
+      "width": 40,
+      "height": 20,
+      "fill": "#FFFFFF",
+      "fontSize": 12
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "电池充电图标",
+     "props": {
+      "x": 910,
+      "y": 12,
+      "width": 20,
+      "height": 24,
+      "fill": "#000000"
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "顶部备份通知栏",
+   "props": {
+    "x": 30,
+    "y": 60,
+    "width": 530,
+    "height": 80,
+    "fill": "#FFFFFF",
+    "borderRadius": 40
+   },
+   "children": [
+    {
+     "type": "Icon",
+     "description": "手机备份图标",
+     "props": {
+      "x": 50,
+      "y": 70,
+      "width": 40,
+      "height": 60,
+      "fill": "#E0E0E0"
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "待备份文件数量提示",
+     "props": {
+      "x": 110,
+      "y": 80,
+      "width": 200,
+      "height": 40,
+      "fill": "#333333",
+      "fontSize": 18
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "开启备份操作链接",
+     "props": {
+      "x": 320,
+      "y": 80,
+      "width": 150,
+      "height": 40,
+      "fill": "#1890FF",
+      "fontSize": 18
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "顶部右侧功能图标区",
+   "props": {
+    "x": 650,
+    "y": 60,
+    "width": 400,
+    "height": 80
+   },
+   "children": [
+    {
+     "type": "Icon",
+     "description": "搜索功能图标",
+     "props": {
+      "x": 700,
+      "y": 70,
+      "width": 40,
+      "height": 40,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "活动或红包图标",
+     "props": {
+      "x": 800,
+      "y": 70,
+      "width": 40,
+      "height": 40,
+      "fill": "#FF5722"
+     },
+     "children": []
+    },
+    {
+     "type": "Image",
+     "description": "用户头像",
+     "props": {
+      "x": 900,
+      "y": 70,
+      "width": 40,
+      "height": 40,
+      "borderRadius": 20
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "夏日活动轮播图Banner",
+   "props": {
+    "x": 30,
+    "y": 160,
+    "width": 1020,
+    "height": 300,
+    "borderRadius": 20
+   },
+   "children": [
+    {
+     "type": "Image",
+     "description": "Banner背景图片",
+     "props": {
+      "x": 30,
+      "y": 160,
+      "width": 1020,
+      "height": 300,
+      "borderRadius": 20
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "活动主标题",
+     "props": {
+      "x": 60,
+      "y": 180,
+      "width": 400,
+      "height": 60,
+      "fill": "#FFFFFF",
+      "fontSize": 40
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "活动副标题",
+     "props": {
+      "x": 60,
+      "y": 250,
+      "width": 350,
+      "height": 40,
+      "fill": "#FFFFFF",
+      "fontSize": 24
+     },
+     "children": []
+    },
+    {
+     "type": "Button",
+     "description": "去看看按钮",
+     "props": {
+      "x": 420,
+      "y": 250,
+      "width": 120,
+      "height": 40,
+      "fill": "#FF9800",
+      "borderRadius": 20
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "关闭Banner按钮",
+     "props": {
+      "x": 980,
+      "y": 170,
+      "width": 30,
+      "height": 30,
+      "fill": "#FFFFFF"
+     },
+     "children": []
+    },
+    {
+     "type": "View",
+     "description": "轮播图指示器",
+     "props": {
+      "x": 400,
+      "y": 440,
+      "width": 200,
+      "height": 10
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "一键创建相册标题栏",
+   "props": {
+    "x": 30,
+    "y": 480,
+    "width": 1020,
+    "height": 60
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "功能区域标题",
+     "props": {
+      "x": 30,
+      "y": 490,
+      "width": 300,
+      "height": 40,
+      "fill": "#000000",
+      "fontSize": 24
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "查看更多箭头",
+     "props": {
+      "x": 340,
+      "y": 500,
+      "width": 20,
+      "height": 20,
+      "fill": "#000000"
+     },
+     "children": []
+    },
+    {
+     "type": "Icon",
+     "description": "关闭该区域按钮",
+     "props": {
+      "x": 980,
+      "y": 490,
+      "width": 30,
+      "height": 30,
+      "fill": "#000000"
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "左侧相册卡片",
+   "props": {
+    "x": 30,
+    "y": 560,
+    "width": 400,
+    "height": 400,
+    "borderRadius": 20
+   },
+   "children": [
+    {
+     "type": "Image",
+     "description": "相册封面图片",
+     "props": {
+      "x": 30,
+      "y": 560,
+      "width": 400,
+      "height": 400,
+      "borderRadius": 20
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "相册名称",
+     "props": {
+      "x": 50,
+      "y": 800,
+      "width": 200,
+      "height": 40,
+      "fill": "#FFFFFF",
+      "fontSize": 24
+     },
+     "children": []
+    },
+    {
+     "type": "Text",
+     "description": "相册描述信息",
+     "props": {
+      "x": 50,
+      "y": 850,
+      "width": 300,
+      "height": 30,
+      "fill": "#FFFFFF",
+      "fontSize": 16
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "右侧智能搜图成册卡片",
+   "props": {
+    "x": 450,
+    "y": 560,
+    "width": 600,
+    "height": 400,
+    "fill": "#E6F7FF",
+    "borderRadius": 20
+   },
+   "children": [
+    {
+     "type": "View",
+     "description": "智能搜图标题行",
+     "props": {
+      "x": 480,
+      "y": 580,
+      "width": 500,
+      "height": 60
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "智能搜索图标",
+       "props": {
+        "x": 480,
+        "y": 590,
+        "width": 30,
+        "height": 30,
+        "fill": "#000000"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "功能标题",
+       "props": {
+        "x": 520,
+        "y": 590,
+        "width": 200,
+        "height": 30,
+        "fill": "#000000",
+        "fontSize": 22
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "个人证件卡片选项",
+     "props": {
+      "x": 480,
+      "y": 660,
+      "width": 280,
+      "height": 60,
+      "fill": "#FFFFFF",
+      "borderRadius": 30
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "证件图标",
+       "props": {
+        "x": 500,
+        "y": 675,
+        "width": 30,
+        "height": 30,
+        "fill": "#1890FF"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "选项文本",
+       "props": {
+        "x": 540,
+        "y": 675,
+        "width": 150,
+        "height": 30,
+        "fill": "#333333",
+        "fontSize": 18
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "手机截屏选项",
+     "props": {
+      "x": 480,
+      "y": 740,
+      "width": 240,
+      "height": 60,
+      "fill": "#FFFFFF",
+      "borderRadius": 30
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "手机图标",
+       "props": {
+        "x": 500,
+        "y": 755,
+        "width": 30,
+        "height": 30,
+        "fill": "#333333"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "选项文本",
+       "props": {
+        "x": 540,
+        "y": 755,
+        "width": 120,
+        "height": 30,
+        "fill": "#333333",
+        "fontSize": 18
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "一日三餐选项",
+     "props": {
+      "x": 480,
+      "y": 820,
+      "width": 240,
+      "height": 60,
+      "fill": "#FFFFFF",
+      "borderRadius": 30
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "食物图标",
+       "props": {
+        "x": 500,
+        "y": 835,
+        "width": 30,
+        "height": 30,
+        "fill": "#FF9800"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "选项文本",
+       "props": {
+        "x": 540,
+        "y": 835,
+        "width": 120,
+        "height": 30,
+        "fill": "#333333",
+        "fontSize": 18
+       },
+       "children": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "云空间相册标题与操作栏",
+   "props": {
+    "x": 30,
+    "y": 1000,
+    "width": 1020,
+    "height": 60
+   },
+   "children": [
+    {
+     "type": "Text",
+     "description": "区域标题",
+     "props": {
+      "x": 30,
+      "y": 1010,
+      "width": 200,
+      "height": 40,
+      "fill": "#000000",
+      "fontSize": 24
+     },
+     "children": []
+    },
+    {
+     "type": "Button",
+     "description": "新建相册按钮",
+     "props": {
+      "x": 500,
+      "y": 1010,
+      "width": 150,
+      "height": 40
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "新建图标",
+       "props": {
+        "x": 500,
+        "y": 1020,
+        "width": 20,
+        "height": 20,
+        "fill": "#666666"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "按钮文本",
+       "props": {
+        "x": 530,
+        "y": 1020,
+        "width": 100,
+        "height": 20,
+        "fill": "#666666",
+        "fontSize": 16
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "排序方式按钮",
+     "props": {
+      "x": 700,
+      "y": 1010,
+      "width": 200,
+      "height": 40
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "排序图标",
+       "props": {
+        "x": 700,
+        "y": 1020,
+        "width": 20,
+        "height": 20,
+        "fill": "#666666"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "排序文本",
+       "props": {
+        "x": 730,
+        "y": 1020,
+        "width": 150,
+        "height": 20,
+        "fill": "#666666",
+        "fontSize": 16
+       },
+       "children": []
+      },
+      {
+       "type": "Icon",
+       "description": "下拉箭头",
+       "props": {
+        "x": 880,
+        "y": 1020,
+        "width": 20,
+        "height": 20,
+        "fill": "#666666"
+       },
+       "children": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "筛选标签栏",
+   "props": {
+    "x": 30,
+    "y": 1080,
+    "width": 1020,
+    "height": 60
+   },
+   "children": [
+    {
+     "type": "Button",
+     "description": "全部标签（选中）",
+     "props": {
+      "x": 30,
+      "y": 1090,
+      "width": 120,
+      "height": 40,
+      "fill": "#E6F7FF",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "标签文本",
+       "props": {
+        "x": 70,
+        "y": 1100,
+        "width": 40,
+        "height": 20,
+        "fill": "#1890FF",
+        "fontSize": 16
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "我的标签",
+     "props": {
+      "x": 180,
+      "y": 1090,
+      "width": 120,
+      "height": 40,
+      "fill": "#F5F5F5",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "标签文本",
+       "props": {
+        "x": 220,
+        "y": 1100,
+        "width": 40,
+        "height": 20,
+        "fill": "#333333",
+        "fontSize": 16
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "共享标签",
+     "props": {
+      "x": 330,
+      "y": 1090,
+      "width": 120,
+      "height": 40,
+      "fill": "#F5F5F5",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Text",
+       "description": "标签文本",
+       "props": {
+        "x": 370,
+        "y": 1100,
+        "width": 40,
+        "height": 20,
+        "fill": "#333333",
+        "fontSize": 16
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "新增标签按钮",
+     "props": {
+      "x": 480,
+      "y": 1090,
+      "width": 180,
+      "height": 40,
+      "fill": "#F5F5F5",
+      "borderRadius": 20
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "加号图标",
+       "props": {
+        "x": 500,
+        "y": 1100,
+        "width": 20,
+        "height": 20,
+        "fill": "#333333"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "按钮文本",
+       "props": {
+        "x": 530,
+        "y": 1100,
+        "width": 100,
+        "height": 20,
+        "fill": "#333333",
+        "fontSize": 16
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Icon",
+     "description": "菜单图标",
+     "props": {
+      "x": 980,
+      "y": 1100,
+      "width": 30,
+      "height": 30,
+      "fill": "#333333"
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "Button",
+   "description": "悬浮添加按钮",
+   "props": {
+    "x": 880,
+    "y": 1800,
+    "width": 100,
+    "height": 100,
+    "fill": "#1890FF",
+    "borderRadius": 50
+   },
+   "children": [
+    {
+     "type": "Icon",
+     "description": "加号图标",
+     "props": {
+      "x": 910,
+      "y": 1830,
+      "width": 40,
+      "height": 40,
+      "fill": "#FFFFFF"
+     },
+     "children": []
+    }
+   ]
+  },
+  {
+   "type": "View",
+   "description": "底部导航栏",
+   "props": {
+    "x": 0,
+    "y": 2200,
+    "width": 1080,
+    "height": 200,
+    "fill": "#FFFFFF"
+   },
+   "children": [
+    {
+     "type": "Button",
+     "description": "照片导航项",
+     "props": {
+      "x": 100,
+      "y": 2220,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "照片图标",
+       "props": {
+        "x": 130,
+        "y": 2230,
+        "width": 40,
+        "height": 40,
+        "fill": "#CCCCCC"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "导航文本",
+       "props": {
+        "x": 130,
+        "y": 2280,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "相册导航项（选中）",
+     "props": {
+      "x": 300,
+      "y": 2220,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "相册图标",
+       "props": {
+        "x": 330,
+        "y": 2230,
+        "width": 40,
+        "height": 40,
+        "fill": "#000000"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "导航文本",
+       "props": {
+        "x": 330,
+        "y": 2280,
+        "width": 40,
+        "height": 20,
+        "fill": "#000000",
+        "fontSize": 14
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "查找导航项",
+     "props": {
+      "x": 700,
+      "y": 2220,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "查找图标",
+       "props": {
+        "x": 730,
+        "y": 2230,
+        "width": 40,
+        "height": 40,
+        "fill": "#CCCCCC"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "导航文本",
+       "props": {
+        "x": 730,
+        "y": 2280,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "Button",
+     "description": "创意导航项",
+     "props": {
+      "x": 900,
+      "y": 2220,
+      "width": 100,
+      "height": 100
+     },
+     "children": [
+      {
+       "type": "Icon",
+       "description": "创意图标",
+       "props": {
+        "x": 930,
+        "y": 2230,
+        "width": 40,
+        "height": 40,
+        "fill": "#CCCCCC"
+       },
+       "children": []
+      },
+      {
+       "type": "Text",
+       "description": "导航文本",
+       "props": {
+        "x": 930,
+        "y": 2280,
+        "width": 40,
+        "height": 20,
+        "fill": "#999999",
+        "fontSize": 14
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "type": "View",
+     "description": "底部Home指示条",
+     "props": {
+      "x": 300,
+      "y": 2360,
+      "width": 480,
+      "height": 5,
+      "fill": "#000000",
+      "borderRadius": 2.5
+     },
+     "children": []
+    }
+   ]
+  }
+ ]
+}
