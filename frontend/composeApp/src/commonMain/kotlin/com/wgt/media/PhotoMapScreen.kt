@@ -94,7 +94,7 @@ fun PhotoMapScreen(onBack: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text("📍", fontSize = 48.sp)
+                    YkLocationPinIcon(size = 48, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("暂无位置数据", style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -157,7 +157,7 @@ private fun GeoClusterCard(
                     .background(MaterialTheme.colorScheme.secondaryContainer),
                 contentAlignment = Alignment.Center
             ) {
-                Text("📍", fontSize = 24.sp)
+                YkLocationPinIcon(size = 24, tint = MaterialTheme.colorScheme.onSecondaryContainer)
             }
             Spacer(modifier = Modifier.size(12.dp))
             // 位置信息
