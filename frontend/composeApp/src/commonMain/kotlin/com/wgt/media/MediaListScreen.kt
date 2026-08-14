@@ -110,6 +110,24 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.painterResource
 
 /**
+ * 照片 Tab 数据源切换（对齐一刻相册「本机 | 云空间」）：
+ * CLOUD=云端时间线（默认），LOCAL=本机相册（GalleryFeature 枚举设备照片）。
+ */
+enum class PhotoSource { CLOUD, LOCAL }
+
+/** 按照片页数据源加载对应媒体（CLOUD=云端时间线 / LOCAL=本机相册）。 */
+private fun loadPhotoSource(viewModel: MediaViewModel, source: PhotoSource) {
+    if (source == PhotoSource.LOCAL) {
+        // 本机相册：枚举设备相册照片（MediaStore/PHAsset），currentSource=LOCAL 走本地加载器。
+        viewModel.loadMediaFromGallery(forceRefresh = false)
+    } else {
+        // 云空间：秒开云端时间线并增量续拉（既有默认行为，保持无回归）。
+        viewModel.loadCloudViewForTab(forceRefresh = false)
+        viewModel.loadCloudMediaList(forceRefresh = false)
+    }
+}
+
+/**
  * 媒体列表屏幕
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalResourceApi::class)
@@ -128,6 +146,10 @@ fun MediaListScreen(
     // PRD-v12 对齐一刻相册 4-Tab：0=照片 / 1=相册 / 2=查找 / 3=创意。
     // 默认进入"照片"Tab（index=0），加载云端时间线。此前默认网盘图片(index=3)。
     var selectedTab by remember { mutableStateOf(0) }
+
+    // PRD-v12 UI：照片页「本机 | 云空间」数据源切换（默认云端，保持现有默认行为）。
+    // CLOUD=云端时间线（秒开+增量），LOCAL=本机相册（GalleryFeature 枚举设备照片）。
+    var photoSource by remember { mutableStateOf(PhotoSource.CLOUD) }
 
     // 图片预览状态：保存当前预览在 mediaList 中的索引（可空）。
     // 用索引而非 MediaMetadata，便于预览内左右滑动切换上一张/下一张。
@@ -295,15 +317,15 @@ fun MediaListScreen(
     }
 
     // 加载本地照片图库 / 已上传图片 / 网盘图片（使用缓存）
-    // 5-Tab 重构后：0=本地图片 / 1=已上传 / 2=活动(RN,不加载媒体) / 3=网盘图片 / 4=我的
+    // 5-Tab 重构后：0=照片时间线 / 1=相册 / 2=查找 / 3=创意；照片页数据源由 photoSource 决定。
     LaunchedEffect(selectedTab) {
-        // 切换 Tab 时清空选中状态，避免上一 Tab 的选中项串到新 Tab（选中 ID 不匹配新列表）
+        // 切换 Tab 时清空选中态，避免上一 Tab 的选中项串到新 Tab（选中 ID 不匹配新列表）
         viewModel.deselectAll()
         // PRD-v12 4-Tab：1=相册 / 2=查找 / 3=创意 不加载主媒体时间线（各 Tab 自行加载
-        // 其聚合数据：人物/场景/足迹等）。仅"照片"(0) 加载云端时间线。
+        // 其聚合数据：人物/场景/足迹等）。仅"照片"(0) 按 photoSource 加载对应数据源。
         if (selectedTab != 0) return@LaunchedEffect
         // 切换 Tab 即切换数据源：清空搜索关键词与媒体类型筛选，避免上个 Tab 的过滤条件
-        // 串到新 Tab 造成“列表为空/对不上”的困惑。
+        // 串到新 Tab 造成"列表为空/对不上"的困惑。
         viewModel.clearSearchAndFilter()
         // 切换 Tab 自动退出"服务端收藏"筛选：收藏视图是跨 Tab 的临时筛选态，
         // 进入新 Tab 应回到该 Tab 的正常媒体源，避免收藏列表串到新 Tab。
@@ -311,23 +333,16 @@ fun MediaListScreen(
             viewModel.toggleFavoritesOnly()
         }
         searchExpanded = false
-        // "照片" Tab：展示云端时间线（网盘图片源 + 增量同步累积 cloudMedia）。
-        // 优先秒开云端视图并增量续拉，保证时间线完整、体验流畅。
-        viewModel.loadCloudViewForTab(forceRefresh = false)
-        viewModel.loadCloudMediaList(forceRefresh = false)
+        // 照片 Tab：按当前数据源加载（CLOUD=云端时间线 / LOCAL=本机相册）。
+        loadPhotoSource(viewModel, photoSource)
     }
 
-    // 关闭"服务端收藏"筛选时，按当前 Tab 重新加载正常媒体源，恢复筛选前列表。
-    // 打开时由 toggleFavoritesOnly 内部已处理（秒开 favoritesList + loadFavorites），
-    // 故此 effect 只对 false 转换生效。Tab 切换那条路径会先 toggle 关闭再 loadXxx，
-    // 此 effect 也会触发一次 loadXxx——幂等且都走缓存秒开,重复一次无副作用。
-    LaunchedEffect(viewModel.favoritesOnly) {
+    // 照片页「本机 | 云空间」切换触发对应数据源加载。
+    LaunchedEffect(viewModel.favoritesOnly, selectedTab, photoSource) {
         if (!viewModel.favoritesOnly) {
             // 仅照片 Tab(0) 有媒体源；相册/查找/创意由各自 Screen 聚合数据,不在此触发。
             if (selectedTab == 0) {
-                // 照片 Tab：秒开云端时间线并增量续拉（与原"已上传"增量同步一致）。
-                viewModel.loadCloudViewForTab(forceRefresh = false)
-                viewModel.loadCloudMediaList(forceRefresh = false)
+                loadPhotoSource(viewModel, photoSource)
             }
         }
     }
@@ -1044,6 +1059,36 @@ fun MediaListScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp)
                 )
+                // PRD-v12 UI：对齐一刻相册照片页「本机 | 云空间」数据源切换标签栏。
+                // 特写 spec 顶部标签（本机相册选中黑 / 云未选中灰）,点击切换本机相册或云端时间线。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "本机",
+                        fontSize = 16.sp,
+                        fontWeight = if (photoSource == PhotoSource.LOCAL) FontWeight.Bold else FontWeight.Normal,
+                        color = if (photoSource == PhotoSource.LOCAL) TextPrimary else TextSecondary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { if (photoSource != PhotoSource.LOCAL) photoSource = PhotoSource.LOCAL }
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                    Text("  |  ", fontSize = 16.sp, color = TextSecondary)
+                    Text(
+                        "云空间",
+                        fontSize = 16.sp,
+                        fontWeight = if (photoSource == PhotoSource.CLOUD) FontWeight.Bold else FontWeight.Normal,
+                        color = if (photoSource == PhotoSource.CLOUD) TextPrimary else TextSecondary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { if (photoSource != PhotoSource.CLOUD) photoSource = PhotoSource.CLOUD }
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
                 // 标题行：选择模式下显示已选数量 + 关闭按钮（小米相册风格）
                 // M3 Expressive：标题用 AppTypography.headlineSmall（24sp SemiBold），
                 // onSurface 主色；选择模式计数用 titleMedium。搜索图标用 onSurfaceVariant。
