@@ -5296,7 +5296,8 @@ private fun FeatureCardsRow(modifier: Modifier = Modifier) {
                 ) { Text("开启备份", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
             }
         }
-        // 右：清理卡(占1/3)
+        // 右：清理卡(占1/3) —— 还原 photo.spec「文件清理功能卡片」：
+        // 清理进度圆环(#E6F0FF) + 可清理文件大小数值 + 文件清理入口文字。
         Card(
             modifier = Modifier.weight(1f),
             shape = RoundedCornerShape(16.dp),
@@ -5304,10 +5305,35 @@ private fun FeatureCardsRow(modifier: Modifier = Modifier) {
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
             ) {
-                YkCleanIcon(size = 22)
-                Spacer(Modifier.height(4.dp))
+                // 清理进度圆环：浅蓝(0xFFE6F0FF)底盘 + 中心可清理大小数值。
+                Box(
+                    modifier = Modifier.size(64.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.foundation.Canvas(
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        val stroke = 6.dp.toPx()
+                        // 底环(浅蓝)
+                        drawArc(
+                            color = Color(0xFFE6F0FF),
+                            startAngle = 0f, sweepAngle = 360f,
+                            useCenter = false,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                        )
+                        // 进度环(主蓝 Primary,示意 60%) —— spec 是圆环骨架,用主蓝顶弧
+                        drawArc(
+                            color = Color(0xFF0052D9),
+                            startAngle = -90f, sweepAngle = 216f,
+                            useCenter = false,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                        )
+                    }
+                    Text("124", fontSize = 18.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(6.dp))
                 Text("文件清理", fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
             }
         }
