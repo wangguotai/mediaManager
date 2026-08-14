@@ -87,7 +87,7 @@ def ai_status(token):
     return ok
 
 
-def search(token, q, expect_top=None, min_score=0.3, label="检索"):
+def search(token, q, expect_top=None, min_score=0.3, label="检索", expect_caption=None):
     qs = urllib.parse.urlencode({"q": q, "limit": 3})
     code, d = http("GET", f"/api/ai/search?{qs}", token, timeout=60)
     res = (d or {}).get("results", []) if isinstance(d, dict) else []
@@ -100,8 +100,12 @@ def search(token, q, expect_top=None, min_score=0.3, label="检索"):
     score = top.get("score", 0)
     caption = top.get("caption", "")
     hit = (not expect_top) or (fname == expect_top)
-    check(label + f"—「{q}」top 命中 {expect_top or '任一'}", hit,
-          f"top={fname} score={score:.3f} caption={caption[:36]!r}")
+    cap_ok = True
+    if expect_caption:
+        hit = hit and any(kw in caption for kw in expect_caption)
+        cap_ok = hit
+    check(label + f"—「{q}」top 命中 {expect_top or '任一'}",
+          hit, f"top={fname} score={score:.3f} caption={caption[:36]!r}")
     return hit
 
 
@@ -167,7 +171,8 @@ def main():
     if only in (None, "status"):
         ai_status(tok)
     if only in (None, "hanfu"):
-        search(tok, "穿汉服的照片", expect_top="real_hanfu.jpg", label="英雄用例")
+        search(tok, "穿汉服的照片", expect_top="real_hanfu.jpg", label="英雄用例",
+               expect_caption=["汉服"])
     if only in (None, "beach"):
         search(tok, "海边", label="场景")
     if only in (None, "albums"):
