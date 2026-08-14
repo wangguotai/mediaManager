@@ -190,3 +190,4 @@ frontend/iosApp/iosApp/main.jsbundle
 frontend/iosApp/iosApp.xcworkspace/
 test-images/real/
 docs/baidu-uidumps/
+__pycache__/
