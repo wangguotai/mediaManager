@@ -82,8 +82,12 @@ def ai_status(token):
     persons = prog.get("Persons")
     ok = ok and clip and indexed is not None
     check("AI特征服务就绪(clip)", clip and ok, f"model={feat.get('model_ver')}")
-    check("索引完成", indexed is not None and annotated is not None,
-          f"indexed={indexed}/{prog.get('Total')} annotated={annotated} persons={persons}")
+    total = prog.get("Total")
+    complete = indexed is not None and (total is None or indexed >= total)
+    check("索引完成",
+          complete and (indexed is not None and annotated is not None),
+          f"indexed={indexed}/{total} annotated={annotated} persons={persons}"
+          + ("" if complete else " ⚠ 有待索引照片,导入后索引会在后台进行"))
     return ok
 
 
