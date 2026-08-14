@@ -613,7 +613,7 @@ private fun FootprintSummaryCard(geos: List<MediaService.GeoCluster>) {
     ) {
         Column(Modifier.padding(SPCardPad)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🗺", fontSize = 28.sp)
+                YkLocationPinIcon(size = 26, tint = TextPrimary)
                 Spacer(Modifier.width(12.dp))
                 Text("点亮地图", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 16.sp)
             }
@@ -655,7 +655,7 @@ private fun FootprintRow(g: MediaService.GeoCluster) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = SPCardPad, vertical = 10.dp)
         ) {
-            Text("📍", fontSize = 20.sp)
+            YkLocationPinIcon(size = 20)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("%.3f, %.3f".format(g.lat, g.lng),

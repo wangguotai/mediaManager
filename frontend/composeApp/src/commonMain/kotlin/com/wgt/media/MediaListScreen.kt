@@ -5180,7 +5180,7 @@ private fun HomeFootprintCard(geos: List<MediaService.GeoCluster>) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(16.dp)
         ) {
-            Text("🗺", fontSize = 26.sp)
+            YkLocationPinIcon(size = 24)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("点亮地图", fontWeight = FontWeight.Bold, color = TextPrimary)
@@ -5293,4 +5293,11 @@ fun YkBackupIcon(modifier: Modifier = Modifier, size: Int = 26) {
 fun YkCleanIcon(modifier: Modifier = Modifier, size: Int = 22) {
     Icon(painter = painterResource(Res.drawable.yk_ic_clean), contentDescription = "文件清理",
         tint = Color.Unspecified, modifier = modifier.size(size.dp))
+}
+
+/** 一刻相册真实"位置/足迹"图标(地图定位pin),同包封装替📍emoji。黑灰单色模板,可tint成目标色。 */
+@Composable
+fun YkLocationPinIcon(modifier: Modifier = Modifier, size: Int = 20, tint: Color = TextPrimary) {
+    Icon(painter = painterResource(Res.drawable.yk_ic_location), contentDescription = "位置",
+        tint = tint, modifier = modifier.size(size.dp))
 }
