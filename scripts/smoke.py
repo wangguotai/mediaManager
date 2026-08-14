@@ -31,6 +31,11 @@ PASS, FAIL = "PASS", "FAIL"
 results = []
 
 
+def set_base(url):
+    global BASE
+    BASE = url.rstrip("/")
+
+
 def http(method, path, token=None, body=None, timeout=30):
     url = BASE + path
     data = json.dumps(body).encode() if body is not None else None
@@ -148,7 +153,11 @@ def main():
     parser = argparse.ArgumentParser(description="PRD-v12 全链路冒烟")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--only", default=None, help="只跑指定用例: hanfu|beach|albums|persons")
+    parser.add_argument("--base", default=None, help="后端 base url，默认 http://127.0.0.1:8080")
     args = parser.parse_args()
+
+    if args.base:
+        set_base(args.base)
 
     only = args.only
     tok = login()
